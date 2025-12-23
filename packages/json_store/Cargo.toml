@@ -1,0 +1,21 @@
+[package]
+name = "structfs-json-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JSON-based store implementations for StructFS"
+
+[dependencies]
+structfs-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+erased-serde = { workspace = true }
+lazy_static = { workspace = true }
+regex = { workspace = true }
+log = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+structfs-store = { workspace = true, features = ["test-utils"] }

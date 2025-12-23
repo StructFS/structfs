@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/store",
+    "packages/json_store",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/AdjectiveNoun/structfs"
+
+[workspace.dependencies]
+# Workspace crates
+structfs-store = { path = "packages/store" }
+structfs-json-store = { path = "packages/json_store" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+erased-serde = "0.4"
+
+# Async
+async-trait = "0.1"
+
+# Error handling
+thiserror = "2.0"
+
+# Utilities
+lazy_static = "1.5"
+regex = "1.11"
+log = "0.4"
+walkdir = "2.5"
+
+# Testing
+tempfile = "3.14"
