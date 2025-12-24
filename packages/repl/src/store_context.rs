@@ -9,12 +9,15 @@ use std::path::PathBuf;
 use serde_json::Value as JsonValue;
 
 use structfs_http::blocking::HttpClientStore;
+use structfs_http::broker::HttpBrokerStore;
 use structfs_http::RemoteStore;
 use structfs_json_store::in_memory::SerdeJSONInMemoryStore;
 use structfs_json_store::JSONLocalStore;
 use structfs_store::{
     Error as StoreError, MountConfig, MountStore, Path, Reader, StoreBox, StoreFactory, Writer,
 };
+
+use crate::help_store::HelpStore;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ContextError {
@@ -59,12 +62,20 @@ impl StoreFactory for ReplStoreFactory {
                 })?;
                 Ok(StoreBox::new(store))
             }
+            MountConfig::HttpBroker => {
+                let store =
+                    HttpBrokerStore::with_default_timeout().map_err(|e| StoreError::Raw {
+                        message: format!("Failed to create HTTP broker: {}", e),
+                    })?;
+                Ok(StoreBox::new(store))
+            }
             MountConfig::Structfs { url } => {
                 let store = RemoteStore::new(url).map_err(|e| StoreError::Raw {
                     message: format!("Failed to connect to remote StructFS at '{}': {}", url, e),
                 })?;
                 Ok(StoreBox::new(store))
             }
+            MountConfig::Help => Ok(StoreBox::new(HelpStore::new())),
         }
     }
 }
@@ -77,8 +88,18 @@ pub struct StoreContext {
 
 impl StoreContext {
     pub fn new() -> Self {
+        let mut store = MountStore::new(ReplStoreFactory);
+
+        // Set up default mounts under /ctx
+        if let Err(e) = store.mount("ctx/http", MountConfig::HttpBroker) {
+            eprintln!("Warning: Failed to mount default HTTP broker: {}", e);
+        }
+        if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
+            eprintln!("Warning: Failed to mount help store: {}", e);
+        }
+
         Self {
-            store: MountStore::new(ReplStoreFactory),
+            store,
             current_path: Path::parse("").unwrap(),
         }
     }

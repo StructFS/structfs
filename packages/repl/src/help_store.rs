@@ -1,0 +1,308 @@
+//! Help store that provides documentation via read operations.
+//!
+//! Mount at `/ctx/help` to provide in-REPL documentation:
+//! - `read /ctx/help` - Overview and topic list
+//! - `read /ctx/help/commands` - Available commands
+//! - `read /ctx/help/mounts` - Mount system documentation
+//! - `read /ctx/help/http` - HTTP broker usage
+
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::{json, Value as JsonValue};
+
+use structfs_store::{Error as StoreError, Path, Reader, Writer};
+
+/// A store that returns help documentation on read.
+pub struct HelpStore;
+
+impl HelpStore {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn get_help(&self, path: &Path) -> JsonValue {
+        if path.is_empty() {
+            return self.root_help();
+        }
+
+        // Check for system paths (interpret from root)
+        let full_path = path.components.join("/");
+        match full_path.as_str() {
+            // Context mounts
+            "ctx" => self.ctx_help(),
+            "ctx/http" => self.http_help(),
+            "ctx/help" => self.root_help(),
+            // Mount system
+            "_mounts" => self.mounts_help(),
+            // Topic-based help (single component)
+            _ => match path.components[0].as_str() {
+                "commands" => self.commands_help(),
+                "mounts" => self.mounts_help(),
+                "http" => self.http_help(),
+                "paths" => self.paths_help(),
+                "examples" => self.examples_help(),
+                "stores" => self.stores_help(),
+                topic => json!({
+                    "error": format!("Unknown help topic: '{}'", topic),
+                    "hint": "Use a topic name or a system path like 'ctx/http'",
+                    "available_topics": ["commands", "mounts", "http", "paths", "examples", "stores"],
+                    "system_paths": ["ctx", "ctx/http", "ctx/help", "_mounts"]
+                }),
+            },
+        }
+    }
+
+    fn ctx_help(&self) -> JsonValue {
+        json!({
+            "title": "Context Directory (/ctx)",
+            "description": "The /ctx directory contains built-in system stores.",
+            "mounts": {
+                "/ctx/http": "HTTP broker for making requests to any URL",
+                "/ctx/help": "This help system"
+            },
+            "usage": [
+                "read /ctx/help          - Get help",
+                "read /ctx/help/http     - Help on HTTP broker",
+                "write /ctx/http <req>   - Queue an HTTP request"
+            ]
+        })
+    }
+
+    fn root_help(&self) -> JsonValue {
+        json!({
+            "title": "StructFS REPL Help",
+            "description": "StructFS provides a uniform interface for accessing data through read/write operations on paths.",
+            "topics": {
+                "commands": "Available REPL commands",
+                "mounts": "Mounting and managing stores",
+                "http": "Making HTTP requests",
+                "paths": "Path syntax and navigation",
+                "examples": "Usage examples",
+                "stores": "Available store types"
+            },
+            "quick_start": [
+                "read /_mounts          - List current mounts",
+                "write /_mounts/data {\"type\": \"memory\"}  - Create a memory store at /data",
+                "write /data/hello {\"message\": \"world\"}  - Write data",
+                "read /data/hello       - Read data back"
+            ]
+        })
+    }
+
+    fn commands_help(&self) -> JsonValue {
+        json!({
+            "title": "REPL Commands",
+            "commands": {
+                "read <path>": "Read data from a path (aliases: get, r)",
+                "write <path> <json>": "Write JSON data to a path (aliases: set, w)",
+                "cd <path>": "Change current directory",
+                "pwd": "Print current directory",
+                "mounts": "List all current mounts (shortcut for read /_mounts)",
+                "help": "Show help message",
+                "exit": "Exit the REPL (aliases: quit)"
+            },
+            "examples": [
+                "read /ctx/help",
+                "write /_mounts/test {\"type\": \"memory\"}",
+                "cd /test",
+                "write foo {\"bar\": 123}",
+                "read foo"
+            ]
+        })
+    }
+
+    fn mounts_help(&self) -> JsonValue {
+        json!({
+            "title": "Mount System",
+            "description": "Mounts attach stores to paths in the filesystem tree. Manage mounts through /_mounts.",
+            "operations": {
+                "read /_mounts": "List all mounts",
+                "read /_mounts/<name>": "Get config for a specific mount",
+                "write /_mounts/<name> <config>": "Create or update a mount",
+                "write /_mounts/<name> null": "Unmount a store"
+            },
+            "mount_configs": {
+                "memory": "{\"type\": \"memory\"}",
+                "local": "{\"type\": \"local\", \"path\": \"/path/to/dir\"}",
+                "http": "{\"type\": \"http\", \"url\": \"https://api.example.com\"}",
+                "httpbroker": "{\"type\": \"httpbroker\"}",
+                "structfs": "{\"type\": \"structfs\", \"url\": \"https://structfs.example.com\"}"
+            },
+            "examples": [
+                "write /_mounts/data {\"type\": \"memory\"}",
+                "write /_mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}",
+                "write /_mounts/data null"
+            ]
+        })
+    }
+
+    fn http_help(&self) -> JsonValue {
+        json!({
+            "title": "HTTP Broker",
+            "description": "The HTTP broker at /ctx/http allows making HTTP requests to any URL.",
+            "usage": {
+                "step1": "Write an HttpRequest to /ctx/http",
+                "step2": "Get back a handle path like /ctx/http/outstanding/0",
+                "step3": "Read from the handle to execute the request and get the response"
+            },
+            "request_format": {
+                "method": "GET | POST | PUT | DELETE | PATCH | HEAD | OPTIONS",
+                "path": "Full URL (e.g., https://api.example.com/users)",
+                "headers": "Optional object of header name -> value",
+                "query": "Optional object of query param name -> value",
+                "body": "Optional JSON body for POST/PUT/PATCH"
+            },
+            "examples": [
+                {
+                    "description": "Simple GET request",
+                    "write": "write /ctx/http {\"method\": \"GET\", \"path\": \"https://httpbin.org/get\"}",
+                    "read": "read /ctx/http/outstanding/0"
+                },
+                {
+                    "description": "POST with body and headers",
+                    "write": "write /ctx/http {\"method\": \"POST\", \"path\": \"https://httpbin.org/post\", \"headers\": {\"Authorization\": \"Bearer token\"}, \"body\": {\"name\": \"test\"}}"
+                }
+            ],
+            "response_format": {
+                "status": "HTTP status code (e.g., 200)",
+                "status_text": "Status text (e.g., \"OK\")",
+                "headers": "Response headers",
+                "body": "Response body as JSON (or null if not JSON)",
+                "body_text": "Raw response body as string"
+            }
+        })
+    }
+
+    fn paths_help(&self) -> JsonValue {
+        json!({
+            "title": "Path Syntax",
+            "description": "Paths identify locations in the store tree.",
+            "syntax": {
+                "absolute": "/foo/bar - starts from root",
+                "relative": "foo/bar - relative to current directory",
+                "parent": "../foo - go up one level",
+                "root": "/ - the root path"
+            },
+            "special_paths": {
+                "/_mounts": "Mount management",
+                "/ctx/http": "HTTP broker (default mount)",
+                "/ctx/help": "This help system"
+            },
+            "notes": [
+                "Trailing slashes are normalized: /foo/ equals /foo",
+                "Double slashes are normalized: /foo//bar equals /foo/bar",
+                "Path components must be valid identifiers (letters, numbers, underscores)"
+            ]
+        })
+    }
+
+    fn examples_help(&self) -> JsonValue {
+        json!({
+            "title": "Usage Examples",
+            "examples": [
+                {
+                    "title": "Create and use a memory store",
+                    "steps": [
+                        "write /_mounts/data {\"type\": \"memory\"}",
+                        "write /data/users/1 {\"name\": \"Alice\", \"email\": \"alice@example.com\"}",
+                        "read /data/users/1",
+                        "read /data/users"
+                    ]
+                },
+                {
+                    "title": "Make an HTTP request",
+                    "steps": [
+                        "write /ctx/http {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}",
+                        "read /ctx/http/outstanding/0"
+                    ]
+                },
+                {
+                    "title": "Mount a local directory",
+                    "steps": [
+                        "write /_mounts/local {\"type\": \"local\", \"path\": \"/tmp/structfs-data\"}",
+                        "write /local/config {\"setting\": \"value\"}",
+                        "read /local/config"
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn stores_help(&self) -> JsonValue {
+        json!({
+            "title": "Store Types",
+            "stores": {
+                "memory": {
+                    "description": "In-memory JSON store, data is lost on exit",
+                    "config": "{\"type\": \"memory\"}",
+                    "use_case": "Temporary data, testing"
+                },
+                "local": {
+                    "description": "JSON files stored on local filesystem",
+                    "config": "{\"type\": \"local\", \"path\": \"/path/to/dir\"}",
+                    "use_case": "Persistent local storage"
+                },
+                "http": {
+                    "description": "HTTP client with a base URL",
+                    "config": "{\"type\": \"http\", \"url\": \"https://api.example.com\"}",
+                    "use_case": "REST API with fixed base URL"
+                },
+                "httpbroker": {
+                    "description": "HTTP broker for requests to any URL",
+                    "config": "{\"type\": \"httpbroker\"}",
+                    "use_case": "Ad-hoc HTTP requests to any endpoint"
+                },
+                "structfs": {
+                    "description": "Remote StructFS server",
+                    "config": "{\"type\": \"structfs\", \"url\": \"https://structfs.example.com\"}",
+                    "use_case": "Connecting to another StructFS instance"
+                }
+            }
+        })
+    }
+}
+
+impl Default for HelpStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reader for HelpStore {
+    fn read_to_deserializer<'de, 'this>(
+        &'this mut self,
+        from: &Path,
+    ) -> Result<Option<Box<dyn erased_serde::Deserializer<'de>>>, StoreError>
+    where
+        'this: 'de,
+    {
+        let help = self.get_help(from);
+        Ok(Some(Box::new(<dyn erased_serde::Deserializer>::erase(
+            help,
+        ))))
+    }
+
+    fn read_owned<RecordType: DeserializeOwned>(
+        &mut self,
+        from: &Path,
+    ) -> Result<Option<RecordType>, StoreError> {
+        let help = self.get_help(from);
+        let record =
+            serde_json::from_value(help).map_err(|e| StoreError::RecordDeserialization {
+                message: e.to_string(),
+            })?;
+        Ok(Some(record))
+    }
+}
+
+impl Writer for HelpStore {
+    fn write<RecordType: Serialize>(
+        &mut self,
+        _destination: &Path,
+        _data: RecordType,
+    ) -> Result<Path, StoreError> {
+        Err(StoreError::Raw {
+            message: "Help store is read-only".to_string(),
+        })
+    }
+}

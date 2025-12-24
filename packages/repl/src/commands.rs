@@ -188,11 +188,31 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
     };
 
     match ctx.write(&path, &value) {
-        Ok(result_path) => CommandResult::Ok(Some(format!(
-            "{} {}",
-            Color::Green.paint("Written to:"),
-            format_path(&result_path)
-        ))),
+        Ok(result_path) => {
+            // If the store returned a relative path, make it absolute by prepending
+            // the destination path (stores don't know where they're mounted)
+            let full_path = if result_path.has_prefix(&path) {
+                result_path.clone()
+            } else {
+                path.join(&result_path)
+            };
+
+            // Check if the result path differs from the write destination
+            // (indicates a broker-style store that returns a handle)
+            let output = if full_path != path && !result_path.is_empty() {
+                format!(
+                    "{}\n{} {}\n{} {}",
+                    Color::Green.paint("ok"),
+                    Color::Cyan.paint("result path:"),
+                    format_path(&full_path),
+                    Color::DarkGray.paint("(read from this path to get the result)"),
+                    ""
+                )
+            } else {
+                format!("{}", Color::Green.paint("ok"))
+            };
+            CommandResult::Ok(Some(output))
+        }
         Err(e) => CommandResult::Error(format!("Write error: {}", e)),
     }
 }

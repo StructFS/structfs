@@ -30,6 +30,7 @@
 
 pub mod commands;
 pub mod completer;
+pub mod help_store;
 pub mod highlighter;
 pub mod repl;
 pub mod store_context;

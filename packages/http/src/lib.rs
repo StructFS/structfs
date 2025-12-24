@@ -88,6 +88,9 @@ pub mod types;
 pub mod blocking;
 
 #[cfg(feature = "blocking")]
+pub mod broker;
+
+#[cfg(feature = "blocking")]
 pub mod remote;
 
 #[cfg(feature = "async")]
@@ -100,6 +103,9 @@ pub use types::{HttpRequest, HttpResponse, Method};
 
 #[cfg(feature = "blocking")]
 pub use blocking::HttpClientStore;
+
+#[cfg(feature = "blocking")]
+pub use broker::HttpBrokerStore;
 
 #[cfg(feature = "blocking")]
 pub use remote::RemoteStore;
