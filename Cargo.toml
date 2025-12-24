@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "packages/store",
     "packages/json_store",
+    "packages/http",
 ]
 
 [workspace.package]
@@ -15,6 +16,7 @@ repository = "https://github.com/AdjectiveNoun/structfs"
 # Workspace crates
 structfs-store = { path = "packages/store" }
 structfs-json-store = { path = "packages/json_store" }
+structfs-http = { path = "packages/http" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -23,6 +25,12 @@ erased-serde = "0.4"
 
 # Async
 async-trait = "0.1"
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+http = "1.2"
+url = "2.5"
 
 # Error handling
 thiserror = "2.0"
@@ -35,3 +43,4 @@ walkdir = "2.5"
 
 # Testing
 tempfile = "3.14"
+wiremock = "0.6"
