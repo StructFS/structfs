@@ -19,6 +19,7 @@ use structfs_store::{
 };
 
 use crate::help_store::HelpStore;
+use crate::register_store::RegisterStore;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ContextError {
@@ -91,6 +92,7 @@ impl StoreFactory for ReplStoreFactory {
 /// Manages the REPL's root store and current path
 pub struct StoreContext {
     store: MountStore<ReplStoreFactory>,
+    registers: RegisterStore,
     current_path: Path,
 }
 
@@ -113,8 +115,92 @@ impl StoreContext {
 
         Self {
             store,
+            registers: RegisterStore::new(),
             current_path: Path::parse("").unwrap(),
         }
+    }
+
+    /// Check if a path string refers to a register (starts with @)
+    pub fn is_register_path(path_str: &str) -> bool {
+        path_str.starts_with('@')
+    }
+
+    /// Parse a register path into (register_name, sub_path)
+    /// For example, "@foo/bar/baz" -> ("foo", Some(Path with ["bar", "baz"]))
+    pub fn parse_register_path(path_str: &str) -> Option<(String, Path)> {
+        if !path_str.starts_with('@') {
+            return None;
+        }
+
+        let without_at = &path_str[1..];
+        if without_at.is_empty() {
+            // Just "@" - return empty register name (list all registers)
+            return Some(("".to_string(), Path::parse("").unwrap()));
+        }
+
+        // Split by first '/'
+        if let Some(slash_pos) = without_at.find('/') {
+            let name = &without_at[..slash_pos];
+            let sub_path_str = &without_at[slash_pos + 1..];
+            let sub_path = Path::parse(sub_path_str).ok()?;
+            Some((name.to_string(), sub_path))
+        } else {
+            Some((without_at.to_string(), Path::parse("").unwrap()))
+        }
+    }
+
+    /// Read from a register path
+    pub fn read_register(&mut self, path_str: &str) -> Result<Option<JsonValue>, ContextError> {
+        let (name, sub_path) = Self::parse_register_path(path_str)
+            .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
+
+        // Build the full path for the register store (register name + sub path)
+        let full_path = if name.is_empty() {
+            sub_path
+        } else {
+            let name_path = Path::parse(&name)
+                .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
+            name_path.join(&sub_path)
+        };
+
+        Ok(self.registers.read_owned(&full_path)?)
+    }
+
+    /// Write to a register path
+    pub fn write_register(
+        &mut self,
+        path_str: &str,
+        value: &JsonValue,
+    ) -> Result<Path, ContextError> {
+        let (name, sub_path) = Self::parse_register_path(path_str)
+            .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
+
+        if name.is_empty() {
+            return Err(ContextError::InvalidPath(
+                "Cannot write to register root. Use @name to specify a register.".to_string(),
+            ));
+        }
+
+        // Build the full path for the register store
+        let name_path = Path::parse(&name)
+            .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
+        let full_path = name_path.join(&sub_path);
+        Ok(self.registers.write(&full_path, value)?)
+    }
+
+    /// Store a value directly in a register by name
+    pub fn set_register(&mut self, name: &str, value: JsonValue) {
+        self.registers.set(name, value);
+    }
+
+    /// Get a value from a register by name
+    pub fn get_register(&self, name: &str) -> Option<&JsonValue> {
+        self.registers.get(name)
+    }
+
+    /// List all register names
+    pub fn list_registers(&self) -> Vec<&String> {
+        self.registers.list()
     }
 
     /// Get the current path

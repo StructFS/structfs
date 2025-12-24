@@ -1,9 +1,9 @@
 //! A store that manages mounts through read/write operations.
 //!
 //! This store exposes mount management through the StructFS interface itself:
-//! - Read `/_mounts` to list all mounts
-//! - Write to `/_mounts/<name>` to create a mount at `/<name>`
-//! - Write `null` to `/_mounts/<name>` to unmount
+//! - Read `/ctx/mounts` to list all mounts
+//! - Write to `/ctx/mounts/<name>` to create a mount at `/<name>`
+//! - Write `null` to `/ctx/mounts/<name>` to unmount
 //!
 //! Mount configurations are JSON objects like:
 //! ```json
@@ -59,7 +59,7 @@ pub struct MountStore<F: StoreFactory> {
     factory: F,
 }
 
-const MOUNTS_PREFIX: &str = "_mounts";
+const MOUNTS_PREFIX: [&str; 2] = ["ctx", "mounts"];
 
 impl<F: StoreFactory> MountStore<F> {
     pub fn new(factory: F) -> Self {
@@ -126,12 +126,17 @@ impl<F: StoreFactory> MountStore<F> {
     }
 
     fn is_mounts_path(path: &Path) -> bool {
-        !path.is_empty() && path.components.first().map(|s| s.as_str()) == Some(MOUNTS_PREFIX)
+        path.components.len() >= 2
+            && path.components[0] == MOUNTS_PREFIX[0]
+            && path.components[1] == MOUNTS_PREFIX[1]
     }
 
     fn get_mount_name(path: &Path) -> Option<String> {
-        if path.components.len() >= 2 && path.components[0] == MOUNTS_PREFIX {
-            Some(path.components[1..].join("/"))
+        if path.components.len() >= 3
+            && path.components[0] == MOUNTS_PREFIX[0]
+            && path.components[1] == MOUNTS_PREFIX[1]
+        {
+            Some(path.components[2..].join("/"))
         } else {
             None
         }
@@ -147,9 +152,9 @@ impl<F: StoreFactory> Reader for MountStore<F> {
         'this: 'de,
     {
         if Self::is_mounts_path(from) {
-            // Handle reads to /_mounts/*
-            if from.components.len() == 1 {
-                // Reading /_mounts - return list of mounts
+            // Handle reads to /ctx/mounts/*
+            if from.components.len() == 2 {
+                // Reading /ctx/mounts - return list of mounts
                 let mounts = self.list_mounts();
                 let json =
                     serde_json::to_value(&mounts).map_err(|e| StoreError::RecordSerialization {
@@ -159,7 +164,7 @@ impl<F: StoreFactory> Reader for MountStore<F> {
                     json,
                 ))));
             } else if let Some(name) = Self::get_mount_name(from) {
-                // Reading /_mounts/<name> - return mount config
+                // Reading /ctx/mounts/<name> - return mount config
                 if let Some(config) = self.mounts.get(&name) {
                     let json = serde_json::to_value(config).map_err(|e| {
                         StoreError::RecordSerialization {
@@ -184,9 +189,9 @@ impl<F: StoreFactory> Reader for MountStore<F> {
         from: &Path,
     ) -> Result<Option<RecordType>, StoreError> {
         if Self::is_mounts_path(from) {
-            // Handle reads to /_mounts/*
-            if from.components.len() == 1 {
-                // Reading /_mounts - return list of mounts
+            // Handle reads to /ctx/mounts/*
+            if from.components.len() == 2 {
+                // Reading /ctx/mounts - return list of mounts
                 let mounts = self.list_mounts();
                 let json =
                     serde_json::to_value(&mounts).map_err(|e| StoreError::RecordSerialization {
@@ -199,7 +204,7 @@ impl<F: StoreFactory> Reader for MountStore<F> {
                 })?;
                 return Ok(Some(record));
             } else if let Some(name) = Self::get_mount_name(from) {
-                // Reading /_mounts/<name> - return mount config
+                // Reading /ctx/mounts/<name> - return mount config
                 if let Some(config) = self.mounts.get(&name) {
                     let json = serde_json::to_value(config).map_err(|e| {
                         StoreError::RecordSerialization {
@@ -230,7 +235,7 @@ impl<F: StoreFactory> Writer for MountStore<F> {
         data: RecordType,
     ) -> Result<Path, StoreError> {
         if Self::is_mounts_path(destination) {
-            // Handle writes to /_mounts/*
+            // Handle writes to /ctx/mounts/*
             if let Some(name) = Self::get_mount_name(destination) {
                 // Convert data to JSON Value to check for null
                 let json =
@@ -253,7 +258,7 @@ impl<F: StoreFactory> Writer for MountStore<F> {
                 return Ok(destination.clone());
             } else {
                 return Err(StoreError::Raw {
-                    message: "Cannot write directly to /_mounts".to_string(),
+                    message: "Cannot write directly to /ctx/mounts".to_string(),
                 });
             }
         }

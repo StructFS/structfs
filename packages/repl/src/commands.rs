@@ -8,13 +8,13 @@
 //! - `help` - Show help
 //! - `exit` - Exit the REPL
 //!
-//! Mount operations are done via writes to `/_mounts/*`:
-//! - `write /_mounts/data {"type": "memory"}` - Mount memory store at /data
-//! - `write /_mounts/files {"type": "local", "path": "/path"}` - Mount local store
-//! - `write /_mounts/api {"type": "http", "url": "https://..."}` - Mount HTTP client
-//! - `write /_mounts/remote {"type": "structfs", "url": "https://..."}` - Mount remote StructFS
-//! - `read /_mounts` - List all mounts
-//! - `write /_mounts/data null` - Unmount
+//! Mount operations are done via writes to `/ctx/mounts/*`:
+//! - `write /ctx/mounts/data {"type": "memory"}` - Mount memory store at /data
+//! - `write /ctx/mounts/files {"type": "local", "path": "/path"}` - Mount local store
+//! - `write /ctx/mounts/api {"type": "http", "url": "https://..."}` - Mount HTTP client
+//! - `write /ctx/mounts/remote {"type": "structfs", "url": "https://..."}` - Mount remote StructFS
+//! - `read /ctx/mounts` - List all mounts
+//! - `write /ctx/mounts/data null` - Unmount
 
 use nu_ansi_term::{Color, Style};
 use serde_json::Value as JsonValue;
@@ -43,6 +43,122 @@ pub fn execute(input: &str, ctx: &mut StoreContext) -> CommandResult {
         return CommandResult::Ok(None);
     }
 
+    // Check for register output capture: @name command ...
+    if let Some((register_name, rest)) = parse_register_capture(input) {
+        return execute_with_capture(&register_name, rest, ctx);
+    }
+
+    execute_command(input, ctx)
+}
+
+/// Parse a register capture prefix: @name followed by a command
+/// Returns (register_name, remaining_input) if found
+fn parse_register_capture(input: &str) -> Option<(String, &str)> {
+    if !input.starts_with('@') {
+        return None;
+    }
+
+    // Find whitespace after the register name
+    let rest = &input[1..];
+    let space_pos = rest.find(char::is_whitespace)?;
+
+    let register_name = &rest[..space_pos];
+    if register_name.is_empty() || register_name.contains('/') {
+        // Empty name or contains path separator - not a capture, might be a path
+        return None;
+    }
+
+    let remaining = rest[space_pos..].trim_start();
+    if remaining.is_empty() {
+        return None;
+    }
+
+    // Check if remaining starts with a valid command
+    let first_word = remaining.split_whitespace().next()?;
+    let is_command = matches!(
+        first_word.to_lowercase().as_str(),
+        "read" | "get" | "r" | "write" | "set" | "w" | "cd" | "pwd" | "mounts" | "ls"
+    );
+
+    if is_command {
+        Some((register_name.to_string(), remaining))
+    } else {
+        None
+    }
+}
+
+/// Execute a command and capture its JSON output to a register
+fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext) -> CommandResult {
+    // Execute the inner command
+    let result = execute_command(input, ctx);
+
+    match result {
+        CommandResult::Ok(Some(ref output)) => {
+            // Try to parse the output as JSON (strip ANSI codes first)
+            let plain_output = strip_ansi_codes(output);
+
+            // Try to parse as JSON
+            match serde_json::from_str::<JsonValue>(&plain_output) {
+                Ok(value) => {
+                    ctx.set_register(register_name, value);
+                    CommandResult::Ok(Some(format!(
+                        "{}\n{} {}",
+                        output,
+                        Color::Magenta.paint("→"),
+                        Color::Magenta.paint(format!("@{}", register_name))
+                    )))
+                }
+                Err(_) => {
+                    // Store as string if not valid JSON
+                    ctx.set_register(register_name, JsonValue::String(plain_output));
+                    CommandResult::Ok(Some(format!(
+                        "{}\n{} {} {}",
+                        output,
+                        Color::Magenta.paint("→"),
+                        Color::Magenta.paint(format!("@{}", register_name)),
+                        Color::DarkGray.paint("(stored as string)")
+                    )))
+                }
+            }
+        }
+        CommandResult::Ok(None) => {
+            // No output to capture
+            ctx.set_register(register_name, JsonValue::Null);
+            CommandResult::Ok(Some(format!(
+                "{} {} {}",
+                Color::Magenta.paint("→"),
+                Color::Magenta.paint(format!("@{}", register_name)),
+                Color::DarkGray.paint("(null)")
+            )))
+        }
+        other => other,
+    }
+}
+
+/// Strip ANSI escape codes from a string
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip until we find 'm' (end of ANSI sequence)
+            while let Some(&next) = chars.peek() {
+                chars.next();
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Execute a command without register capture
+fn execute_command(input: &str, ctx: &mut StoreContext) -> CommandResult {
     // Parse command and arguments
     let mut parts = input.splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("");
@@ -56,6 +172,7 @@ pub fn execute(input: &str, ctx: &mut StoreContext) -> CommandResult {
         "cd" => cmd_cd(args, ctx),
         "pwd" => cmd_pwd(ctx),
         "mounts" | "ls" => cmd_mounts(ctx),
+        "registers" | "regs" => cmd_registers(ctx),
         _ => CommandResult::Error(format!(
             "Unknown command: '{}'. Type 'help' for available commands.",
             command
@@ -78,17 +195,18 @@ pub fn format_help() -> String {
     let commands = [
         (
             "read",
-            "[path]",
-            "Read and display JSON at path (alias: get, r)",
+            "[path|@reg]",
+            "Read JSON from path or register (alias: get, r)",
         ),
         (
             "write",
-            "<path> <json>",
-            "Write JSON to path (alias: set, w)",
+            "<path> <json|@reg>",
+            "Write JSON or register to path (alias: set, w)",
         ),
         ("cd", "<path>", "Change current path"),
         ("pwd", "", "Print current path"),
         ("mounts", "", "List current mounts (alias: ls)"),
+        ("registers", "", "List all registers (alias: regs)"),
         ("", "", ""),
         ("help", "", "Show this help message"),
         ("exit", "", "Exit the REPL (alias: quit, q)"),
@@ -113,35 +231,59 @@ pub fn format_help() -> String {
     ));
     help.push_str(&format!(
         "  Mount a memory store:     {}\n",
-        arg_style.paint("write /_mounts/data {\"type\": \"memory\"}")
+        arg_style.paint("write /ctx/mounts/data {\"type\": \"memory\"}")
     ));
     help.push_str(&format!(
         "  Mount a local directory:  {}\n",
-        arg_style.paint("write /_mounts/files {\"type\": \"local\", \"path\": \"/path/to/dir\"}")
+        arg_style
+            .paint("write /ctx/mounts/files {\"type\": \"local\", \"path\": \"/path/to/dir\"}")
     ));
     help.push_str(&format!(
         "  Mount an HTTP client:     {}\n",
-        arg_style
-            .paint("write /_mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}")
+        arg_style.paint(
+            "write /ctx/mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}"
+        )
     ));
     help.push_str(&format!(
         "  Mount a remote StructFS:  {}\n",
-        arg_style.paint("write /_mounts/remote {\"type\": \"structfs\", \"url\": \"https://structfs.example.com\"}")
+        arg_style.paint("write /ctx/mounts/remote {\"type\": \"structfs\", \"url\": \"https://structfs.example.com\"}")
     ));
     help.push_str(&format!(
         "  List mounts:              {}\n",
-        arg_style.paint("read /_mounts")
+        arg_style.paint("read /ctx/mounts")
     ));
     help.push_str(&format!(
         "  Unmount:                  {}\n",
-        arg_style.paint("write /_mounts/data null")
+        arg_style.paint("write /ctx/mounts/data null")
+    ));
+
+    help.push_str(&format!("\n{}\n", Style::new().bold().paint("Registers")));
+    help.push_str(&format!(
+        "  Store output:             {}\n",
+        arg_style.paint("@result read /some/path")
+    ));
+    help.push_str(&format!(
+        "  Read register:            {}\n",
+        arg_style.paint("read @result")
+    ));
+    help.push_str(&format!(
+        "  Read sub-path:            {}\n",
+        arg_style.paint("read @result/nested/field")
+    ));
+    help.push_str(&format!(
+        "  Write from register:      {}\n",
+        arg_style.paint("write /dest @source")
+    ));
+    help.push_str(&format!(
+        "  Write to register:        {}\n",
+        arg_style.paint("write @temp {\"key\": \"value\"}")
     ));
 
     help.push_str(&format!(
         "\n{}",
         Style::new()
             .italic()
-            .paint("Paths: Use '/' for root, '..' to go up, or relative paths")
+            .paint("Paths: Use '/' for root, '..' to go up, '@name' for registers")
     ));
 
     help
@@ -149,6 +291,20 @@ pub fn format_help() -> String {
 
 fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
     let path_str = if args.is_empty() { "." } else { args };
+
+    // Check if this is a register path
+    if StoreContext::is_register_path(path_str) {
+        match ctx.read_register(path_str) {
+            Ok(Some(value)) => return CommandResult::Ok(Some(format_json(&value))),
+            Ok(None) => {
+                return CommandResult::Ok(Some(format!(
+                    "{}",
+                    Color::Yellow.paint("null (register does not exist)")
+                )))
+            }
+            Err(e) => return CommandResult::Error(format!("Read error: {}", e)),
+        }
+    }
 
     let path = match ctx.resolve_path(path_str) {
         Ok(p) => p,
@@ -166,25 +322,52 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
 }
 
 fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
-    // Parse path and JSON from args
-    let (path_str, json_str) = match parse_write_args(args) {
+    // Parse path and value from args
+    let (path_str, value_str) = match parse_write_args(args) {
         Some(parts) => parts,
         None => {
             return CommandResult::Error(
-                "Usage: write <path> <json>\nExample: write /users/1 {\"name\": \"Alice\"}"
+                "Usage: write <path> <json|@register>\nExample: write /users/1 {\"name\": \"Alice\"}\n         write /dest @source"
                     .to_string(),
             )
         }
     };
 
+    // Get the value - either from JSON or from a register
+    let value: JsonValue = if let Some(reg_name) = value_str.strip_prefix('@') {
+        // Read from register
+        match ctx.read_register(&value_str) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return CommandResult::Error(format!("Register '{}' does not exist", reg_name))
+            }
+            Err(e) => return CommandResult::Error(format!("Error reading register: {}", e)),
+        }
+    } else {
+        // Parse as JSON
+        match serde_json::from_str(&value_str) {
+            Ok(v) => v,
+            Err(e) => return CommandResult::Error(format!("Invalid JSON: {}", e)),
+        }
+    };
+
+    // Check if destination is a register
+    if StoreContext::is_register_path(&path_str) {
+        match ctx.write_register(&path_str, &value) {
+            Ok(_) => {
+                return CommandResult::Ok(Some(format!(
+                    "{} {}",
+                    Color::Green.paint("ok"),
+                    Color::Magenta.paint(&path_str)
+                )))
+            }
+            Err(e) => return CommandResult::Error(format!("Write error: {}", e)),
+        }
+    }
+
     let path = match ctx.resolve_path(&path_str) {
         Ok(p) => p,
         Err(e) => return CommandResult::Error(format!("Invalid path: {}", e)),
-    };
-
-    let value: JsonValue = match serde_json::from_str(&json_str) {
-        Ok(v) => v,
-        Err(e) => return CommandResult::Error(format!("Invalid JSON: {}", e)),
     };
 
     match ctx.write(&path, &value) {
@@ -239,7 +422,7 @@ fn cmd_mounts(ctx: &mut StoreContext) -> CommandResult {
         CommandResult::Ok(Some(format!(
             "{}",
             Color::Yellow.paint(
-                "No mounts. Use 'write /_mounts/<name> {\"type\": \"memory\"}' to mount a store."
+                "No mounts. Use 'write /ctx/mounts/<name> {\"type\": \"memory\"}' to mount a store."
             )
         )))
     } else {
@@ -255,63 +438,86 @@ fn cmd_mounts(ctx: &mut StoreContext) -> CommandResult {
     }
 }
 
-/// Parse write command arguments into (path, json)
+fn cmd_registers(ctx: &mut StoreContext) -> CommandResult {
+    let registers = ctx.list_registers();
+    if registers.is_empty() {
+        CommandResult::Ok(Some(format!(
+            "{}",
+            Color::Yellow
+                .paint("No registers. Use '@name read <path>' to store output in a register.")
+        )))
+    } else {
+        let mut output = String::new();
+        for name in registers {
+            output.push_str(&format!(
+                "  {}\n",
+                Color::Magenta.paint(format!("@{}", name))
+            ));
+        }
+        CommandResult::Ok(Some(output.trim_end().to_string()))
+    }
+}
+
+/// Parse write command arguments into (path, value)
+/// Value can be JSON or a register reference (@name or @name/path)
 fn parse_write_args(args: &str) -> Option<(String, String)> {
     let args = args.trim();
     if args.is_empty() {
         return None;
     }
 
-    // First, find whitespace that separates path from JSON
-    // The path cannot contain '{', '[', or '"', so look for those as definite JSON starts
-    // For 'true', 'false', 'null', and numbers, we need to find them after whitespace
-
-    // Strategy: Look for the first occurrence of:
+    // Strategy: Look for the value start, which can be:
     // - '{' or '[' or '"' (definite JSON)
-    // - or whitespace followed by a digit, 't', 'f', 'n' (possible JSON literal)
+    // - whitespace followed by a digit, 't', 'f', 'n' (possible JSON literal)
+    // - whitespace followed by '@' (register reference)
 
-    let mut json_start = None;
+    let mut value_start = None;
 
     // First check for definite JSON starters
     for (i, c) in args.char_indices() {
         if c == '{' || c == '[' || c == '"' {
-            json_start = Some(i);
+            value_start = Some(i);
             break;
         }
     }
 
-    // If not found, look for whitespace followed by a JSON literal
-    if json_start.is_none() {
+    // If not found, look for whitespace followed by a JSON literal or register reference
+    if value_start.is_none() {
         let chars: Vec<char> = args.chars().collect();
         for i in 0..chars.len().saturating_sub(1) {
             if chars[i].is_whitespace() {
                 let next = chars[i + 1];
+                // Check for register reference
+                if next == '@' {
+                    value_start = Some(i + 1);
+                    break;
+                }
                 if next.is_ascii_digit() || next == '-' {
-                    json_start = Some(i + 1);
+                    value_start = Some(i + 1);
                     break;
                 }
                 // Check for true/false/null
                 let rest = &args[i + 1..];
                 if rest.starts_with("true") || rest.starts_with("false") || rest.starts_with("null")
                 {
-                    json_start = Some(i + 1);
+                    value_start = Some(i + 1);
                     break;
                 }
             }
         }
     }
 
-    let json_start = json_start?;
+    let value_start = value_start?;
 
-    // Get the path (everything before JSON start, trimmed)
-    let path = args[..json_start].trim().to_string();
-    let json = args[json_start..].to_string();
+    // Get the path (everything before value start, trimmed)
+    let path = args[..value_start].trim().to_string();
+    let value = args[value_start..].trim().to_string();
 
-    if path.is_empty() || json.is_empty() {
+    if path.is_empty() || value.is_empty() {
         return None;
     }
 
-    Some((path, json))
+    Some((path, value))
 }
 
 /// Format a path for display

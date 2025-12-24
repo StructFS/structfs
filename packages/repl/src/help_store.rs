@@ -33,7 +33,7 @@ impl HelpStore {
             "ctx/http" => self.http_help(),
             "ctx/help" => self.root_help(),
             // Mount system
-            "_mounts" => self.mounts_help(),
+            "ctx/mounts" => self.mounts_help(),
             // Topic-based help (single component)
             _ => match path.components[0].as_str() {
                 "commands" => self.commands_help(),
@@ -42,11 +42,12 @@ impl HelpStore {
                 "paths" => self.paths_help(),
                 "examples" => self.examples_help(),
                 "stores" => self.stores_help(),
+                "registers" => self.registers_help(),
                 topic => json!({
                     "error": format!("Unknown help topic: '{}'", topic),
                     "hint": "Use a topic name or a system path like 'ctx/http'",
-                    "available_topics": ["commands", "mounts", "http", "paths", "examples", "stores"],
-                    "system_paths": ["ctx", "ctx/http", "ctx/help", "_mounts"]
+                    "available_topics": ["commands", "mounts", "http", "paths", "examples", "stores", "registers"],
+                    "system_paths": ["ctx", "ctx/http", "ctx/help", "ctx/mounts"]
                 }),
             },
         }
@@ -59,7 +60,8 @@ impl HelpStore {
             "mounts": {
                 "/ctx/http": "Async HTTP broker - requests execute in background",
                 "/ctx/http_sync": "Sync HTTP broker - blocks on read until complete",
-                "/ctx/help": "This help system"
+                "/ctx/help": "This help system",
+                "/ctx/mounts": "Mount management - create and manage store mounts"
             },
             "usage": [
                 "read /ctx/help          - Get help",
@@ -80,12 +82,13 @@ impl HelpStore {
                 "mounts": "Mounting and managing stores",
                 "http": "Making HTTP requests",
                 "paths": "Path syntax and navigation",
+                "registers": "Registers for storing command output",
                 "examples": "Usage examples",
                 "stores": "Available store types"
             },
             "quick_start": [
-                "read /_mounts          - List current mounts",
-                "write /_mounts/data {\"type\": \"memory\"}  - Create a memory store at /data",
+                "read /ctx/mounts          - List current mounts",
+                "write /ctx/mounts/data {\"type\": \"memory\"}  - Create a memory store at /data",
                 "write /data/hello {\"message\": \"world\"}  - Write data",
                 "read /data/hello       - Read data back"
             ]
@@ -100,13 +103,13 @@ impl HelpStore {
                 "write <path> <json>": "Write JSON data to a path (aliases: set, w)",
                 "cd <path>": "Change current directory",
                 "pwd": "Print current directory",
-                "mounts": "List all current mounts (shortcut for read /_mounts)",
+                "mounts": "List all current mounts (shortcut for read /ctx/mounts)",
                 "help": "Show help message",
                 "exit": "Exit the REPL (aliases: quit)"
             },
             "examples": [
                 "read /ctx/help",
-                "write /_mounts/test {\"type\": \"memory\"}",
+                "write /ctx/mounts/test {\"type\": \"memory\"}",
                 "cd /test",
                 "write foo {\"bar\": 123}",
                 "read foo"
@@ -117,12 +120,12 @@ impl HelpStore {
     fn mounts_help(&self) -> JsonValue {
         json!({
             "title": "Mount System",
-            "description": "Mounts attach stores to paths in the filesystem tree. Manage mounts through /_mounts.",
+            "description": "Mounts attach stores to paths in the filesystem tree. Manage mounts through /ctx/mounts.",
             "operations": {
-                "read /_mounts": "List all mounts",
-                "read /_mounts/<name>": "Get config for a specific mount",
-                "write /_mounts/<name> <config>": "Create or update a mount",
-                "write /_mounts/<name> null": "Unmount a store"
+                "read /ctx/mounts": "List all mounts",
+                "read /ctx/mounts/<name>": "Get config for a specific mount",
+                "write /ctx/mounts/<name> <config>": "Create or update a mount",
+                "write /ctx/mounts/<name> null": "Unmount a store"
             },
             "mount_configs": {
                 "memory": "{\"type\": \"memory\"}",
@@ -133,9 +136,9 @@ impl HelpStore {
                 "structfs": "{\"type\": \"structfs\", \"url\": \"https://structfs.example.com\"}"
             },
             "examples": [
-                "write /_mounts/data {\"type\": \"memory\"}",
-                "write /_mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}",
-                "write /_mounts/data null"
+                "write /ctx/mounts/data {\"type\": \"memory\"}",
+                "write /ctx/mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}",
+                "write /ctx/mounts/data null"
             ]
         })
     }
@@ -210,7 +213,7 @@ impl HelpStore {
                 "root": "/ - the root path"
             },
             "special_paths": {
-                "/_mounts": "Mount management",
+                "/ctx/mounts": "Mount management",
                 "/ctx/http": "HTTP broker (default mount)",
                 "/ctx/help": "This help system"
             },
@@ -229,7 +232,7 @@ impl HelpStore {
                 {
                     "title": "Create and use a memory store",
                     "steps": [
-                        "write /_mounts/data {\"type\": \"memory\"}",
+                        "write /ctx/mounts/data {\"type\": \"memory\"}",
                         "write /data/users/1 {\"name\": \"Alice\", \"email\": \"alice@example.com\"}",
                         "read /data/users/1",
                         "read /data/users"
@@ -245,7 +248,7 @@ impl HelpStore {
                 {
                     "title": "Mount a local directory",
                     "steps": [
-                        "write /_mounts/local {\"type\": \"local\", \"path\": \"/tmp/structfs-data\"}",
+                        "write /ctx/mounts/local {\"type\": \"local\", \"path\": \"/tmp/structfs-data\"}",
                         "write /local/config {\"setting\": \"value\"}",
                         "read /local/config"
                     ]
@@ -289,6 +292,54 @@ impl HelpStore {
                     "use_case": "Connecting to another StructFS instance"
                 }
             }
+        })
+    }
+
+    fn registers_help(&self) -> JsonValue {
+        json!({
+            "title": "Registers",
+            "description": "Registers are named storage locations that can hold JSON values from command output.",
+            "syntax": {
+                "@name": "Access register named 'name'",
+                "@name/path": "Navigate into JSON structure stored in register"
+            },
+            "capture_output": {
+                "format": "@name command [args]",
+                "description": "Prefix any command with @name to store its output in a register",
+                "examples": [
+                    "@result read /some/path     - Store read output in 'result'",
+                    "@data read /ctx/mounts         - Store mount list in 'data'"
+                ]
+            },
+            "read_from_register": {
+                "format": "read @name[/path]",
+                "examples": [
+                    "read @result               - Read entire register contents",
+                    "read @result/nested/field  - Read sub-path within register"
+                ]
+            },
+            "write_operations": {
+                "write_to_register": {
+                    "format": "write @name <json>",
+                    "example": "write @temp {\"key\": \"value\"}"
+                },
+                "write_from_register": {
+                    "format": "write <path> @source",
+                    "example": "write /destination @source"
+                },
+                "copy_between_registers": {
+                    "format": "write @dest @source",
+                    "example": "write @backup @data"
+                }
+            },
+            "commands": {
+                "registers": "List all register names (alias: regs)"
+            },
+            "notes": [
+                "Registers persist only for the current REPL session",
+                "Register contents are stored as JSON values",
+                "Non-JSON output is stored as a string"
+            ]
         })
     }
 }
