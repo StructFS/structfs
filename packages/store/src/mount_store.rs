@@ -30,8 +30,10 @@ pub enum MountConfig {
     Local { path: String },
     /// HTTP client store (for making HTTP requests to a base URL)
     Http { url: String },
-    /// HTTP broker store - write HttpRequest, read from handle to execute
+    /// HTTP broker store - write HttpRequest, read from handle to execute (sync)
     HttpBroker,
+    /// Async HTTP broker - executes requests in background threads
+    AsyncHttpBroker,
     /// Remote StructFS store over HTTP
     Structfs { url: String },
     /// Help/documentation store (read-only)

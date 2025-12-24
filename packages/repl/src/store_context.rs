@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::Value as JsonValue;
 
+use structfs_http::async_broker::AsyncHttpBrokerStore;
 use structfs_http::blocking::HttpClientStore;
 use structfs_http::broker::HttpBrokerStore;
 use structfs_http::RemoteStore;
@@ -69,6 +70,13 @@ impl StoreFactory for ReplStoreFactory {
                     })?;
                 Ok(StoreBox::new(store))
             }
+            MountConfig::AsyncHttpBroker => {
+                let store =
+                    AsyncHttpBrokerStore::with_default_timeout().map_err(|e| StoreError::Raw {
+                        message: format!("Failed to create async HTTP broker: {}", e),
+                    })?;
+                Ok(StoreBox::new(store))
+            }
             MountConfig::Structfs { url } => {
                 let store = RemoteStore::new(url).map_err(|e| StoreError::Raw {
                     message: format!("Failed to connect to remote StructFS at '{}': {}", url, e),
@@ -91,8 +99,13 @@ impl StoreContext {
         let mut store = MountStore::new(ReplStoreFactory);
 
         // Set up default mounts under /ctx
-        if let Err(e) = store.mount("ctx/http", MountConfig::HttpBroker) {
-            eprintln!("Warning: Failed to mount default HTTP broker: {}", e);
+        // Async HTTP broker - requests execute in background, can have multiple outstanding
+        if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
+            eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
+        }
+        // Sync HTTP broker - blocks until request completes on read
+        if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
+            eprintln!("Warning: Failed to mount sync HTTP broker: {}", e);
         }
         if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
             eprintln!("Warning: Failed to mount help store: {}", e);

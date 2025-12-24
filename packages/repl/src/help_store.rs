@@ -57,13 +57,16 @@ impl HelpStore {
             "title": "Context Directory (/ctx)",
             "description": "The /ctx directory contains built-in system stores.",
             "mounts": {
-                "/ctx/http": "HTTP broker for making requests to any URL",
+                "/ctx/http": "Async HTTP broker - requests execute in background",
+                "/ctx/http_sync": "Sync HTTP broker - blocks on read until complete",
                 "/ctx/help": "This help system"
             },
             "usage": [
                 "read /ctx/help          - Get help",
                 "read /ctx/help/http     - Help on HTTP broker",
-                "write /ctx/http <req>   - Queue an HTTP request"
+                "write /ctx/http <req>   - Queue an HTTP request (async)",
+                "read /ctx/http/outstanding/0         - Check status",
+                "read /ctx/http/outstanding/0/response - Get response when complete"
             ]
         })
     }
@@ -125,7 +128,8 @@ impl HelpStore {
                 "memory": "{\"type\": \"memory\"}",
                 "local": "{\"type\": \"local\", \"path\": \"/path/to/dir\"}",
                 "http": "{\"type\": \"http\", \"url\": \"https://api.example.com\"}",
-                "httpbroker": "{\"type\": \"httpbroker\"}",
+                "httpbroker": "{\"type\": \"httpbroker\"} (sync)",
+                "asynchttpbroker": "{\"type\": \"asynchttpbroker\"} (async, background threads)",
                 "structfs": "{\"type\": \"structfs\", \"url\": \"https://structfs.example.com\"}"
             },
             "examples": [
@@ -138,12 +142,21 @@ impl HelpStore {
 
     fn http_help(&self) -> JsonValue {
         json!({
-            "title": "HTTP Broker",
-            "description": "The HTTP broker at /ctx/http allows making HTTP requests to any URL.",
-            "usage": {
+            "title": "HTTP Brokers",
+            "description": "HTTP brokers allow making requests to any URL.",
+            "brokers": {
+                "/ctx/http": "Async - requests execute in background threads",
+                "/ctx/http_sync": "Sync - blocks until request completes on read"
+            },
+            "async_usage": {
                 "step1": "Write an HttpRequest to /ctx/http",
-                "step2": "Get back a handle path like /ctx/http/outstanding/0",
-                "step3": "Read from the handle to execute the request and get the response"
+                "step2": "Request starts executing immediately in background",
+                "step3": "Read from handle to check status (pending/complete/failed)",
+                "step4": "Read from handle/response to get the HttpResponse"
+            },
+            "sync_usage": {
+                "step1": "Write an HttpRequest to /ctx/http_sync",
+                "step2": "Read from the handle to execute and get response (blocks)"
             },
             "request_format": {
                 "method": "GET | POST | PUT | DELETE | PATCH | HEAD | OPTIONS",
@@ -154,15 +167,28 @@ impl HelpStore {
             },
             "examples": [
                 {
-                    "description": "Simple GET request",
-                    "write": "write /ctx/http {\"method\": \"GET\", \"path\": \"https://httpbin.org/get\"}",
-                    "read": "read /ctx/http/outstanding/0"
+                    "description": "Async: Queue multiple requests",
+                    "commands": [
+                        "write /ctx/http {\"path\": \"https://httpbin.org/delay/2\"}",
+                        "write /ctx/http {\"path\": \"https://httpbin.org/delay/1\"}",
+                        "read /ctx/http/outstanding/0  # Check status",
+                        "read /ctx/http/outstanding/0/response  # Get response when complete"
+                    ]
                 },
                 {
-                    "description": "POST with body and headers",
-                    "write": "write /ctx/http {\"method\": \"POST\", \"path\": \"https://httpbin.org/post\", \"headers\": {\"Authorization\": \"Bearer token\"}, \"body\": {\"name\": \"test\"}}"
+                    "description": "Sync: Simple blocking request",
+                    "commands": [
+                        "write /ctx/http_sync {\"path\": \"https://httpbin.org/get\"}",
+                        "read /ctx/http_sync/outstanding/0  # Blocks until complete"
+                    ]
                 }
             ],
+            "status_format": {
+                "id": "Request ID",
+                "state": "pending | complete | failed",
+                "error": "Error message if failed",
+                "response_path": "Path to read response from (when complete)"
+            },
             "response_format": {
                 "status": "HTTP status code (e.g., 200)",
                 "status_text": "Status text (e.g., \"OK\")",
@@ -248,9 +274,14 @@ impl HelpStore {
                     "use_case": "REST API with fixed base URL"
                 },
                 "httpbroker": {
-                    "description": "HTTP broker for requests to any URL",
+                    "description": "Sync HTTP broker - blocks on read until request completes",
                     "config": "{\"type\": \"httpbroker\"}",
-                    "use_case": "Ad-hoc HTTP requests to any endpoint"
+                    "use_case": "Simple one-off HTTP requests"
+                },
+                "asynchttpbroker": {
+                    "description": "Async HTTP broker - executes in background threads",
+                    "config": "{\"type\": \"asynchttpbroker\"}",
+                    "use_case": "Multiple concurrent requests, non-blocking"
                 },
                 "structfs": {
                     "description": "Remote StructFS server",

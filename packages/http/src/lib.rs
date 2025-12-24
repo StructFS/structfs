@@ -85,6 +85,9 @@ pub mod handle;
 pub mod types;
 
 #[cfg(feature = "blocking")]
+pub mod async_broker;
+
+#[cfg(feature = "blocking")]
 pub mod blocking;
 
 #[cfg(feature = "blocking")]
@@ -100,6 +103,9 @@ pub mod async_client;
 pub use error::Error;
 pub use handle::{RequestState, RequestStatus};
 pub use types::{HttpRequest, HttpResponse, Method};
+
+#[cfg(feature = "blocking")]
+pub use async_broker::AsyncHttpBrokerStore;
 
 #[cfg(feature = "blocking")]
 pub use blocking::HttpClientStore;
