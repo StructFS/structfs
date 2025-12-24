@@ -147,6 +147,7 @@ impl Path {
         let result = Path {
             components: path
                 .split('/')
+                .filter(|s| !s.is_empty())
                 .map(std::borrow::ToOwned::to_owned)
                 .collect::<Vec<String>>(),
         };
@@ -518,6 +519,20 @@ mod path_tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn trailing_slashes_normalized() {
+        assert_eq!(Path::parse("foo/bar/").unwrap(), path!("foo/bar"));
+        assert_eq!(Path::parse("foo/bar").unwrap(), path!("foo/bar"));
+        assert_eq!(Path::parse("_mounts/").unwrap(), path!("_mounts"));
+        assert_eq!(Path::parse("_mounts").unwrap(), path!("_mounts"));
+    }
+
+    #[test]
+    fn double_slashes_normalized() {
+        assert_eq!(Path::parse("foo//bar").unwrap(), path!("foo/bar"));
+        assert_eq!(Path::parse("foo///bar").unwrap(), path!("foo/bar"));
     }
 
     #[test]

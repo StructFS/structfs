@@ -99,14 +99,15 @@ pub fn run() -> io::Result<()> {
     // Set up reedline with completion, hints, and highlighting
     let completer = Box::new(ReplCompleter::new());
     let highlighter = Box::new(ReplHighlighter::new());
-    let hinter = Box::new(DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)));
+    let hinter =
+        Box::new(DefaultHinter::default().with_style(Style::new().fg(Color::LightGray).dimmed()));
 
     // Create completion menu
     let completion_menu = Box::new(
         ColumnarMenu::default()
             .with_name("completion_menu")
-            .with_text_style(Style::new().fg(Color::White))
-            .with_selected_text_style(Style::new().fg(Color::Black).on(Color::White)),
+            .with_text_style(Style::new().fg(Color::Cyan))
+            .with_selected_text_style(Style::new().fg(Color::Black).on(Color::Cyan).bold()),
     );
 
     // Detect edit mode from environment
