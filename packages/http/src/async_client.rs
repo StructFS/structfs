@@ -151,7 +151,11 @@ impl AsyncHttpClientStore {
     }
 
     /// Add a default header sent with every request
-    pub fn with_default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn with_default_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         self.default_headers.insert(name.into(), value.into());
         self
     }
@@ -304,11 +308,10 @@ impl Reader for AsyncHttpClientStore {
             None => {
                 // Read status
                 let status = handle.get_status();
-                let value = serde_json::to_value(&status).map_err(|e| {
-                    StoreError::RecordSerialization {
+                let value =
+                    serde_json::to_value(&status).map_err(|e| StoreError::RecordSerialization {
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 let de: Box<dyn erased_serde::Deserializer> =
                     Box::new(<dyn erased_serde::Deserializer>::erase(value));
                 Ok(Some(de))

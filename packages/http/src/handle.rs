@@ -77,12 +77,14 @@ impl RequestStatus {
 }
 
 /// Internal state for a request handle
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct HandleState {
     pub status: RequestStatus,
     pub response: Option<HttpResponse>,
 }
 
+#[allow(dead_code)]
 impl HandleState {
     pub fn new(id: String) -> Self {
         Self {

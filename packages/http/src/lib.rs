@@ -87,6 +87,9 @@ pub mod types;
 #[cfg(feature = "blocking")]
 pub mod blocking;
 
+#[cfg(feature = "blocking")]
+pub mod remote;
+
 #[cfg(feature = "async")]
 pub mod async_client;
 
@@ -97,6 +100,9 @@ pub use types::{HttpRequest, HttpResponse, Method};
 
 #[cfg(feature = "blocking")]
 pub use blocking::HttpClientStore;
+
+#[cfg(feature = "blocking")]
+pub use remote::RemoteStore;
 
 #[cfg(feature = "async")]
 pub use async_client::AsyncHttpClientStore;

@@ -28,7 +28,7 @@ impl JSONLocalStore {
         if !attr.is_dir() {
             return Err(LocalStoreError::RootPathInvalid {
                 path: root,
-                error: io::Error::new(io::ErrorKind::Other, "Root path must be a directory."),
+                error: io::Error::other("Root path must be a directory."),
             });
         }
 
@@ -36,7 +36,7 @@ impl JSONLocalStore {
         if attr.permissions().readonly() {
             return Err(LocalStoreError::RootPathInvalid {
                 path: root,
-                error: io::Error::new(io::ErrorKind::Other, "Root directory must be writable"),
+                error: io::Error::other("Root directory must be writable"),
             });
         }
 
@@ -218,12 +218,10 @@ impl JSONLocalStore {
                     }
                 })?;
                 let all_numeric_paths = dir_paths.all(|p| {
-                    p.map_or(false, |entry| {
+                    p.is_ok_and(|entry| {
                         let path = entry.path();
-                        let is_numeric = path
-                            .to_str()
-                            .map_or(false, |s| NUMERIC_VALUED_PATH.is_match(s));
-                        is_numeric
+                        path.to_str()
+                            .is_some_and(|s| NUMERIC_VALUED_PATH.is_match(s))
                     })
                 });
 
@@ -451,7 +449,7 @@ mod store_impl_for_json_local_store_tests {
 
             let array_of_things_path = dir.path().join("array_of_things");
             fs::create_dir(&array_of_things_path).unwrap();
-            let structs = vec![
+            let structs = [
                 SimpleStruct {
                     example: "Oh my goodness.".to_string(),
                 },

@@ -139,8 +139,8 @@ impl store::Reader for SerdeJSONInMemoryStore {
 #[cfg(test)]
 mod store_impl_for_json_local_store_tests {
     use super::*;
-    use structfs_store::store::trait_test_suite;
     use serde_json::json;
+    use structfs_store::store::trait_test_suite;
 
     #[test]
     fn read_owned_works() {

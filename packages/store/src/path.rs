@@ -131,7 +131,6 @@ macro_rules! path {
     };
 }
 
-
 impl Path {
     // TODO(alex): Provide an encode/decode facility to support any unicode-compatible string as a
     // path component.  People will want a way to encode "foo/bar/baz/.dotfile", for example.
@@ -257,7 +256,7 @@ impl Path {
         self.len() == 0
     }
 
-    pub fn iter(&self) -> std::slice::Iter<String> {
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
         self.components.iter()
     }
 
@@ -343,6 +342,20 @@ impl Path {
 impl<'path> From<&'path Path> for &'path [String] {
     fn from(p: &'path Path) -> Self {
         &p.components
+    }
+}
+
+impl fmt::Display for Path {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.components.join("/"))
+    }
+}
+
+impl std::ops::Index<usize> for Path {
+    type Output = String;
+
+    fn index(&self, i: usize) -> &Self::Output {
+        &self.components[i]
     }
 }
 
@@ -519,19 +532,5 @@ mod path_tests {
         assert!(!path!("foo/bar/baz").has_prefix(&path!("foo/bar/baz/qux")));
         assert!(!path!("foo/bar/baz").has_prefix(&path!("qux")));
         assert!(!path!("hello").has_prefix(&path!("read")));
-    }
-}
-
-impl fmt::Display for Path {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.components.join("/"))
-    }
-}
-
-impl std::ops::Index<usize> for Path {
-    type Output = String;
-
-    fn index(&self, i: usize) -> &Self::Output {
-        &self.components[i]
     }
 }

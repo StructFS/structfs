@@ -71,12 +71,17 @@ impl HttpClientStore {
     }
 
     /// Add a default header that will be sent with every request
-    pub fn with_default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn with_default_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         self.default_headers.insert(name.into(), value.into());
         self
     }
 
     /// Build the full URL from base URL and StructFS path
+    #[allow(dead_code)]
     fn build_url(&self, path: &Path) -> Result<Url, Error> {
         let path_str = path.components.join("/");
         self.base_url.join(&path_str).map_err(Error::from)
@@ -226,10 +231,11 @@ impl Reader for HttpClientStore {
             });
         }
 
-        let record: RecordType =
-            serde_json::from_value(response.body).map_err(|e| StoreError::RecordDeserialization {
+        let record: RecordType = serde_json::from_value(response.body).map_err(|e| {
+            StoreError::RecordDeserialization {
                 message: e.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(Some(record))
     }
@@ -281,6 +287,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
+    #[allow(dead_code)]
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct TestUser {
         id: u64,

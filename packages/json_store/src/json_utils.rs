@@ -1,5 +1,5 @@
-use structfs_store::{Error as StoreError, Path, PathError};
 use serde_json::value::Value as JsonValue;
+use structfs_store::{Error as StoreError, Path, PathError};
 
 pub fn get_sub_tree_mut<'tree>(
     tree: &'tree mut JsonValue,
@@ -225,7 +225,7 @@ pub fn get_path<'tree>(
     };
     let sub_tree: &JsonValue = sub_tree;
 
-    return match sub_tree {
+    match sub_tree {
         JsonValue::Object(map) => Ok(map.get(last_path_component.as_str())),
         JsonValue::Array(arr) => {
             let index = last_path_component.parse::<usize>().map_err(|error| {
@@ -257,16 +257,16 @@ pub fn get_path<'tree>(
             }
         }
         JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_) => {
-            return Ok(None)
+            Ok(None)
         }
-    };
+    }
 }
 
 #[cfg(test)]
 mod get_path_tests {
     use super::*;
-    use structfs_store::path;
     use serde_json::json;
+    use structfs_store::path;
 
     #[test]
     fn empty() {

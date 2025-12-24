@@ -158,10 +158,12 @@ impl Writer for dyn ObjectSafeWriter {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct WriterWrapper<S> {
     inner: Option<S>,
 }
 
+#[allow(dead_code)]
 impl<S> WriterWrapper<S> {
     pub(crate) fn as_mut(&mut self) -> &mut S {
         self.inner.as_mut().unwrap()
@@ -286,10 +288,12 @@ impl<S: Reader> ObjectSafeReader for ReaderWrapper<S> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct ReaderWrapper<S> {
     inner: Option<S>,
 }
 
+#[allow(dead_code)]
 impl<S> ReaderWrapper<S> {
     pub(crate) fn as_mut(&mut self) -> &mut S {
         self.inner.as_mut().unwrap()

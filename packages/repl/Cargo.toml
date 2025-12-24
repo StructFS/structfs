@@ -1,0 +1,25 @@
+[package]
+name = "structfs-repl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Interactive REPL for StructFS"
+
+[[bin]]
+name = "structfs"
+path = "src/main.rs"
+
+[dependencies]
+structfs-store = { workspace = true }
+structfs-json-store = { workspace = true }
+structfs-http = { workspace = true, features = ["blocking"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+reedline = { workspace = true }
+nu-ansi-term = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
