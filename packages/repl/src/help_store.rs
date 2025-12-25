@@ -5,24 +5,93 @@
 //! - `read /ctx/help/commands` - Available commands
 //! - `read /ctx/help/mounts` - Mount system documentation
 //! - `read /ctx/help/http` - HTTP broker usage
+//!
+//! ## Docs Protocol
+//!
+//! The HelpStore supports the docs protocol: stores that provide documentation
+//! at a `docs` path can have that docs path mounted into the HelpStore. This
+//! enables reading `help/sys` to return the sys store's own documentation.
+//!
+//! ```text
+//! # Register a store's docs:
+//! help_store.mount_docs("sys", sys_docs_store);
+//!
+//! # Now reading help/sys returns sys's documentation
+//! read /ctx/help/sys  -> reads from mounted sys docs
+//! ```
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
 
-use structfs_store::{Error as StoreError, Path, Reader, Writer};
+use structfs_store::{Error as StoreError, OverlayStore, Path, Reader, Store, Writer};
 
 /// A store that returns help documentation on read.
-pub struct HelpStore;
+///
+/// The HelpStore combines:
+/// 1. Built-in help topics (commands, mounts, http, etc.)
+/// 2. Mounted documentation from other stores (via the docs protocol)
+///
+/// When reading a path, it first checks if there's a mounted docs store
+/// for that path prefix, then falls back to built-in help.
+pub struct HelpStore<'a> {
+    /// Mounted docs from other stores, keyed by topic name
+    mounted_docs: OverlayStore<'a>,
+    /// Track which topics have mounted docs
+    mounted_topics: Vec<String>,
+}
 
-impl HelpStore {
+impl<'a> HelpStore<'a> {
     pub fn new() -> Self {
-        Self
+        Self {
+            mounted_docs: OverlayStore::default(),
+            mounted_topics: Vec::new(),
+        }
     }
 
-    fn get_help(&self, path: &Path) -> JsonValue {
+    /// Mount a store's documentation at a topic path.
+    ///
+    /// For example, `mount_docs("sys", sys_docs_store)` makes the sys store's
+    /// documentation available at `help/sys`.
+    pub fn mount_docs<S: Store + Send + Sync + 'a>(&mut self, topic: &str, docs_store: S) {
+        let path = Path::parse(topic).expect("valid topic path");
+        self.mounted_docs
+            .add_layer(path, docs_store)
+            .expect("mounting docs should succeed");
+        self.mounted_topics.push(topic.to_string());
+    }
+
+    /// Check if a topic has mounted documentation
+    fn has_mounted_docs(&self, topic: &str) -> bool {
+        self.mounted_topics.iter().any(|t| t == topic)
+    }
+
+    /// Try to read from mounted docs for a topic
+    fn try_mounted_docs(&mut self, path: &Path) -> Option<JsonValue> {
+        if path.is_empty() {
+            return None;
+        }
+
+        let topic = &path.components[0];
+        if !self.has_mounted_docs(topic) {
+            return None;
+        }
+
+        // Try to read from mounted docs
+        match self.mounted_docs.read_owned::<JsonValue>(path) {
+            Ok(Some(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn get_help(&mut self, path: &Path) -> JsonValue {
         if path.is_empty() {
             return self.root_help();
+        }
+
+        // First, try mounted docs for the topic
+        if let Some(docs) = self.try_mounted_docs(path) {
+            return docs;
         }
 
         // Check for system paths (interpret from root)
@@ -34,21 +103,59 @@ impl HelpStore {
             "ctx/help" => self.root_help(),
             // Mount system
             "ctx/mounts" => self.mounts_help(),
-            // Context sys paths
-            "ctx/sys" => self.sys_help(),
+            // Context sys - if sys docs not mounted, redirect
+            "ctx/sys" => {
+                if self.has_mounted_docs("sys") {
+                    self.try_mounted_docs(&Path::parse("sys").unwrap())
+                        .unwrap_or_else(|| self.store_docs_redirect("ctx/sys"))
+                } else {
+                    self.store_docs_redirect("ctx/sys")
+                }
+            }
             // Topic-based help (single component)
-            _ => match path.components[0].as_str() {
-                "commands" => self.commands_help(),
-                "mounts" => self.mounts_help(),
-                "http" => self.http_help(),
-                "paths" => self.paths_help(),
-                "examples" => self.examples_help(),
-                "stores" => self.stores_help(),
-                "registers" => self.registers_help(),
-                "sys" => self.sys_help(),
-                _ => self.suggest_help(&full_path),
-            },
+            _ => {
+                // Check for ctx/sys/* paths - redirect to store docs or use mounted
+                if full_path.starts_with("ctx/sys/") {
+                    let subpath = &full_path["ctx/sys/".len()..];
+                    if self.has_mounted_docs("sys") {
+                        let docs_path = Path::parse(&format!("sys/{}", subpath)).unwrap();
+                        if let Some(docs) = self.try_mounted_docs(&docs_path) {
+                            return docs;
+                        }
+                    }
+                    return self.store_docs_redirect_with_path("ctx/sys", subpath);
+                }
+
+                match path.components[0].as_str() {
+                    "commands" => self.commands_help(),
+                    "mounts" => self.mounts_help(),
+                    "http" => self.http_help(),
+                    "paths" => self.paths_help(),
+                    "examples" => self.examples_help(),
+                    "stores" => self.stores_help(),
+                    "registers" => self.registers_help(),
+                    _ => self.suggest_help(&full_path),
+                }
+            }
         }
+    }
+
+    /// Redirect to a store's own documentation
+    fn store_docs_redirect(&self, store_path: &str) -> JsonValue {
+        json!({
+            "message": format!("This store provides its own documentation."),
+            "read_docs": format!("read /{}/docs", store_path),
+            "hint": "Stores that support the docs protocol expose documentation at their 'docs' path."
+        })
+    }
+
+    /// Redirect to a store's own documentation with a subpath
+    fn store_docs_redirect_with_path(&self, store_path: &str, subpath: &str) -> JsonValue {
+        json!({
+            "message": format!("This store provides its own documentation."),
+            "read_docs": format!("read /{}/docs/{}", store_path, subpath),
+            "hint": "Stores that support the docs protocol expose documentation at their 'docs' path."
+        })
     }
 
     /// Suggest relevant help topics based on an unknown path
@@ -419,65 +526,15 @@ impl HelpStore {
         })
     }
 
-    fn sys_help(&self) -> JsonValue {
-        json!({
-            "title": "System Primitives (/ctx/sys)",
-            "description": "OS primitives exposed through StructFS paths.",
-            "paths": {
-                "/ctx/sys/env": "Environment variables",
-                "/ctx/sys/time": "Clocks and sleep",
-                "/ctx/sys/random": "Random number generation",
-                "/ctx/sys/proc": "Process information",
-                "/ctx/sys/fs": "Filesystem operations"
-            },
-            "env": {
-                "read /ctx/sys/env": "List all environment variables",
-                "read /ctx/sys/env/HOME": "Read specific variable",
-                "write /ctx/sys/env/FOO \"bar\"": "Set environment variable",
-                "write /ctx/sys/env/FOO null": "Unset environment variable"
-            },
-            "time": {
-                "read /ctx/sys/time/now": "Current time (ISO 8601)",
-                "read /ctx/sys/time/now_unix": "Unix timestamp (seconds)",
-                "read /ctx/sys/time/now_unix_ms": "Unix timestamp (milliseconds)",
-                "read /ctx/sys/time/monotonic": "Monotonic clock (nanoseconds)",
-                "write /ctx/sys/time/sleep {\"ms\": 100}": "Sleep for 100ms"
-            },
-            "random": {
-                "read /ctx/sys/random/u64": "Random 64-bit integer",
-                "read /ctx/sys/random/uuid": "Random UUID v4"
-            },
-            "proc": {
-                "read /ctx/sys/proc/self/pid": "Current process ID",
-                "read /ctx/sys/proc/self/cwd": "Current working directory",
-                "read /ctx/sys/proc/self/args": "Command line arguments",
-                "read /ctx/sys/proc/self/exe": "Path to executable",
-                "read /ctx/sys/proc/self/env": "All environment variables"
-            },
-            "fs": {
-                "write /ctx/sys/fs/stat {\"path\": \"/some/file\"}": "Get file info",
-                "write /ctx/sys/fs/mkdir {\"path\": \"/new/dir\"}": "Create directory",
-                "write /ctx/sys/fs/rmdir {\"path\": \"/dir\"}": "Remove directory",
-                "write /ctx/sys/fs/unlink {\"path\": \"/file\"}": "Delete file",
-                "write /ctx/sys/fs/rename {\"from\": \"/a\", \"to\": \"/b\"}": "Rename file/dir"
-            },
-            "examples": [
-                "read /ctx/sys/env/PATH",
-                "read /ctx/sys/time/now",
-                "read /ctx/sys/random/uuid",
-                "read /ctx/sys/proc/self/pid"
-            ]
-        })
-    }
 }
 
-impl Default for HelpStore {
+impl Default for HelpStore<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Reader for HelpStore {
+impl Reader for HelpStore<'_> {
     fn read_to_deserializer<'de, 'this>(
         &'this mut self,
         from: &Path,
@@ -504,7 +561,7 @@ impl Reader for HelpStore {
     }
 }
 
-impl Writer for HelpStore {
+impl Writer for HelpStore<'_> {
     fn write<RecordType: Serialize>(
         &mut self,
         _destination: &Path,

@@ -93,6 +93,28 @@ impl<F: StoreFactory> MountStore<F> {
         Ok(())
     }
 
+    /// Mount a pre-created store at the given path.
+    ///
+    /// This bypasses the factory and allows mounting stores that have
+    /// complex initialization requirements (e.g., cross-store dependencies).
+    pub fn mount_store(&mut self, name: &str, store: StoreBox<'static>) -> Result<(), StoreError> {
+        // Parse the mount path
+        let mount_path = Path::parse(name).map_err(StoreError::PathError)?;
+
+        // Add to overlay
+        self.overlay.add_layer(mount_path, store).map_err(|e| {
+            StoreError::ImplementationFailure {
+                message: e.to_string(),
+            }
+        })?;
+
+        // Don't track in mounts HashMap since we don't have a config
+        // This mount won't show up in list_mounts or be serializable,
+        // which is fine for built-in stores like help
+
+        Ok(())
+    }
+
     /// Unmount a store at the given path
     pub fn unmount(&mut self, name: &str) -> Result<(), StoreError> {
         if !self.mounts.contains_key(name) {

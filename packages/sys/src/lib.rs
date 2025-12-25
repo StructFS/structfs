@@ -15,6 +15,7 @@
 //!     random/       # Random number generation
 //!     proc/         # Process information
 //!     fs/           # Filesystem operations
+//!     docs/         # Documentation for this store
 //! ```
 //!
 //! ## Example
@@ -30,8 +31,12 @@
 //!
 //! // Get current time
 //! let now: Option<String> = store.read_owned(&Path::parse("time/now").unwrap()).unwrap();
+//!
+//! // Get documentation
+//! let docs: Option<serde_json::Value> = store.read_owned(&Path::parse("docs").unwrap()).unwrap();
 //! ```
 
+pub mod docs;
 pub mod env;
 pub mod fs;
 pub mod proc;
@@ -42,6 +47,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use structfs_store::{Error, OverlayStore, Path, Reader, Writer};
 
+pub use docs::DocsStore;
 pub use env::EnvStore;
 pub use fs::FsStore;
 pub use proc::ProcStore;
@@ -74,6 +80,9 @@ impl<'a> SysStore<'a> {
             .unwrap();
         overlay
             .add_layer(Path::parse("fs").unwrap(), FsStore::new())
+            .unwrap();
+        overlay
+            .add_layer(Path::parse("docs").unwrap(), DocsStore::new())
             .unwrap();
 
         Self { inner: overlay }

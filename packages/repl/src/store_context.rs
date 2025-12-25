@@ -17,7 +17,7 @@ use structfs_json_store::JSONLocalStore;
 use structfs_store::{
     Error as StoreError, MountConfig, MountStore, Path, Reader, StoreBox, StoreFactory, Writer,
 };
-use structfs_sys::SysStore;
+use structfs_sys::{DocsStore as SysDocsStore, SysStore};
 
 use crate::help_store::HelpStore;
 use crate::register_store::RegisterStore;
@@ -111,12 +111,20 @@ impl StoreContext {
         if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
             eprintln!("Warning: Failed to mount sync HTTP broker: {}", e);
         }
-        if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
-            eprintln!("Warning: Failed to mount help store: {}", e);
-        }
+
         // System primitives (env, time, proc, fs, random)
         if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
             eprintln!("Warning: Failed to mount sys store: {}", e);
+        }
+
+        // Create help store with mounted docs from other stores
+        let mut help_store = HelpStore::new();
+        // Mount sys docs into help store so `read /ctx/help/sys` returns sys documentation
+        help_store.mount_docs("sys", SysDocsStore::new());
+
+        // Mount the configured help store (bypasses factory since it has dependencies)
+        if let Err(e) = store.mount_store("ctx/help", StoreBox::new(help_store)) {
+            eprintln!("Warning: Failed to mount help store: {}", e);
         }
 
         Self {
