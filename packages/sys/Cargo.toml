@@ -1,0 +1,26 @@
+[package]
+name = "structfs-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OS primitives exposed through StructFS paths"
+
+[dependencies]
+structfs-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+lazy_static = { workspace = true }
+erased-serde = { workspace = true }
+
+# Time
+chrono = "0.4"
+
+# Random
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }

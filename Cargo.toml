@@ -5,6 +5,7 @@ members = [
     "packages/json_store",
     "packages/http",
     "packages/repl",
+    "packages/sys",
 ]
 
 [workspace.package]
@@ -19,6 +20,7 @@ structfs-store = { path = "packages/store" }
 structfs-json-store = { path = "packages/json_store" }
 structfs-http = { path = "packages/http" }
 structfs-repl = { path = "packages/repl" }
+structfs-sys = { path = "packages/sys" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
