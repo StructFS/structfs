@@ -139,7 +139,7 @@ impl DocsStore {
                     "write_format": "{\"ms\": <milliseconds>}",
                     "example": "write time/sleep {\"ms\": 500}"
                 }),
-                _ => json!({"error": format!("Unknown time path: {}", subpath.join("/"))})
+                _ => json!({"error": format!("Unknown time path: {}", subpath.join("/"))}),
             }
         }
     }
@@ -178,7 +178,7 @@ impl DocsStore {
                     "write_format": "{\"count\": <number_of_bytes>}",
                     "returns": "Base64-encoded string of random bytes"
                 }),
-                _ => json!({"error": format!("Unknown random path: {}", subpath.join("/"))})
+                _ => json!({"error": format!("Unknown random path: {}", subpath.join("/"))}),
             }
         }
     }
@@ -235,7 +235,9 @@ impl DocsStore {
                         "description": "All environment variables",
                         "returns": "Object mapping names to values"
                     }),
-                    _ => json!({"error": format!("Unknown proc/self path: {}", subpath[1..].join("/"))})
+                    _ => {
+                        json!({"error": format!("Unknown proc/self path: {}", subpath[1..].join("/"))})
+                    }
                 }
             }
         } else {
@@ -360,7 +362,7 @@ impl DocsStore {
                     "write_format": "{\"path\": \"/path/to/dir\"}",
                     "returns": "Array of entry names (strings)"
                 }),
-                _ => json!({"error": format!("Unknown fs path: {}", subpath.join("/"))})
+                _ => json!({"error": format!("Unknown fs path: {}", subpath.join("/"))}),
             }
         }
     }
@@ -381,7 +383,9 @@ impl Reader for DocsStore {
         'this: 'de,
     {
         match self.get_docs(from) {
-            Some(docs) => Ok(Some(Box::new(<dyn erased_serde::Deserializer>::erase(docs)))),
+            Some(docs) => Ok(Some(Box::new(<dyn erased_serde::Deserializer>::erase(
+                docs,
+            )))),
             None => Ok(None),
         }
     }

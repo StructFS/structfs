@@ -1,0 +1,22 @@
+[package]
+name = "structfs-core-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core StructFS store traits - Record, Value, Path, Format"
+
+[features]
+default = []
+async = ["async-trait", "structfs-ll-store/async"]
+
+[dependencies]
+structfs-ll-store = { path = "../ll-store" }
+bytes = "1.9"
+thiserror.workspace = true
+unicode-ident = "1.0"
+async-trait = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }

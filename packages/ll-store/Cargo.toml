@@ -1,0 +1,19 @@
+[package]
+name = "structfs-ll-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Low-level StructFS store traits - pure bytes, no semantics"
+
+[features]
+default = []
+async = ["async-trait"]
+
+[dependencies]
+bytes = "1.9"
+thiserror.workspace = true
+async-trait = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

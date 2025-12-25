@@ -219,9 +219,7 @@ fn resolve_dereference(path_str: &str, ctx: &mut StoreContext) -> Result<String,
         let after_star_at = &remaining[deref_pos + 2..];
 
         // Find the end of the register name (next / or end of string)
-        let name_end = after_star_at
-            .find('/')
-            .unwrap_or(after_star_at.len());
+        let name_end = after_star_at.find('/').unwrap_or(after_star_at.len());
 
         let register_name = &after_star_at[..name_end];
 
@@ -420,7 +418,9 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
                     if s.starts_with('/') || s.contains('/') {
                         output.push_str(&format!(
                             "\n{}",
-                            Color::Cyan.dimmed().paint(format!("(use *{} to dereference)", path_str))
+                            Color::Cyan
+                                .dimmed()
+                                .paint(format!("(use *{} to dereference)", path_str))
                         ));
                     }
                 }

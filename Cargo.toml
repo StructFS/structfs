@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "packages/ll-store",
+    "packages/core-store",
+    "packages/serde-store",
     "packages/store",
     "packages/json_store",
     "packages/http",
@@ -15,7 +18,12 @@ license = "Apache-2.0"
 repository = "https://github.com/AdjectiveNoun/structfs"
 
 [workspace.dependencies]
-# Workspace crates
+# Workspace crates - new layered architecture
+structfs-ll-store = { path = "packages/ll-store" }
+structfs-core-store = { path = "packages/core-store" }
+structfs-serde-store = { path = "packages/serde-store" }
+
+# Workspace crates - legacy (to be migrated)
 structfs-store = { path = "packages/store" }
 structfs-json-store = { path = "packages/json_store" }
 structfs-http = { path = "packages/http" }

@@ -1,0 +1,24 @@
+[package]
+name = "structfs-serde-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Serde integration for StructFS stores - typed access"
+
+[features]
+default = []
+async = ["async-trait", "structfs-core-store/async"]
+
+[dependencies]
+structfs-core-store = { path = "../core-store" }
+structfs-ll-store = { path = "../ll-store" }
+bytes = "1.9"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64 = "0.22"
+async-trait = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

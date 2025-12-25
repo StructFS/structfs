@@ -130,11 +130,12 @@ impl FsStore {
         }
 
         // Parse handle ID
-        let handle_id: u64 = path.components[1]
-            .parse()
-            .map_err(|_| Error::ImplementationFailure {
-                message: format!("Invalid handle ID: {}", path.components[1]),
-            })?;
+        let handle_id: u64 =
+            path.components[1]
+                .parse()
+                .map_err(|_| Error::ImplementationFailure {
+                    message: format!("Invalid handle ID: {}", path.components[1]),
+                })?;
 
         let handle = self
             .handles
@@ -157,11 +158,10 @@ impl FsStore {
         // Handle sub-paths
         match path.components[2].as_str() {
             "meta" => {
-                let metadata = fs::metadata(&handle.path).map_err(|e| {
-                    Error::ImplementationFailure {
+                let metadata =
+                    fs::metadata(&handle.path).map_err(|e| Error::ImplementationFailure {
                         message: format!("Failed to get metadata: {}", e),
-                    }
-                })?;
+                    })?;
 
                 #[cfg(unix)]
                 let result = json!({
@@ -218,9 +218,11 @@ impl FsStore {
         })?;
 
         match encoding {
-            Encoding::Base64 => STANDARD.decode(s).map_err(|e| Error::ImplementationFailure {
-                message: format!("Invalid base64: {}", e),
-            }),
+            Encoding::Base64 => STANDARD
+                .decode(s)
+                .map_err(|e| Error::ImplementationFailure {
+                    message: format!("Invalid base64: {}", e),
+                }),
             Encoding::Utf8 => Ok(s.as_bytes().to_vec()),
             Encoding::Latin1 => {
                 // Validate that all chars are in Latin1 range
@@ -311,12 +313,11 @@ impl Reader for FsStore {
 
             // Read file content and encoding, then encode
             let (buffer, encoding) = {
-                let handle = self
-                    .handles
-                    .get_mut(&handle_id)
-                    .ok_or_else(|| Error::ImplementationFailure {
+                let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
+                    Error::ImplementationFailure {
                         message: format!("Handle {} not found", handle_id),
-                    })?;
+                    }
+                })?;
 
                 let mut buffer = Vec::new();
                 handle
@@ -356,12 +357,11 @@ impl Reader for FsStore {
 
             // Read file content and encoding, then encode
             let (buffer, encoding) = {
-                let handle = self
-                    .handles
-                    .get_mut(&handle_id)
-                    .ok_or_else(|| Error::ImplementationFailure {
+                let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
+                    Error::ImplementationFailure {
                         message: format!("Handle {} not found", handle_id),
-                    })?;
+                    }
+                })?;
 
                 let mut buffer = Vec::new();
                 handle
@@ -438,6 +438,7 @@ impl Writer for FsStore {
                         .read(true)
                         .write(true)
                         .create(true)
+                        .truncate(false)
                         .open(&request.path),
                     OpenMode::CreateNew => OpenOptions::new()
                         .write(true)
@@ -575,8 +576,10 @@ impl Writer for FsStore {
                         message: format!("Invalid rename request: {}", e),
                     })?;
 
-                fs::rename(&request.from, &request.to).map_err(|e| Error::ImplementationFailure {
-                    message: format!("rename failed: {}", e),
+                fs::rename(&request.from, &request.to).map_err(|e| {
+                    Error::ImplementationFailure {
+                        message: format!("rename failed: {}", e),
+                    }
                 })?;
 
                 Ok(path.clone())
@@ -625,12 +628,12 @@ impl FsStore {
 
             let bytes = self.decode_content(value, encoding)?;
 
-            let handle = self
-                .handles
-                .get_mut(&handle_id)
-                .ok_or_else(|| Error::ImplementationFailure {
-                    message: format!("Handle {} not found", handle_id),
-                })?;
+            let handle =
+                self.handles
+                    .get_mut(&handle_id)
+                    .ok_or_else(|| Error::ImplementationFailure {
+                        message: format!("Handle {} not found", handle_id),
+                    })?;
 
             handle
                 .file
@@ -641,21 +644,20 @@ impl FsStore {
             return Ok(path.clone());
         }
 
-        let handle = self
-            .handles
-            .get_mut(&handle_id)
-            .ok_or_else(|| Error::ImplementationFailure {
-                message: format!("Handle {} not found", handle_id),
-            })?;
+        let handle =
+            self.handles
+                .get_mut(&handle_id)
+                .ok_or_else(|| Error::ImplementationFailure {
+                    message: format!("Handle {} not found", handle_id),
+                })?;
 
         match path.components[2].as_str() {
             "seek" => {
-                let request: SeekRequest =
-                    serde_json::from_value(value.clone()).map_err(|e| {
-                        Error::ImplementationFailure {
-                            message: format!("Invalid seek request: {}", e),
-                        }
-                    })?;
+                let request: SeekRequest = serde_json::from_value(value.clone()).map_err(|e| {
+                    Error::ImplementationFailure {
+                        message: format!("Invalid seek request: {}", e),
+                    }
+                })?;
 
                 let seek_pos = if let Some(pos) = request.pos {
                     SeekFrom::Start(pos)
@@ -676,11 +678,12 @@ impl FsStore {
                     });
                 };
 
-                handle.file.seek(seek_pos).map_err(|e| {
-                    Error::ImplementationFailure {
+                handle
+                    .file
+                    .seek(seek_pos)
+                    .map_err(|e| Error::ImplementationFailure {
                         message: format!("Seek failed: {}", e),
-                    }
-                })?;
+                    })?;
 
                 Ok(path.clone())
             }

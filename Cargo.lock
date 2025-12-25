@@ -1579,6 +1579,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "structfs-core-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "serde_json",
+ "structfs-ll-store",
+ "thiserror",
+ "tokio",
+ "unicode-ident",
+]
+
+[[package]]
 name = "structfs-http"
 version = "0.1.0"
 dependencies = [
@@ -1611,6 +1624,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "structfs-ll-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "structfs-repl"
 version = "0.1.0"
 dependencies = [
@@ -1626,6 +1649,21 @@ dependencies = [
  "structfs-store",
  "structfs-sys",
  "thiserror",
+]
+
+[[package]]
+name = "structfs-serde-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "serde",
+ "serde_json",
+ "structfs-core-store",
+ "structfs-ll-store",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

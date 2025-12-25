@@ -114,7 +114,7 @@ async fn test_await_blocks_until_complete() {
 
         // Block until complete
         let await_path = handle_path.join(&Path::parse("await").unwrap());
-        let response_path = store.write(&await_path, &()).unwrap();
+        let response_path = store.write(&await_path, ()).unwrap();
 
         // Response path should be handles/{id}/response
         assert!(response_path.components.contains(&"response".to_string()));
@@ -153,7 +153,7 @@ async fn test_read_response_after_complete() {
 
         // Wait for completion
         let await_path = handle_path.join(&Path::parse("await").unwrap());
-        store.write(&await_path, &()).unwrap();
+        store.write(&await_path, ()).unwrap();
 
         // Now read the status
         let status: RequestStatus = store.read_owned(&handle_path).unwrap().unwrap();
@@ -231,7 +231,7 @@ async fn test_custom_headers() {
 
         // Wait and read
         let await_path = handle_path.join(&Path::parse("await").unwrap());
-        store.write(&await_path, &()).unwrap();
+        store.write(&await_path, ()).unwrap();
 
         let response_path = handle_path.join(&Path::parse("response").unwrap());
         let response: structfs_http::HttpResponse =
@@ -286,24 +286,24 @@ async fn test_multiple_concurrent_requests() {
 
         // Fire off three requests
         let handle1 = store
-            .write(&Path::parse("").unwrap(), &HttpRequest::get("item/1"))
+            .write(&Path::parse("").unwrap(), HttpRequest::get("item/1"))
             .unwrap();
         let handle2 = store
-            .write(&Path::parse("").unwrap(), &HttpRequest::get("item/2"))
+            .write(&Path::parse("").unwrap(), HttpRequest::get("item/2"))
             .unwrap();
         let handle3 = store
-            .write(&Path::parse("").unwrap(), &HttpRequest::get("item/3"))
+            .write(&Path::parse("").unwrap(), HttpRequest::get("item/3"))
             .unwrap();
 
         // Wait for all (they run concurrently)
         store
-            .write(&handle1.join(&Path::parse("await").unwrap()), &())
+            .write(&handle1.join(&Path::parse("await").unwrap()), ())
             .unwrap();
         store
-            .write(&handle2.join(&Path::parse("await").unwrap()), &())
+            .write(&handle2.join(&Path::parse("await").unwrap()), ())
             .unwrap();
         store
-            .write(&handle3.join(&Path::parse("await").unwrap()), &())
+            .write(&handle3.join(&Path::parse("await").unwrap()), ())
             .unwrap();
 
         // Read all responses
@@ -354,7 +354,7 @@ async fn test_error_response_handling() {
 
         // Wait for completion
         store
-            .write(&handle_path.join(&Path::parse("await").unwrap()), &())
+            .write(&handle_path.join(&Path::parse("await").unwrap()), ())
             .unwrap();
 
         let status: RequestStatus = store.read_owned(&handle_path).unwrap().unwrap();

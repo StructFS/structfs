@@ -115,8 +115,7 @@ impl<'a> HelpStore<'a> {
             // Topic-based help (single component)
             _ => {
                 // Check for ctx/sys/* paths - redirect to store docs or use mounted
-                if full_path.starts_with("ctx/sys/") {
-                    let subpath = &full_path["ctx/sys/".len()..];
+                if let Some(subpath) = full_path.strip_prefix("ctx/sys/") {
                     if self.has_mounted_docs("sys") {
                         let docs_path = Path::parse(&format!("sys/{}", subpath)).unwrap();
                         if let Some(docs) = self.try_mounted_docs(&docs_path) {
@@ -166,15 +165,94 @@ impl<'a> HelpStore<'a> {
         // Keywords mapped to relevant topics
         let keyword_topics: &[(&[&str], &str, &str)] = &[
             // (keywords, topic, description)
-            (&["read", "write", "cd", "pwd", "exit", "quit", "command", "cmd"], "commands", "REPL commands"),
-            (&["mount", "unmount", "attach", "store", "memory", "local", "remote"], "mounts", "Mount system"),
-            (&["http", "request", "get", "post", "put", "delete", "api", "url", "fetch", "web", "rest"], "http", "HTTP requests"),
-            (&["path", "directory", "dir", "folder", "navigate", "cd", "pwd", "/", "relative", "absolute"], "paths", "Path syntax"),
-            (&["example", "tutorial", "howto", "how-to", "demo", "sample"], "examples", "Usage examples"),
-            (&["store", "memory", "local", "disk", "persist", "storage", "backend"], "stores", "Store types"),
-            (&["register", "@", "variable", "capture", "output", "save", "dereference", "*@"], "registers", "Registers"),
-            (&["sys", "env", "environment", "time", "clock", "random", "proc", "process", "fs", "file", "filesystem", "open", "handle"], "sys", "System primitives"),
-            (&["ctx", "context", "built-in", "builtin", "default"], "ctx", "Context directory"),
+            (
+                &[
+                    "read", "write", "cd", "pwd", "exit", "quit", "command", "cmd",
+                ],
+                "commands",
+                "REPL commands",
+            ),
+            (
+                &[
+                    "mount", "unmount", "attach", "store", "memory", "local", "remote",
+                ],
+                "mounts",
+                "Mount system",
+            ),
+            (
+                &[
+                    "http", "request", "get", "post", "put", "delete", "api", "url", "fetch",
+                    "web", "rest",
+                ],
+                "http",
+                "HTTP requests",
+            ),
+            (
+                &[
+                    "path",
+                    "directory",
+                    "dir",
+                    "folder",
+                    "navigate",
+                    "cd",
+                    "pwd",
+                    "/",
+                    "relative",
+                    "absolute",
+                ],
+                "paths",
+                "Path syntax",
+            ),
+            (
+                &["example", "tutorial", "howto", "how-to", "demo", "sample"],
+                "examples",
+                "Usage examples",
+            ),
+            (
+                &[
+                    "store", "memory", "local", "disk", "persist", "storage", "backend",
+                ],
+                "stores",
+                "Store types",
+            ),
+            (
+                &[
+                    "register",
+                    "@",
+                    "variable",
+                    "capture",
+                    "output",
+                    "save",
+                    "dereference",
+                    "*@",
+                ],
+                "registers",
+                "Registers",
+            ),
+            (
+                &[
+                    "sys",
+                    "env",
+                    "environment",
+                    "time",
+                    "clock",
+                    "random",
+                    "proc",
+                    "process",
+                    "fs",
+                    "file",
+                    "filesystem",
+                    "open",
+                    "handle",
+                ],
+                "sys",
+                "System primitives",
+            ),
+            (
+                &["ctx", "context", "built-in", "builtin", "default"],
+                "ctx",
+                "Context directory",
+            ),
         ];
 
         // Check for matching keywords
@@ -191,7 +269,16 @@ impl<'a> HelpStore<'a> {
         }
 
         // Check for partial matches in topic names
-        let topics = ["commands", "mounts", "http", "paths", "examples", "stores", "registers", "sys"];
+        let topics = [
+            "commands",
+            "mounts",
+            "http",
+            "paths",
+            "examples",
+            "stores",
+            "registers",
+            "sys",
+        ];
         for topic in topics {
             if topic.contains(&query_lower) || query_lower.contains(topic) {
                 let suggestion = topic.to_string();
@@ -525,7 +612,6 @@ impl<'a> HelpStore<'a> {
             ]
         })
     }
-
 }
 
 impl Default for HelpStore<'_> {

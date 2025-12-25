@@ -394,7 +394,7 @@ impl Writer for AsyncHttpClientStore {
                 Some("await") => {
                     // Block until the request completes
                     let _status = handle.wait_for_completion();
-                    return Ok(Path::parse(&format!("handles/{}/response", id)).unwrap());
+                    Ok(Path::parse(&format!("handles/{}/response", id)).unwrap())
                 }
                 Some("await_timeout") => {
                     // Try to parse timeout from data
