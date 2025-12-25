@@ -420,7 +420,7 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
                     if s.starts_with('/') || s.contains('/') {
                         output.push_str(&format!(
                             "\n{}",
-                            Color::DarkGray.paint(format!("(use *{} to dereference)", path_str))
+                            Color::Cyan.dimmed().paint(format!("(use *{} to dereference)", path_str))
                         ));
                     }
                 }

@@ -46,13 +46,82 @@ impl HelpStore {
                 "stores" => self.stores_help(),
                 "registers" => self.registers_help(),
                 "sys" => self.sys_help(),
-                topic => json!({
-                    "error": format!("Unknown help topic: '{}'", topic),
-                    "hint": "Use a topic name or a system path like 'ctx/http'",
-                    "available_topics": ["commands", "mounts", "http", "paths", "examples", "stores", "registers", "sys"],
-                    "system_paths": ["ctx", "ctx/http", "ctx/help", "ctx/mounts", "ctx/sys"]
-                }),
+                _ => self.suggest_help(&full_path),
             },
+        }
+    }
+
+    /// Suggest relevant help topics based on an unknown path
+    fn suggest_help(&self, query: &str) -> JsonValue {
+        let query_lower = query.to_lowercase();
+        let mut suggestions = Vec::new();
+
+        // Keywords mapped to relevant topics
+        let keyword_topics: &[(&[&str], &str, &str)] = &[
+            // (keywords, topic, description)
+            (&["read", "write", "cd", "pwd", "exit", "quit", "command", "cmd"], "commands", "REPL commands"),
+            (&["mount", "unmount", "attach", "store", "memory", "local", "remote"], "mounts", "Mount system"),
+            (&["http", "request", "get", "post", "put", "delete", "api", "url", "fetch", "web", "rest"], "http", "HTTP requests"),
+            (&["path", "directory", "dir", "folder", "navigate", "cd", "pwd", "/", "relative", "absolute"], "paths", "Path syntax"),
+            (&["example", "tutorial", "howto", "how-to", "demo", "sample"], "examples", "Usage examples"),
+            (&["store", "memory", "local", "disk", "persist", "storage", "backend"], "stores", "Store types"),
+            (&["register", "@", "variable", "capture", "output", "save", "dereference", "*@"], "registers", "Registers"),
+            (&["sys", "env", "environment", "time", "clock", "random", "proc", "process", "fs", "file", "filesystem", "open", "handle"], "sys", "System primitives"),
+            (&["ctx", "context", "built-in", "builtin", "default"], "ctx", "Context directory"),
+        ];
+
+        // Check for matching keywords
+        for (keywords, topic, description) in keyword_topics {
+            for keyword in *keywords {
+                if query_lower.contains(keyword) {
+                    let suggestion = format!("{} - {}", topic, description);
+                    if !suggestions.contains(&suggestion) {
+                        suggestions.push(suggestion);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Check for partial matches in topic names
+        let topics = ["commands", "mounts", "http", "paths", "examples", "stores", "registers", "sys"];
+        for topic in topics {
+            if topic.contains(&query_lower) || query_lower.contains(topic) {
+                let suggestion = topic.to_string();
+                if !suggestions.iter().any(|s| s.starts_with(topic)) {
+                    suggestions.push(suggestion);
+                }
+            }
+        }
+
+        // If no suggestions, provide general help
+        if suggestions.is_empty() {
+            json!({
+                "error": format!("No help found for: '{}'", query),
+                "hint": "Try one of the available topics below",
+                "available_topics": {
+                    "commands": "REPL commands (read, write, cd, etc.)",
+                    "mounts": "Mounting and managing stores",
+                    "http": "Making HTTP requests",
+                    "paths": "Path syntax and navigation",
+                    "registers": "Capturing and using command output (@name, *@name)",
+                    "examples": "Usage examples",
+                    "stores": "Available store types",
+                    "sys": "System primitives (env, time, fs, proc, random)"
+                },
+                "system_paths": ["ctx", "ctx/http", "ctx/help", "ctx/mounts", "ctx/sys"],
+                "tip": "You can also get help for system paths, e.g., 'read /ctx/help/ctx/sys'"
+            })
+        } else {
+            json!({
+                "message": format!("No exact match for '{}', but these topics might help:", query),
+                "suggestions": suggestions,
+                "try": suggestions.iter().map(|s| {
+                    let topic = s.split(" - ").next().unwrap_or(s);
+                    format!("read /ctx/help/{}", topic)
+                }).collect::<Vec<_>>(),
+                "all_topics": ["commands", "mounts", "http", "paths", "examples", "stores", "registers", "sys"]
+            })
         }
     }
 
