@@ -1624,6 +1624,7 @@ dependencies = [
  "structfs-http",
  "structfs-json-store",
  "structfs-store",
+ "structfs-sys",
  "thiserror",
 ]
 

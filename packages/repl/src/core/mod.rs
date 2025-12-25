@@ -61,8 +61,11 @@ impl ReplCore {
 
             // Handle result
             match result {
-                CommandResult::Ok(None) => {}
-                CommandResult::Ok(Some(output)) => {
+                CommandResult::Ok { display: None, .. } => {}
+                CommandResult::Ok {
+                    display: Some(output),
+                    ..
+                } => {
                     io.write_output(Output::normal(output))?;
                 }
                 CommandResult::Error(msg) => {

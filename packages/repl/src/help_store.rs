@@ -34,6 +34,8 @@ impl HelpStore {
             "ctx/help" => self.root_help(),
             // Mount system
             "ctx/mounts" => self.mounts_help(),
+            // Context sys paths
+            "ctx/sys" => self.sys_help(),
             // Topic-based help (single component)
             _ => match path.components[0].as_str() {
                 "commands" => self.commands_help(),
@@ -43,11 +45,12 @@ impl HelpStore {
                 "examples" => self.examples_help(),
                 "stores" => self.stores_help(),
                 "registers" => self.registers_help(),
+                "sys" => self.sys_help(),
                 topic => json!({
                     "error": format!("Unknown help topic: '{}'", topic),
                     "hint": "Use a topic name or a system path like 'ctx/http'",
-                    "available_topics": ["commands", "mounts", "http", "paths", "examples", "stores", "registers"],
-                    "system_paths": ["ctx", "ctx/http", "ctx/help", "ctx/mounts"]
+                    "available_topics": ["commands", "mounts", "http", "paths", "examples", "stores", "registers", "sys"],
+                    "system_paths": ["ctx", "ctx/http", "ctx/help", "ctx/mounts", "ctx/sys"]
                 }),
             },
         }
@@ -61,14 +64,17 @@ impl HelpStore {
                 "/ctx/http": "Async HTTP broker - requests execute in background",
                 "/ctx/http_sync": "Sync HTTP broker - blocks on read until complete",
                 "/ctx/help": "This help system",
-                "/ctx/mounts": "Mount management - create and manage store mounts"
+                "/ctx/mounts": "Mount management - create and manage store mounts",
+                "/ctx/sys": "System primitives (env, time, proc, fs, random)"
             },
             "usage": [
                 "read /ctx/help          - Get help",
                 "read /ctx/help/http     - Help on HTTP broker",
                 "write /ctx/http <req>   - Queue an HTTP request (async)",
                 "read /ctx/http/outstanding/0         - Check status",
-                "read /ctx/http/outstanding/0/response - Get response when complete"
+                "read /ctx/http/outstanding/0/response - Get response when complete",
+                "read /ctx/sys/env/HOME  - Read environment variable",
+                "read /ctx/sys/time/now  - Get current time"
             ]
         })
     }
@@ -84,7 +90,8 @@ impl HelpStore {
                 "paths": "Path syntax and navigation",
                 "registers": "Registers for storing command output",
                 "examples": "Usage examples",
-                "stores": "Available store types"
+                "stores": "Available store types",
+                "sys": "System primitives (env, time, proc, fs, random)"
             },
             "quick_start": [
                 "read /ctx/mounts          - List current mounts",
@@ -339,6 +346,57 @@ impl HelpStore {
                 "Registers persist only for the current REPL session",
                 "Register contents are stored as JSON values",
                 "Non-JSON output is stored as a string"
+            ]
+        })
+    }
+
+    fn sys_help(&self) -> JsonValue {
+        json!({
+            "title": "System Primitives (/ctx/sys)",
+            "description": "OS primitives exposed through StructFS paths.",
+            "paths": {
+                "/ctx/sys/env": "Environment variables",
+                "/ctx/sys/time": "Clocks and sleep",
+                "/ctx/sys/random": "Random number generation",
+                "/ctx/sys/proc": "Process information",
+                "/ctx/sys/fs": "Filesystem operations"
+            },
+            "env": {
+                "read /ctx/sys/env": "List all environment variables",
+                "read /ctx/sys/env/HOME": "Read specific variable",
+                "write /ctx/sys/env/FOO \"bar\"": "Set environment variable",
+                "write /ctx/sys/env/FOO null": "Unset environment variable"
+            },
+            "time": {
+                "read /ctx/sys/time/now": "Current time (ISO 8601)",
+                "read /ctx/sys/time/now_unix": "Unix timestamp (seconds)",
+                "read /ctx/sys/time/now_unix_ms": "Unix timestamp (milliseconds)",
+                "read /ctx/sys/time/monotonic": "Monotonic clock (nanoseconds)",
+                "write /ctx/sys/time/sleep {\"ms\": 100}": "Sleep for 100ms"
+            },
+            "random": {
+                "read /ctx/sys/random/u64": "Random 64-bit integer",
+                "read /ctx/sys/random/uuid": "Random UUID v4"
+            },
+            "proc": {
+                "read /ctx/sys/proc/self/pid": "Current process ID",
+                "read /ctx/sys/proc/self/cwd": "Current working directory",
+                "read /ctx/sys/proc/self/args": "Command line arguments",
+                "read /ctx/sys/proc/self/exe": "Path to executable",
+                "read /ctx/sys/proc/self/env": "All environment variables"
+            },
+            "fs": {
+                "write /ctx/sys/fs/stat {\"path\": \"/some/file\"}": "Get file info",
+                "write /ctx/sys/fs/mkdir {\"path\": \"/new/dir\"}": "Create directory",
+                "write /ctx/sys/fs/rmdir {\"path\": \"/dir\"}": "Remove directory",
+                "write /ctx/sys/fs/unlink {\"path\": \"/file\"}": "Delete file",
+                "write /ctx/sys/fs/rename {\"from\": \"/a\", \"to\": \"/b\"}": "Rename file/dir"
+            },
+            "examples": [
+                "read /ctx/sys/env/PATH",
+                "read /ctx/sys/time/now",
+                "read /ctx/sys/random/uuid",
+                "read /ctx/sys/proc/self/pid"
             ]
         })
     }

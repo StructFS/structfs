@@ -25,8 +25,12 @@ use crate::store_context::StoreContext;
 
 /// Result of executing a command
 pub enum CommandResult {
-    /// Command succeeded, optionally with output to display
-    Ok(Option<String>),
+    /// Command succeeded, optionally with output to display and a value to capture
+    Ok {
+        display: Option<String>,
+        /// The actual value to capture in a register (if different from parsed display)
+        capture: Option<JsonValue>,
+    },
     /// Command failed with an error message
     Error(String),
     /// User requested to exit
@@ -35,12 +39,38 @@ pub enum CommandResult {
     Help,
 }
 
+impl CommandResult {
+    /// Create a simple Ok result with display text
+    fn ok_display(display: impl Into<String>) -> Self {
+        CommandResult::Ok {
+            display: Some(display.into()),
+            capture: None,
+        }
+    }
+
+    /// Create an Ok result with both display and capture value
+    fn ok_with_capture(display: impl Into<String>, capture: JsonValue) -> Self {
+        CommandResult::Ok {
+            display: Some(display.into()),
+            capture: Some(capture),
+        }
+    }
+
+    /// Create an Ok result with no output
+    fn ok_none() -> Self {
+        CommandResult::Ok {
+            display: None,
+            capture: None,
+        }
+    }
+}
+
 /// Parse and execute a command
 pub fn execute(input: &str, ctx: &mut StoreContext) -> CommandResult {
     let input = input.trim();
 
     if input.is_empty() {
-        return CommandResult::Ok(None);
+        return CommandResult::ok_none();
     }
 
     // Check for register output capture: @name command ...
@@ -93,41 +123,46 @@ fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext
     let result = execute_command(input, ctx);
 
     match result {
-        CommandResult::Ok(Some(ref output)) => {
-            // Try to parse the output as JSON (strip ANSI codes first)
-            let plain_output = strip_ansi_codes(output);
+        CommandResult::Ok { display, capture } => {
+            // Prefer explicit capture value, otherwise try to parse display as JSON
+            let (value, is_string) = if let Some(cap) = capture {
+                (cap, false)
+            } else if let Some(ref output) = display {
+                let plain_output = strip_ansi_codes(output);
+                match serde_json::from_str::<JsonValue>(&plain_output) {
+                    Ok(v) => (v, false),
+                    Err(_) => (JsonValue::String(plain_output), true),
+                }
+            } else {
+                (JsonValue::Null, false)
+            };
 
-            // Try to parse as JSON
-            match serde_json::from_str::<JsonValue>(&plain_output) {
-                Ok(value) => {
-                    ctx.set_register(register_name, value);
-                    CommandResult::Ok(Some(format!(
-                        "{} {}",
-                        Color::Magenta.paint("→"),
-                        Color::Magenta.paint(format!("@{}", register_name))
-                    )))
-                }
-                Err(_) => {
-                    // Store as string if not valid JSON
-                    ctx.set_register(register_name, JsonValue::String(plain_output));
-                    CommandResult::Ok(Some(format!(
-                        "{} {} {}",
-                        Color::Magenta.paint("→"),
-                        Color::Magenta.paint(format!("@{}", register_name)),
-                        Color::DarkGray.paint("(stored as string)")
-                    )))
-                }
-            }
-        }
-        CommandResult::Ok(None) => {
-            // No output to capture
-            ctx.set_register(register_name, JsonValue::Null);
-            CommandResult::Ok(Some(format!(
-                "{} {} {}",
-                Color::Magenta.paint("→"),
-                Color::Magenta.paint(format!("@{}", register_name)),
-                Color::DarkGray.paint("(null)")
-            )))
+            ctx.set_register(register_name, value.clone());
+
+            let type_hint = if value.is_null() {
+                Some("(null)")
+            } else if is_string {
+                Some("(stored as string)")
+            } else {
+                None
+            };
+
+            let msg = if let Some(hint) = type_hint {
+                format!(
+                    "{} {} {}",
+                    Color::Magenta.paint("→"),
+                    Color::Magenta.paint(format!("@{}", register_name)),
+                    Color::DarkGray.paint(hint)
+                )
+            } else {
+                format!(
+                    "{} {}",
+                    Color::Magenta.paint("→"),
+                    Color::Magenta.paint(format!("@{}", register_name))
+                )
+            };
+
+            CommandResult::ok_display(msg)
         }
         other => other,
     }
@@ -153,6 +188,76 @@ fn strip_ansi_codes(s: &str) -> String {
     }
 
     result
+}
+
+/// Check if a path string contains a dereference (*@)
+fn contains_dereference(path_str: &str) -> bool {
+    path_str.contains("*@")
+}
+
+/// Resolve all dereferences (*@register) in a path string.
+/// Supports patterns like:
+/// - `*@handle` - simple dereference
+/// - `*@handle/subpath` - dereference with suffix
+/// - `/prefix/*@handle` - prefix with dereference
+/// - `/prefix/*@handle/suffix` - prefix, dereference, and suffix
+///
+/// Returns the resolved path string, or an error message.
+fn resolve_dereference(path_str: &str, ctx: &mut StoreContext) -> Result<String, String> {
+    if !contains_dereference(path_str) {
+        return Ok(path_str.to_string());
+    }
+
+    let mut result = String::new();
+    let mut remaining = path_str;
+
+    while let Some(deref_pos) = remaining.find("*@") {
+        // Add everything before the dereference
+        result.push_str(&remaining[..deref_pos]);
+
+        // Skip past "*@"
+        let after_star_at = &remaining[deref_pos + 2..];
+
+        // Find the end of the register name (next / or end of string)
+        let name_end = after_star_at
+            .find('/')
+            .unwrap_or(after_star_at.len());
+
+        let register_name = &after_star_at[..name_end];
+
+        if register_name.is_empty() {
+            return Err("Invalid dereference: empty register name after *@".to_string());
+        }
+
+        // Read the register value
+        let reg_path = format!("@{}", register_name);
+        let value = ctx
+            .read_register(&reg_path)
+            .map_err(|e| format!("Failed to read register '{}': {}", register_name, e))?
+            .ok_or_else(|| format!("Register '{}' does not exist", register_name))?;
+
+        // Extract the path string from the register value
+        let deref_value = match value {
+            JsonValue::String(s) => s,
+            _ => {
+                return Err(format!(
+                    "Register '{}' does not contain a path string",
+                    register_name
+                ))
+            }
+        };
+
+        // Add the dereferenced value
+        result.push_str(&deref_value);
+
+        // Continue with the rest of the string
+        remaining = &after_star_at[name_end..];
+    }
+
+    // Add any remaining content after the last dereference
+    result.push_str(remaining);
+
+    Ok(result)
 }
 
 /// Execute a command without register capture
@@ -276,12 +381,20 @@ pub fn format_help() -> String {
         "  Write to register:        {}\n",
         arg_style.paint("write @temp {\"key\": \"value\"}")
     ));
+    help.push_str(&format!(
+        "  Dereference register:     {}\n",
+        arg_style.paint("read *@handle  or  write *@handle \"data\"")
+    ));
+    help.push_str(&format!(
+        "  Dereference with suffix:  {}\n",
+        arg_style.paint("read *@handle/meta")
+    ));
 
     help.push_str(&format!(
         "\n{}",
         Style::new()
             .italic()
-            .paint("Paths: Use '/' for root, '..' to go up, '@name' for registers")
+            .paint("Paths: Use '/' for root, '..' to go up, '@name' for registers, '*@name' to dereference")
     ));
 
     help
@@ -290,31 +403,54 @@ pub fn format_help() -> String {
 fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
     let path_str = if args.is_empty() { "." } else { args };
 
+    // Resolve any dereferences (*@register) in the path
+    let path_str = match resolve_dereference(path_str, ctx) {
+        Ok(p) => p,
+        Err(e) => return CommandResult::Error(e),
+    };
+
     // Check if this is a register path
-    if StoreContext::is_register_path(path_str) {
-        match ctx.read_register(path_str) {
-            Ok(Some(value)) => return CommandResult::Ok(Some(format_json(&value))),
+    if StoreContext::is_register_path(&path_str) {
+        match ctx.read_register(&path_str) {
+            Ok(Some(value)) => {
+                let mut output = format_json(&value);
+
+                // Add dereference hint if the value looks like a path
+                if let JsonValue::String(s) = &value {
+                    if s.starts_with('/') || s.contains('/') {
+                        output.push_str(&format!(
+                            "\n{}",
+                            Color::DarkGray.paint(format!("(use *{} to dereference)", path_str))
+                        ));
+                    }
+                }
+
+                return CommandResult::ok_with_capture(output, value);
+            }
             Ok(None) => {
-                return CommandResult::Ok(Some(format!(
-                    "{}",
-                    Color::Yellow.paint("null (register does not exist)")
-                )))
+                return CommandResult::ok_with_capture(
+                    format!("{}", Color::Yellow.paint("null (register does not exist)")),
+                    JsonValue::Null,
+                )
             }
             Err(e) => return CommandResult::Error(format!("Read error: {}", e)),
         }
     }
 
-    let path = match ctx.resolve_path(path_str) {
+    let path = match ctx.resolve_path(&path_str) {
         Ok(p) => p,
         Err(e) => return CommandResult::Error(format!("Invalid path: {}", e)),
     };
 
     match ctx.read(&path) {
-        Ok(Some(value)) => CommandResult::Ok(Some(format_json(&value))),
-        Ok(None) => CommandResult::Ok(Some(format!(
-            "{}",
-            Color::Yellow.paint("null (path does not exist or no store mounted)")
-        ))),
+        Ok(Some(value)) => CommandResult::ok_with_capture(format_json(&value), value),
+        Ok(None) => CommandResult::ok_with_capture(
+            format!(
+                "{}",
+                Color::Yellow.paint("null (path does not exist or no store mounted)")
+            ),
+            JsonValue::Null,
+        ),
         Err(e) => CommandResult::Error(format!("Read error: {}", e)),
     }
 }
@@ -329,6 +465,12 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
                     .to_string(),
             )
         }
+    };
+
+    // Resolve any dereferences (*@register) in the path
+    let path_str = match resolve_dereference(&path_str, ctx) {
+        Ok(p) => p,
+        Err(e) => return CommandResult::Error(e),
     };
 
     // Get the value - either from JSON or from a register
@@ -352,12 +494,16 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
     // Check if destination is a register
     if StoreContext::is_register_path(&path_str) {
         match ctx.write_register(&path_str, &value) {
-            Ok(_) => {
-                return CommandResult::Ok(Some(format!(
-                    "{} {}",
-                    Color::Green.paint("ok"),
-                    Color::Magenta.paint(&path_str)
-                )))
+            Ok(result_path) => {
+                let path_string = format_path(&result_path);
+                return CommandResult::ok_with_capture(
+                    format!(
+                        "{} {}",
+                        Color::Green.paint("ok"),
+                        Color::Magenta.paint(&path_str)
+                    ),
+                    JsonValue::String(path_string),
+                );
             }
             Err(e) => return CommandResult::Error(format!("Write error: {}", e)),
         }
@@ -378,21 +524,22 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
                 path.join(&result_path)
             };
 
+            // The capture value is the result path as a string
+            let path_string = format_path(&full_path);
+
             // Check if the result path differs from the write destination
             // (indicates a broker-style store that returns a handle)
             let output = if full_path != path && !result_path.is_empty() {
                 format!(
-                    "{}\n{} {}\n{} {}",
+                    "{}\n{} {}",
                     Color::Green.paint("ok"),
                     Color::Cyan.paint("result path:"),
-                    format_path(&full_path),
-                    Color::DarkGray.paint("(read from this path to get the result)"),
-                    ""
+                    path_string
                 )
             } else {
                 format!("{}", Color::Green.paint("ok"))
             };
-            CommandResult::Ok(Some(output))
+            CommandResult::ok_with_capture(output, JsonValue::String(path_string))
         }
         Err(e) => CommandResult::Error(format!("Write error: {}", e)),
     }
@@ -401,58 +548,71 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
 fn cmd_cd(args: &str, ctx: &mut StoreContext) -> CommandResult {
     let path_str = if args.is_empty() { "/" } else { args };
 
-    let path = match ctx.resolve_path(path_str) {
+    // Resolve any dereferences (*@register) in the path
+    let path_str = match resolve_dereference(path_str, ctx) {
+        Ok(p) => p,
+        Err(e) => return CommandResult::Error(e),
+    };
+
+    let path = match ctx.resolve_path(&path_str) {
         Ok(p) => p,
         Err(e) => return CommandResult::Error(format!("Invalid path: {}", e)),
     };
 
     ctx.set_current_path(path);
-    CommandResult::Ok(None)
+    CommandResult::ok_none()
 }
 
 fn cmd_pwd(ctx: &mut StoreContext) -> CommandResult {
-    CommandResult::Ok(Some(format_path(ctx.current_path())))
+    let path_str = format_path(ctx.current_path());
+    CommandResult::ok_with_capture(&path_str, JsonValue::String(path_str.clone()))
 }
 
 fn cmd_mounts(ctx: &mut StoreContext) -> CommandResult {
     let mounts = ctx.list_mounts();
     if mounts.is_empty() {
-        CommandResult::Ok(Some(format!(
+        CommandResult::ok_display(format!(
             "{}",
             Color::Yellow.paint(
                 "No mounts. Use 'write /ctx/mounts/<name> {\"type\": \"memory\"}' to mount a store."
             )
-        )))
+        ))
     } else {
         let mut output = String::new();
-        for mount in mounts {
+        for mount in &mounts {
             output.push_str(&format!(
                 "  {} -> {:?}\n",
                 Color::Cyan.paint(&mount.path),
                 mount.config
             ));
         }
-        CommandResult::Ok(Some(output.trim_end().to_string()))
+        // Capture the mounts as JSON
+        let capture = serde_json::to_value(&mounts).unwrap_or(JsonValue::Null);
+        CommandResult::ok_with_capture(output.trim_end().to_string(), capture)
     }
 }
 
 fn cmd_registers(ctx: &mut StoreContext) -> CommandResult {
     let registers = ctx.list_registers();
     if registers.is_empty() {
-        CommandResult::Ok(Some(format!(
+        CommandResult::ok_display(format!(
             "{}",
             Color::Yellow
                 .paint("No registers. Use '@name read <path>' to store output in a register.")
-        )))
+        ))
     } else {
         let mut output = String::new();
-        for name in registers {
+        let names: Vec<String> = registers.iter().map(|s| (*s).clone()).collect();
+        for name in &names {
             output.push_str(&format!(
                 "  {}\n",
                 Color::Magenta.paint(format!("@{}", name))
             ));
         }
-        CommandResult::Ok(Some(output.trim_end().to_string()))
+        CommandResult::ok_with_capture(
+            output.trim_end().to_string(),
+            JsonValue::Array(names.into_iter().map(JsonValue::String).collect()),
+        )
     }
 }
 

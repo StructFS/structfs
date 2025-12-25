@@ -17,6 +17,7 @@ use structfs_json_store::JSONLocalStore;
 use structfs_store::{
     Error as StoreError, MountConfig, MountStore, Path, Reader, StoreBox, StoreFactory, Writer,
 };
+use structfs_sys::SysStore;
 
 use crate::help_store::HelpStore;
 use crate::register_store::RegisterStore;
@@ -85,6 +86,7 @@ impl StoreFactory for ReplStoreFactory {
                 Ok(StoreBox::new(store))
             }
             MountConfig::Help => Ok(StoreBox::new(HelpStore::new())),
+            MountConfig::Sys => Ok(StoreBox::new(SysStore::new())),
         }
     }
 }
@@ -111,6 +113,10 @@ impl StoreContext {
         }
         if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
             eprintln!("Warning: Failed to mount help store: {}", e);
+        }
+        // System primitives (env, time, proc, fs, random)
+        if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
+            eprintln!("Warning: Failed to mount sys store: {}", e);
         }
 
         Self {

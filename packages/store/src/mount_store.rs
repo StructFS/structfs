@@ -38,6 +38,8 @@ pub enum MountConfig {
     Structfs { url: String },
     /// Help/documentation store (read-only)
     Help,
+    /// System primitives store (env, time, proc, fs, random)
+    Sys,
 }
 
 /// Information about a mount point
