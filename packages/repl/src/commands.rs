@@ -102,8 +102,7 @@ fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext
                 Ok(value) => {
                     ctx.set_register(register_name, value);
                     CommandResult::Ok(Some(format!(
-                        "{}\n{} {}",
-                        output,
+                        "{} {}",
                         Color::Magenta.paint("→"),
                         Color::Magenta.paint(format!("@{}", register_name))
                     )))
@@ -112,8 +111,7 @@ fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext
                     // Store as string if not valid JSON
                     ctx.set_register(register_name, JsonValue::String(plain_output));
                     CommandResult::Ok(Some(format!(
-                        "{}\n{} {} {}",
-                        output,
+                        "{} {} {}",
                         Color::Magenta.paint("→"),
                         Color::Magenta.paint(format!("@{}", register_name)),
                         Color::DarkGray.paint("(stored as string)")
