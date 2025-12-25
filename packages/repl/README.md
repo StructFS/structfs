@@ -45,8 +45,10 @@ The REPL starts with these mounts:
 
 | Path | Description |
 |------|-------------|
-| `/ctx/http` | HTTP broker for making requests to any URL |
+| `/ctx/http` | Async HTTP broker (background execution) |
+| `/ctx/http_sync` | Sync HTTP broker (blocks until complete) |
 | `/ctx/help` | Built-in documentation system |
+| `/ctx/sys` | System primitives (env, time, proc, fs, random) |
 
 ## Examples
 
@@ -82,11 +84,33 @@ result path: /ctx/http/outstanding/0
 > read /ctx/help/http
 ```
 
+## Registers
+
+Registers store command output for later use:
+
+```bash
+# Capture output to a register
+> @result read /ctx/sys/time/now
+
+# Read from register
+> read @result
+"2024-01-15T10:30:00Z"
+
+# Dereference register to use its value as a path
+> @handle write /ctx/sys/fs/open {"path": "/tmp/file", "mode": "read"}
+> read *@handle          # Uses handle value as path
+> read /foo/*@handle     # Interpolation anywhere in path
+
+# List all registers
+> registers
+```
+
 ## Features
 
 - **Syntax highlighting**: JSON is highlighted as you type
 - **Tab completion**: Complete commands with Tab
 - **History**: Command history persisted across sessions
+- **Registers**: Store and reuse command output with `@name` and `*@name`
 - **Vi mode**: Automatically detected from EDITOR, .inputrc, or STRUCTFS_EDIT_MODE
 
 ## Path Syntax

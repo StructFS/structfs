@@ -53,11 +53,26 @@ pub enum MountConfig {
     Memory,                        // In-memory JSON
     Local { path: String },        // Local filesystem
     Http { url: String },          // HTTP client with base URL
-    HttpBroker,                    // HTTP broker for any URL
+    HttpBroker,                    // Sync HTTP broker (blocks on read)
+    AsyncHttpBroker,               // Async HTTP broker (background execution)
     Structfs { url: String },      // Remote StructFS server
     Help,                          // Documentation store
+    Sys,                           // OS primitives store
 }
 ```
+
+### StoreRegistration
+
+Stores can declare their documentation path for the docs protocol:
+
+```rust
+use structfs_store::StoreRegistration;
+
+// Declare that this store provides docs at the "docs" path
+let registration = StoreRegistration::with_docs("docs");
+```
+
+The help store uses this to mount store documentation at `/ctx/help/<store-name>`.
 
 ## OverlayStore
 

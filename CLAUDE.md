@@ -11,6 +11,7 @@ packages/
 ├── store/       # Core traits (Reader, Writer, Path) and MountStore
 ├── json_store/  # JSON-based implementations (in-memory, local disk)
 ├── http/        # HTTP client store, broker store, remote StructFS client
+├── sys/         # OS primitives (env, time, proc, fs, random)
 └── repl/        # Interactive REPL with syntax highlighting and completion
 ```
 
@@ -20,6 +21,8 @@ packages/
 - **MountStore**: Routes operations to different stores based on path prefixes
 - **Overlay pattern**: Stores can be mounted at paths, creating a unified tree
 - **Broker pattern**: HTTP broker queues requests on write, executes on read
+- **Docs protocol**: Stores can provide documentation at a `docs` path; the help store mounts these for unified access
+- **Cross-store access via mounting**: When a store needs to read from other stores, mount the relevant paths into it (no special traits needed)
 
 ## Development Commands
 
@@ -52,7 +55,13 @@ cargo run -p structfs-repl
 
 3. **Mount management through stores**: Mounts are managed by writing to `/_mounts/*` paths, not through special APIs.
 
-4. **Default context mounts**: The REPL provides `/ctx/http` (HTTP broker) and `/ctx/help` (documentation) by default.
+4. **Default context mounts**: The REPL provides built-in stores at `/ctx/*`:
+   - `/ctx/http` - Async HTTP broker (background execution)
+   - `/ctx/http_sync` - Sync HTTP broker (blocks until complete)
+   - `/ctx/help` - Documentation system (with mounted store docs)
+   - `/ctx/sys` - OS primitives (env, time, proc, fs, random)
+
+5. **Docs protocol**: Stores expose documentation at their `docs` path. The HelpStore mounts these internally, so `read /ctx/help/sys` reads from the sys store's docs.
 
 ## Common Patterns
 
@@ -74,6 +83,39 @@ read /ctx/http/outstanding/0
 // Returns: HttpResponse with status, headers, body
 ```
 
+### The sys store
+
+OS primitives exposed through paths:
+
+```bash
+read /ctx/sys/env/HOME           # Environment variables
+read /ctx/sys/time/now           # Current time (ISO 8601)
+read /ctx/sys/random/uuid        # Random UUID v4
+read /ctx/sys/proc/self/pid      # Process ID
+write /ctx/sys/fs/open {"path": "/tmp/file", "mode": "write"}  # File handles
+```
+
+### REPL Registers
+
+Registers store command output for later use:
+
+```bash
+@handle write /ctx/sys/fs/open {"path": "/tmp/test", "mode": "write"}
+write *@handle "Hello"           # Dereference to use as path
+read @handle                     # Read register contents
+```
+
+### Adding store documentation (docs protocol)
+
+1. Create a `DocsStore` that returns documentation as JSON
+2. Mount it at `docs` in your store (via OverlayStore)
+3. The help store will mount it for unified access at `/ctx/help/<store-name>`
+
+Example from sys store:
+```rust
+overlay.add_layer(Path::parse("docs").unwrap(), DocsStore::new());
+```
+
 ## Testing
 
 - Unit tests live alongside code in `#[cfg(test)]` modules
@@ -84,6 +126,11 @@ read /ctx/http/outstanding/0
 
 - `packages/store/src/path.rs` - Path parsing and validation
 - `packages/store/src/mount_store.rs` - MountConfig enum and mount management
+- `packages/store/src/server.rs` - StoreRegistration for the docs protocol
 - `packages/http/src/broker.rs` - HTTP broker store implementation
+- `packages/sys/src/lib.rs` - SysStore composition via OverlayStore
+- `packages/sys/src/docs.rs` - DocsStore for sys documentation (example of docs protocol)
+- `packages/sys/src/fs/mod.rs` - File handle management with encoding support
 - `packages/repl/src/store_context.rs` - REPL's store factory and default mounts
-- `packages/repl/src/help_store.rs` - In-REPL documentation system
+- `packages/repl/src/help_store.rs` - Help system with mounted store docs
+- `packages/repl/src/commands.rs` - Command parsing, register handling, dereference syntax
