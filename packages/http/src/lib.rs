@@ -84,6 +84,7 @@ pub mod error;
 pub mod handle;
 pub mod types;
 
+// Legacy implementations (to be deprecated)
 #[cfg(feature = "blocking")]
 pub mod async_broker;
 
@@ -98,6 +99,10 @@ pub mod remote;
 
 #[cfg(feature = "async")]
 pub mod async_client;
+
+// New core-store based implementations
+#[cfg(feature = "blocking")]
+pub mod core;
 
 // Re-export main types
 pub use error::Error;

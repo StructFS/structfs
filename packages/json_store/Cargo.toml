@@ -7,7 +7,13 @@ repository.workspace = true
 description = "JSON-based store implementations for StructFS"
 
 [dependencies]
+# Legacy (to be deprecated)
 structfs-store = { workspace = true }
+
+# New architecture
+structfs-core-store = { path = "../core-store" }
+structfs-serde-store = { path = "../serde-store" }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 erased-serde = { workspace = true }
