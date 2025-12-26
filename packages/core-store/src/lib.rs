@@ -27,6 +27,8 @@ mod bridge;
 mod error;
 mod format;
 mod lazy_record;
+pub mod mount_store;
+pub mod overlay_store;
 mod path;
 mod record;
 mod traits;

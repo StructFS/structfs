@@ -1584,6 +1584,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "serde",
  "serde_json",
  "structfs-ll-store",
  "thiserror",
@@ -1621,6 +1622,22 @@ dependencies = [
  "structfs-store",
  "tempfile",
  "walkdir",
+]
+
+[[package]]
+name = "structfs-legacy-adapter"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "erased-serde",
+ "serde",
+ "serde_json",
+ "structfs-core-store",
+ "structfs-json-store",
+ "structfs-serde-store",
+ "structfs-store",
+ "thiserror",
 ]
 
 [[package]]
