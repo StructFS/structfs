@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::HttpResponse;
-
 /// The state of an async HTTP request
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -76,37 +74,9 @@ impl RequestStatus {
     }
 }
 
-/// Internal state for a request handle
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct HandleState {
-    pub status: RequestStatus,
-    pub response: Option<HttpResponse>,
-}
-
-#[allow(dead_code)]
-impl HandleState {
-    pub fn new(id: String) -> Self {
-        Self {
-            status: RequestStatus::pending(id),
-            response: None,
-        }
-    }
-
-    pub fn complete(&mut self, response: HttpResponse) {
-        self.status = RequestStatus::complete(self.status.id.clone());
-        self.response = Some(response);
-    }
-
-    pub fn fail(&mut self, error: String) {
-        self.status = RequestStatus::failed(self.status.id.clone(), error);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn request_status_pending() {
@@ -142,40 +112,6 @@ mod tests {
         assert_eq!(status.id, "789");
         assert_eq!(status.error, Some("connection refused".to_string()));
         assert!(status.response_path.is_none());
-    }
-
-    #[test]
-    fn handle_state_new() {
-        let state = HandleState::new("test".to_string());
-        assert!(state.status.is_pending());
-        assert!(state.response.is_none());
-    }
-
-    #[test]
-    fn handle_state_complete() {
-        let mut state = HandleState::new("test".to_string());
-        let response = HttpResponse {
-            status: 200,
-            status_text: "OK".to_string(),
-            headers: HashMap::new(),
-            body: serde_json::json!({"result": "success"}),
-            body_text: None,
-        };
-        state.complete(response.clone());
-
-        assert!(state.status.is_complete());
-        assert!(state.response.is_some());
-        assert_eq!(state.response.unwrap().status, 200);
-    }
-
-    #[test]
-    fn handle_state_fail() {
-        let mut state = HandleState::new("test".to_string());
-        state.fail("network error".to_string());
-
-        assert!(state.status.is_failed());
-        assert_eq!(state.status.error, Some("network error".to_string()));
-        assert!(state.response.is_none());
     }
 
     #[test]

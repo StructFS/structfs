@@ -23,12 +23,51 @@ const OUTSTANDING_PREFIX: &str = "outstanding";
 
 type RequestId = u64;
 
+/// State of a request handle in the sync broker.
+///
+/// Requests transition through states: Queued -> Executed (with cached response or error).
+/// The response is cached and subsequent reads return the same result (idempotent).
+#[derive(Debug)]
+struct SyncRequestHandle {
+    request: HttpRequest,
+    response: Option<HttpResponse>,
+    error: Option<String>,
+}
+
+impl SyncRequestHandle {
+    fn new(request: HttpRequest) -> Self {
+        Self {
+            request,
+            response: None,
+            error: None,
+        }
+    }
+
+    /// Returns true if this handle has been executed (success or failure).
+    fn is_executed(&self) -> bool {
+        self.response.is_some() || self.error.is_some()
+    }
+}
+
 /// HTTP broker store for sync (blocking) requests (new architecture).
 ///
 /// Write requests are queued and executed when reading from the handle path.
+/// **Reads are idempotent**: the first read executes the request and caches the result;
+/// subsequent reads return the cached response.
+///
+/// ## Path Structure
+///
+/// | Path | Operation | Result |
+/// |------|-----------|--------|
+/// | `write /` | Queue request | Returns `outstanding/{id}` |
+/// | `read /outstanding` | List handles | Returns `[0, 1, 2, ...]` |
+/// | `read /outstanding/{id}` | Execute & return response | Returns cached response |
+/// | `read /outstanding/{id}/request` | View queued request | Returns original request |
+/// | `write /outstanding/{id} null` | Delete handle | Removes handle |
+///
 /// Generic over the HTTP executor to allow mocking in tests.
 pub struct HttpBrokerStore<E: HttpExecutor = ReqwestExecutor> {
-    requests: BTreeMap<RequestId, HttpRequest>,
+    handles: BTreeMap<RequestId, SyncRequestHandle>,
     next_request_id: RequestId,
     executor: E,
 }
@@ -40,7 +79,7 @@ impl HttpBrokerStore<ReqwestExecutor> {
             ReqwestExecutor::new(timeout).map_err(|e| crate::Error::InvalidUrl { message: e })?;
 
         Ok(Self {
-            requests: BTreeMap::new(),
+            handles: BTreeMap::new(),
             next_request_id: 0,
             executor,
         })
@@ -58,44 +97,71 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
     /// This is primarily useful for testing with mock executors.
     pub fn with_executor(executor: E) -> Self {
         Self {
-            requests: BTreeMap::new(),
+            handles: BTreeMap::new(),
             next_request_id: 0,
             executor,
         }
     }
 
-    /// Parse request ID from a path like "outstanding/123".
-    fn parse_request_id(path: &Path) -> Option<RequestId> {
-        if path.len() != 2 {
+    /// Parse request ID and optional sub-path from paths like:
+    /// - "outstanding" -> None (listing)
+    /// - "outstanding/123" -> Some((123, None))
+    /// - "outstanding/123/request" -> Some((123, Some("request")))
+    fn parse_handle_path(path: &Path) -> Option<(RequestId, Option<&str>)> {
+        if path.is_empty() || path[0] != OUTSTANDING_PREFIX {
             return None;
         }
-        if path[0] != OUTSTANDING_PREFIX {
+        if path.len() == 1 {
+            // Just "outstanding" - listing request
             return None;
         }
-        path[1].parse().ok()
+        let id: RequestId = path[1].parse().ok()?;
+        let sub_path = if path.len() > 2 {
+            Some(path[2].as_str())
+        } else {
+            None
+        };
+        Some((id, sub_path))
     }
 
-    /// Get a reference to the queued requests (for testing).
+    /// Check if a handle exists (for testing).
     #[cfg(test)]
-    pub fn requests(&self) -> &BTreeMap<RequestId, HttpRequest> {
-        &self.requests
+    pub fn has_handle(&self, id: RequestId) -> bool {
+        self.handles.contains_key(&id)
+    }
+
+    /// Get the number of handles (for testing).
+    #[cfg(test)]
+    pub fn handle_count(&self) -> usize {
+        self.handles.len()
     }
 }
 
 impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let request_id = Self::parse_request_id(from).ok_or_else(|| {
+        // Handle listing: read /outstanding -> [0, 1, 2, ...]
+        if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
+            let ids: Vec<structfs_core_store::Value> = self
+                .handles
+                .keys()
+                .map(|id| structfs_core_store::Value::Integer(*id as i64))
+                .collect();
+            return Ok(Some(Record::parsed(structfs_core_store::Value::Array(ids))));
+        }
+
+        // Parse /outstanding/{id} or /outstanding/{id}/request
+        let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| {
             Error::store(
                 "http_broker",
                 "read",
                 format!(
-                    "Invalid handle path '{}'. Expected format: outstanding/{{id}}",
+                    "Invalid path '{}'. Expected: outstanding, outstanding/{{id}}, or outstanding/{{id}}/request",
                     from
                 ),
             )
         })?;
 
-        let request = self.requests.remove(&request_id).ok_or_else(|| {
+        let handle = self.handles.get_mut(&request_id).ok_or_else(|| {
             Error::store(
                 "http_broker",
                 "read",
@@ -103,35 +169,93 @@ impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
             )
         })?;
 
-        let response = self.executor.execute(&request).map_err(|e| {
-            Error::store("http_broker", "read", format!("HTTP request failed: {}", e))
-        })?;
+        // Return queued request at /outstanding/{id}/request
+        if sub_path == Some("request") {
+            let value = to_value(&handle.request)
+                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+            return Ok(Some(Record::parsed(value)));
+        }
 
-        // Convert HttpResponse to Value using serde-store
-        let value = to_value(&response)
-            .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+        // Reject unknown sub-paths
+        if let Some(unknown) = sub_path {
+            return Err(Error::store(
+                "http_broker",
+                "read",
+                format!(
+                    "Unknown sub-path '{}'. Use 'request' to view the queued request.",
+                    unknown
+                ),
+            ));
+        }
 
-        Ok(Some(Record::parsed(value)))
+        // Execute on first read if not yet executed (idempotent)
+        if !handle.is_executed() {
+            match self.executor.execute(&handle.request) {
+                Ok(response) => handle.response = Some(response),
+                Err(e) => handle.error = Some(e),
+            }
+        }
+
+        // Return cached response or error
+        if let Some(ref response) = handle.response {
+            let value = to_value(response)
+                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+            Ok(Some(Record::parsed(value)))
+        } else if let Some(ref error) = handle.error {
+            Err(Error::store(
+                "http_broker",
+                "read",
+                format!("HTTP request failed: {}", error),
+            ))
+        } else {
+            unreachable!("handle.is_executed() was true but neither response nor error is set")
+        }
     }
 }
 
 impl<E: HttpExecutor> Writer for HttpBrokerStore<E> {
-    fn write(&mut self, _to: &Path, data: Record) -> Result<Path, Error> {
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-
-        // Convert Record to HttpRequest using serde-store
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         let value = data.into_value(&NoCodec)?;
-        let request: HttpRequest = from_value(value).map_err(|e| {
-            Error::decode(
-                structfs_core_store::Format::JSON,
-                format!("Data must be an HttpRequest: {}", e),
-            )
-        })?;
 
-        self.requests.insert(request_id, request);
+        // Delete handle: write null to /outstanding/{id}
+        if let Some((request_id, None)) = Self::parse_handle_path(to) {
+            if value == structfs_core_store::Value::Null {
+                self.handles.remove(&request_id);
+                return Ok(to.clone());
+            }
+            return Err(Error::store(
+                "http_broker",
+                "write",
+                "Cannot overwrite existing request. Write null to delete, or write to root to queue a new request.",
+            ));
+        }
 
-        Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))))
+        // Queue new request: write to root
+        if to.is_empty() {
+            let request: HttpRequest = from_value(value).map_err(|e| {
+                Error::decode(
+                    structfs_core_store::Format::JSON,
+                    format!("Data must be an HttpRequest: {}", e),
+                )
+            })?;
+
+            let request_id = self.next_request_id;
+            self.next_request_id += 1;
+
+            self.handles
+                .insert(request_id, SyncRequestHandle::new(request));
+
+            return Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))));
+        }
+
+        Err(Error::store(
+            "http_broker",
+            "write",
+            format!(
+                "Invalid write path '{}'. Write to root to queue a request, or write null to outstanding/{{id}} to delete.",
+                to
+            ),
+        ))
     }
 }
 
@@ -526,29 +650,37 @@ mod tests {
     // ==================== HttpBrokerStore tests ====================
 
     #[test]
-    fn test_parse_request_id() {
+    fn test_parse_handle_path() {
+        // Just "outstanding" returns None (listing)
         assert_eq!(
-            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/0")),
-            Some(0)
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("outstanding")),
+            None
+        );
+        // Basic handle path
+        assert_eq!(
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("outstanding/0")),
+            Some((0, None))
         );
         assert_eq!(
-            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/123")),
-            Some(123)
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("outstanding/123")),
+            Some((123, None))
         );
+        // With sub-path
         assert_eq!(
-            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding")),
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("outstanding/0/request")),
+            Some((0, Some("request")))
+        );
+        // Invalid paths
+        assert_eq!(
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("other/123")),
             None
         );
         assert_eq!(
-            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("other/123")),
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("outstanding/abc")),
             None
         );
         assert_eq!(
-            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/abc")),
-            None
-        );
-        assert_eq!(
-            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/0/extra")),
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("")),
             None
         );
     }
@@ -569,7 +701,7 @@ mod tests {
         assert_eq!(handle.to_string(), "outstanding/0");
 
         // Request should be queued
-        assert_eq!(broker.requests.len(), 1);
+        assert_eq!(broker.handle_count(), 1);
     }
 
     #[test]
@@ -630,7 +762,7 @@ mod tests {
 
         assert_eq!(h1.to_string(), "outstanding/0");
         assert_eq!(h2.to_string(), "outstanding/1");
-        assert_eq!(broker.requests().len(), 2);
+        assert_eq!(broker.handle_count(), 2);
 
         // Execute in reverse order
         let r2 = broker.read(&h2).unwrap().unwrap();
@@ -653,16 +785,13 @@ mod tests {
     }
 
     #[test]
-    fn test_broker_invalid_handle_path() {
+    fn test_broker_invalid_path() {
         let mock = MockExecutor::new();
         let mut broker = HttpBrokerStore::with_executor(mock);
 
         let result = broker.read(&path!("invalid"));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid handle path"));
+        assert!(result.unwrap_err().to_string().contains("Invalid path"));
     }
 
     #[test]
@@ -696,6 +825,256 @@ mod tests {
             Record::parsed(to_value(&"not a request").unwrap()),
         );
         assert!(result.is_err());
+    }
+
+    // ==================== Idempotency tests ====================
+
+    #[test]
+    fn test_broker_idempotent_read() {
+        let mock = MockExecutor::new().with_response(
+            "https://api.example.com/data",
+            MockExecutor::success_response(serde_json::json!({"value": 42})),
+        );
+
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        let request = HttpRequest::get("https://api.example.com/data");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // First read - executes and caches
+        let r1 = broker.read(&handle).unwrap().unwrap();
+        let v1 = r1.into_value(&NoCodec).unwrap();
+
+        // Second read - returns cached (idempotent)
+        let r2 = broker.read(&handle).unwrap().unwrap();
+        let v2 = r2.into_value(&NoCodec).unwrap();
+
+        // Results should be identical
+        assert_eq!(v1, v2);
+
+        // Handle should still exist
+        assert!(broker.has_handle(0));
+    }
+
+    #[test]
+    fn test_broker_idempotent_read_error_cached() {
+        let mock = MockExecutor::new().fail_with("Network timeout");
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        let request = HttpRequest::get("https://example.com");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // First read - fails and caches error
+        let r1 = broker.read(&handle);
+        assert!(r1.is_err());
+        assert!(r1.unwrap_err().to_string().contains("Network timeout"));
+
+        // Second read - returns same cached error
+        let r2 = broker.read(&handle);
+        assert!(r2.is_err());
+        assert!(r2.unwrap_err().to_string().contains("Network timeout"));
+    }
+
+    #[test]
+    fn test_broker_list_outstanding() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue multiple requests
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/a")).unwrap()),
+            )
+            .unwrap();
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/b")).unwrap()),
+            )
+            .unwrap();
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/c")).unwrap()),
+            )
+            .unwrap();
+
+        // List outstanding
+        let result = broker.read(&path!("outstanding")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            structfs_core_store::Value::Array(ids) => {
+                assert_eq!(ids.len(), 3);
+                assert_eq!(ids[0], structfs_core_store::Value::Integer(0));
+                assert_eq!(ids[1], structfs_core_store::Value::Integer(1));
+                assert_eq!(ids[2], structfs_core_store::Value::Integer(2));
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_broker_view_queued_request() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request with specific details
+        let request = HttpRequest::get("https://api.example.com/users")
+            .with_header("Authorization", "Bearer token123");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // Read the queued request (not the response)
+        let request_path = handle.join(&path!("request"));
+        let result = broker.read(&request_path).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        let retrieved: HttpRequest = from_value(value).unwrap();
+
+        // Should match what we queued
+        assert_eq!(retrieved.method, crate::types::Method::GET);
+        assert_eq!(retrieved.path, "https://api.example.com/users");
+        assert_eq!(
+            retrieved.headers.get("Authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_broker_unknown_subpath() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        // Try to read unknown sub-path
+        let result = broker.read(&path!("outstanding/0/unknown"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown sub-path"));
+    }
+
+    #[test]
+    fn test_broker_delete_handle() {
+        let mock = MockExecutor::new().with_response(
+            "/test",
+            MockExecutor::success_response(serde_json::json!({"ok": true})),
+        );
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue and execute a request
+        let handle = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+        broker.read(&handle).unwrap(); // Execute to cache response
+
+        // Handle should exist
+        assert!(broker.has_handle(0));
+
+        // Delete by writing null
+        broker
+            .write(&handle, Record::parsed(structfs_core_store::Value::Null))
+            .unwrap();
+
+        // Handle should be gone
+        assert!(!broker.has_handle(0));
+
+        // Reading should now fail
+        let result = broker.read(&handle);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_broker_delete_updates_listing() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue two requests
+        let h1 = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/a")).unwrap()),
+            )
+            .unwrap();
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/b")).unwrap()),
+            )
+            .unwrap();
+
+        // Delete first
+        broker
+            .write(&h1, Record::parsed(structfs_core_store::Value::Null))
+            .unwrap();
+
+        // Listing should only show second
+        let result = broker.read(&path!("outstanding")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            structfs_core_store::Value::Array(ids) => {
+                assert_eq!(ids.len(), 1);
+                assert_eq!(ids[0], structfs_core_store::Value::Integer(1));
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_broker_cannot_overwrite_request() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        let handle = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/original")).unwrap()),
+            )
+            .unwrap();
+
+        // Try to overwrite with non-null value
+        let result = broker.write(
+            &handle,
+            Record::parsed(to_value(&HttpRequest::get("/replacement")).unwrap()),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot overwrite"));
+    }
+
+    #[test]
+    fn test_broker_invalid_write_path() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Try to write to invalid path
+        let result = broker.write(
+            &path!("something/else"),
+            Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid write path"));
     }
 
     // ==================== HttpClientStore tests ====================
