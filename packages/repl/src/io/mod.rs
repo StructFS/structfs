@@ -6,7 +6,13 @@
 
 pub mod types;
 
+#[cfg(test)]
+pub mod test_host;
+
 pub use types::*;
+
+#[cfg(test)]
+pub use test_host::TestHost;
 
 /// Error type for I/O operations.
 #[derive(Debug, thiserror::Error)]

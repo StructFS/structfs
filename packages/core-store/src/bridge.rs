@@ -355,4 +355,192 @@ mod tests {
         let result = bridge.ll_read(&[&[0xFF, 0xFE]]);
         assert!(matches!(result, Err(LLError::Protocol { .. })));
     }
+
+    #[test]
+    fn ll_to_core_with_formats() {
+        let ll = TestLLStore::new();
+        let bridge = LLToCore::with_formats(ll, NoCodec, Format::JSON, Format::OCTET_STREAM);
+        assert_eq!(bridge.read_format, Format::JSON);
+        assert_eq!(bridge.write_format, Format::OCTET_STREAM);
+    }
+
+    #[test]
+    fn ll_to_core_inner_methods() {
+        let ll = TestLLStore::new();
+        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
+
+        // Test inner()
+        assert!(bridge.inner().data.is_empty());
+
+        // Test inner_mut()
+        bridge
+            .inner_mut()
+            .data
+            .insert(vec![b"key".to_vec()], Bytes::from_static(b"value"));
+        assert!(!bridge.inner().data.is_empty());
+
+        // Test into_inner()
+        let ll = bridge.into_inner();
+        assert!(!ll.data.is_empty());
+    }
+
+    #[test]
+    fn core_to_ll_inner_methods() {
+        let core = TestCoreStore::new();
+        let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
+
+        // Test inner()
+        assert!(bridge.inner().data.is_empty());
+
+        // Test inner_mut()
+        bridge.inner_mut().data.insert(
+            path!("key"),
+            Record::raw(Bytes::from_static(b"value"), Format::OCTET_STREAM),
+        );
+        assert!(!bridge.inner().data.is_empty());
+
+        // Test into_inner()
+        let core = bridge.into_inner();
+        assert!(!core.data.is_empty());
+    }
+
+    #[test]
+    fn ll_to_core_read_none() {
+        let ll = TestLLStore::new();
+        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
+
+        let result = bridge.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn core_to_ll_read_none() {
+        let core = TestCoreStore::new();
+        let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
+
+        let result = bridge.ll_read(&[b"nonexistent"]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn core_to_ll_write_invalid_utf8() {
+        let core = TestCoreStore::new();
+        let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
+
+        // Invalid UTF-8 sequence
+        let result = bridge.ll_write(&[&[0xFF, 0xFE]], Bytes::from_static(b"data"));
+        assert!(matches!(result, Err(LLError::Protocol { code: 1, .. })));
+    }
+
+    #[test]
+    fn path_from_bytes_empty() {
+        let result = path_from_bytes(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn path_from_bytes_single_component() {
+        let result = path_from_bytes(&[b"users"]).unwrap();
+        assert_eq!(result.to_string(), "users");
+    }
+
+    #[test]
+    fn path_from_bytes_multiple_components() {
+        let result = path_from_bytes(&[b"users", b"123", b"profile"]).unwrap();
+        assert_eq!(result.to_string(), "users/123/profile");
+    }
+
+    #[test]
+    fn path_from_ll_works() {
+        let ll_path = vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")];
+        let result = path_from_ll(&ll_path).unwrap();
+        assert_eq!(result.to_string(), "a/b");
+    }
+
+    #[test]
+    fn path_from_ll_invalid_utf8() {
+        let ll_path = vec![Bytes::from_static(&[0xFF, 0xFE])];
+        let result = path_from_ll(&ll_path);
+        assert!(result.is_err());
+    }
+
+    /// Store that always returns an error on read.
+    struct ErrorCoreStore;
+
+    impl Reader for ErrorCoreStore {
+        fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
+            Err(Error::Other {
+                message: "read error".into(),
+            })
+        }
+    }
+
+    impl Writer for ErrorCoreStore {
+        fn write(&mut self, _to: &Path, _data: Record) -> Result<Path, Error> {
+            Err(Error::Other {
+                message: "write error".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn core_to_ll_read_error() {
+        let core = ErrorCoreStore;
+        let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
+
+        let result = bridge.ll_read(&[b"any"]);
+        assert!(matches!(result, Err(LLError::Protocol { code: 2, .. })));
+    }
+
+    #[test]
+    fn core_to_ll_write_error() {
+        let core = ErrorCoreStore;
+        let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
+
+        let result = bridge.ll_write(&[b"any"], Bytes::from_static(b"data"));
+        assert!(matches!(result, Err(LLError::Protocol { code: 2, .. })));
+    }
+
+    /// LL store that always returns an error.
+    struct ErrorLLStore;
+
+    impl LLReader for ErrorLLStore {
+        fn ll_read(&mut self, _path: &[&[u8]]) -> Result<Option<Bytes>, LLError> {
+            Err(LLError::Protocol {
+                code: 99,
+                detail: Bytes::from_static(b"ll error"),
+            })
+        }
+    }
+
+    impl LLWriter for ErrorLLStore {
+        fn ll_write(&mut self, _path: &[&[u8]], _data: Bytes) -> Result<LLPath, LLError> {
+            Err(LLError::Protocol {
+                code: 99,
+                detail: Bytes::from_static(b"ll write error"),
+            })
+        }
+    }
+
+    #[test]
+    fn ll_to_core_read_error() {
+        let ll = ErrorLLStore;
+        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
+
+        let result = bridge.read(&path!("any"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ll error"));
+    }
+
+    #[test]
+    fn ll_to_core_write_error() {
+        let ll = ErrorLLStore;
+        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
+
+        let result = bridge.write(
+            &path!("any"),
+            Record::raw(Bytes::from_static(b"data"), Format::OCTET_STREAM),
+        );
+        assert!(result.is_err());
+    }
 }

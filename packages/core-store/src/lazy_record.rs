@@ -520,4 +520,119 @@ mod tests {
         let debug = format!("{:?}", record);
         assert!(debug.contains("is_parsed: true"));
     }
+
+    #[test]
+    fn value_to_json_handles_bytes() {
+        let bytes_value = Value::Bytes(vec![72, 101, 108, 108, 111]); // "Hello"
+        let json = value_to_json(&bytes_value);
+        assert!(matches!(json, serde_json::Value::String(_)));
+        let s = json.as_str().unwrap();
+        assert!(s.starts_with("base64:"));
+    }
+
+    #[test]
+    fn value_to_json_handles_float() {
+        let float_value = Value::Float(1.234567);
+        let json = value_to_json(&float_value);
+        assert!(json.is_number());
+    }
+
+    #[test]
+    fn value_to_json_handles_array() {
+        let array_value = Value::Array(vec![Value::Integer(1), Value::Integer(2)]);
+        let json = value_to_json(&array_value);
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn value_to_json_handles_map() {
+        let mut map = BTreeMap::new();
+        map.insert("key".to_string(), Value::String("value".to_string()));
+        let map_value = Value::Map(map);
+        let json = value_to_json(&map_value);
+        assert!(json.is_object());
+        assert_eq!(json.get("key").unwrap().as_str().unwrap(), "value");
+    }
+
+    #[test]
+    fn json_to_value_handles_float() {
+        let json = serde_json::json!(1.234567);
+        let value = json_to_value(json);
+        assert!(matches!(value, Value::Float(_)));
+    }
+
+    #[test]
+    fn json_to_value_handles_null() {
+        let json = serde_json::Value::Null;
+        let value = json_to_value(json);
+        assert!(matches!(value, Value::Null));
+    }
+
+    #[test]
+    fn json_to_value_handles_bool() {
+        let json = serde_json::json!(true);
+        let value = json_to_value(json);
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn codec_unsupported_format_decode() {
+        let codec = TestJsonCodec;
+        let result = codec.decode(&Bytes::from_static(b"data"), &Format::OCTET_STREAM);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn codec_unsupported_format_encode() {
+        let codec = TestJsonCodec;
+        let result = codec.encode(&Value::Null, &Format::OCTET_STREAM);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn codec_supports() {
+        let codec = TestJsonCodec;
+        assert!(codec.supports(&Format::JSON));
+        assert!(!codec.supports(&Format::OCTET_STREAM));
+    }
+
+    #[test]
+    fn base64_encode_full_chunks() {
+        // Test with bytes that divide evenly into 3
+        let result = base64_encode(b"Man");
+        assert_eq!(result, "TWFu");
+    }
+
+    #[test]
+    fn base64_encode_partial_chunks() {
+        // Test with 2 bytes (needs padding)
+        let result = base64_encode(b"Ma");
+        assert_eq!(result, "TWE=");
+    }
+
+    #[test]
+    fn base64_encode_single_byte() {
+        // Test with 1 byte (needs double padding)
+        let result = base64_encode(b"M");
+        assert_eq!(result, "TQ==");
+    }
+
+    #[test]
+    fn decode_invalid_json_error() {
+        let codec = TestJsonCodec;
+        let result = codec.decode(&Bytes::from_static(b"not valid json{"), &Format::JSON);
+        assert!(result.is_err());
+        // The error message format depends on the error type
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Decode") || err.to_string().contains("expected"));
+    }
+
+    #[test]
+    fn value_to_json_handles_nan() {
+        // NaN can't be represented in JSON, should return Null
+        let float_value = Value::Float(f64::NAN);
+        let json = value_to_json(&float_value);
+        assert!(json.is_null());
+    }
 }

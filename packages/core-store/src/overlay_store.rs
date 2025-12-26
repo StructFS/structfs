@@ -340,4 +340,138 @@ mod tests {
         let result = overlay.read(&path!("writeonly/key")).unwrap();
         assert!(result.is_none());
     }
+
+    #[test]
+    fn only_readable_inner() {
+        let store = TestStore::new("test");
+        let readable = OnlyReadable::new(store);
+        let _inner = readable.inner();
+        // Just verify it compiles and can be called
+    }
+
+    #[test]
+    fn only_writable_inner() {
+        let store = TestStore::new("test");
+        let writable = OnlyWritable::new(store);
+        let _inner = writable.inner();
+        // Just verify it compiles and can be called
+    }
+
+    #[test]
+    fn sub_store_view_read() {
+        let mut store = TestStore::new("test");
+        store
+            .write(&path!("prefix/key"), Record::parsed(Value::from("value")))
+            .unwrap();
+
+        let mut view = SubStoreView::new(store, path!("prefix"));
+
+        // Reading "key" should read "prefix/key" from the inner store
+        let result = view.read(&path!("key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("value"));
+    }
+
+    #[test]
+    fn sub_store_view_write() {
+        let store = TestStore::new("test");
+        let mut view = SubStoreView::new(store, path!("prefix"));
+
+        // Writing to "key" should write to "prefix/key" in the inner store
+        view.write(&path!("key"), Record::parsed(Value::from("data")))
+            .unwrap();
+
+        let result = view.read(&path!("key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("data"));
+    }
+
+    #[test]
+    fn layer_count() {
+        let mut overlay = OverlayStore::new();
+        assert_eq!(overlay.layer_count(), 0);
+
+        overlay.add_layer(path!("a"), TestStore::new("a"));
+        assert_eq!(overlay.layer_count(), 1);
+
+        overlay.add_layer(path!("b"), TestStore::new("b"));
+        assert_eq!(overlay.layer_count(), 2);
+    }
+
+    #[test]
+    fn overlay_store_default() {
+        let overlay = OverlayStore::default();
+        assert_eq!(overlay.layer_count(), 0);
+    }
+
+    #[test]
+    fn write_no_route_error() {
+        let mut overlay = OverlayStore::new();
+        let result = overlay.write(&path!("nonexistent"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No route"));
+    }
+
+    #[test]
+    fn only_writable_write() {
+        let store = TestStore::new("test");
+        let mut writable = OnlyWritable::new(store);
+
+        // Should be able to write
+        let result = writable.write(&path!("key"), Record::parsed(Value::from("data")));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn only_readable_read() {
+        let mut store = TestStore::new("test");
+        store
+            .write(&path!("key"), Record::parsed(Value::from("data")))
+            .unwrap();
+
+        let mut readable = OnlyReadable::new(store);
+
+        // Should be able to read
+        let result = readable.read(&path!("key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("data"));
+    }
+
+    #[test]
+    fn only_readable_error_message() {
+        let store = TestStore::new("test");
+        let mut readable = OnlyReadable::new(store);
+
+        let result = readable.write(&path!("test/path"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("read-only"));
+        assert!(err.to_string().contains("test/path"));
+    }
+
+    #[test]
+    fn write_returns_full_path() {
+        let mut overlay = OverlayStore::new();
+        overlay.add_layer(path!("prefix"), TestStore::new("test"));
+
+        // Write returns the full path including the prefix
+        let result = overlay.write(&path!("prefix/key"), Record::parsed(Value::from("data")));
+        assert_eq!(result.unwrap(), path!("prefix/key"));
+    }
+
+    #[test]
+    fn nested_prefix() {
+        let mut overlay = OverlayStore::new();
+
+        let mut store = TestStore::new("nested");
+        store
+            .write(&path!("deep/key"), Record::parsed(Value::from("value")))
+            .unwrap();
+
+        overlay.add_layer(path!("a/b"), store);
+
+        let result = overlay.read(&path!("a/b/deep/key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("value"));
+    }
 }

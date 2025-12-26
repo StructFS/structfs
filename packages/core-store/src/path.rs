@@ -343,4 +343,195 @@ mod tests {
         let p2 = Path::try_from_ll_path(&ll.iter().collect::<Vec<_>>()).unwrap();
         assert_eq!(p, p2);
     }
+
+    #[test]
+    fn path_error_display_invalid_component() {
+        let err = PathError::InvalidComponent {
+            component: "bad-name".to_string(),
+            position: 2,
+            message: "test message".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("bad-name"));
+        assert!(display.contains("position 2"));
+        assert!(display.contains("test message"));
+    }
+
+    #[test]
+    fn path_error_display_invalid_path() {
+        let err = PathError::InvalidPath {
+            message: "some reason".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("invalid path"));
+        assert!(display.contains("some reason"));
+    }
+
+    #[test]
+    fn path_error_is_error() {
+        let err: Box<dyn std::error::Error> = Box::new(PathError::InvalidPath {
+            message: "test".to_string(),
+        });
+        let _ = err.to_string();
+    }
+
+    #[test]
+    fn from_components_valid() {
+        let p = Path::from_components(vec!["foo".to_string(), "bar".to_string()]);
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid component")]
+    fn from_components_invalid_panics() {
+        Path::from_components(vec!["foo".to_string(), "bad-name".to_string()]);
+    }
+
+    #[test]
+    fn try_from_components_valid() {
+        let p = Path::try_from_components(vec!["foo".to_string(), "bar".to_string()]).unwrap();
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn try_from_components_invalid() {
+        let result = Path::try_from_components(vec!["foo".to_string(), "bad-name".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_empty_component_rejected() {
+        let result = Path::try_from_components(vec!["".to_string()]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("empty component"));
+    }
+
+    #[test]
+    fn validate_underscore_alone_rejected() {
+        // Underscore alone without follow-up character should be rejected
+        let result = Path::parse("_");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_underscore_with_continuation_allowed() {
+        // _foo is valid
+        let p = Path::parse("_foo").unwrap();
+        assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn validate_invalid_character_in_middle() {
+        let result = Path::parse("foo$bar");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn index_trait() {
+        let p = path!("foo/bar/baz");
+        assert_eq!(&p[0], "foo");
+        assert_eq!(&p[1], "bar");
+        assert_eq!(&p[2], "baz");
+    }
+
+    #[test]
+    fn slice_method() {
+        let p = path!("a/b/c/d");
+        let sliced = p.slice(1, 3);
+        assert_eq!(sliced.len(), 2);
+        assert_eq!(sliced.to_string(), "b/c");
+    }
+
+    #[test]
+    fn join_method() {
+        let p1 = path!("foo/bar");
+        let p2 = path!("baz/qux");
+        let joined = p1.join(&p2);
+        assert_eq!(joined.to_string(), "foo/bar/baz/qux");
+    }
+
+    #[test]
+    fn join_with_empty() {
+        let p1 = path!("foo");
+        let p2 = path!("");
+        assert_eq!(p1.join(&p2), p1);
+
+        let p3 = path!("");
+        let p4 = path!("bar");
+        assert_eq!(p3.join(&p4), p4);
+    }
+
+    #[test]
+    fn iter_method() {
+        let p = path!("a/b/c");
+        let components: Vec<&String> = p.iter().collect();
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0], "a");
+        assert_eq!(components[1], "b");
+        assert_eq!(components[2], "c");
+    }
+
+    #[test]
+    fn is_empty() {
+        assert!(path!("").is_empty());
+        assert!(!path!("foo").is_empty());
+    }
+
+    #[test]
+    fn display_impl() {
+        let p = path!("foo/bar/baz");
+        assert_eq!(format!("{}", p), "foo/bar/baz");
+    }
+
+    #[test]
+    fn display_empty() {
+        let p = path!("");
+        assert_eq!(format!("{}", p), "");
+    }
+
+    #[test]
+    fn ll_conversion_invalid_utf8() {
+        let invalid_utf8: Vec<&[u8]> = vec![&[0xff, 0xfe]];
+        let result = Path::try_from_ll_path(&invalid_utf8);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn path_ord() {
+        let p1 = path!("a/b");
+        let p2 = path!("a/c");
+        let p3 = path!("b/a");
+        assert!(p1 < p2);
+        assert!(p2 < p3);
+    }
+
+    #[test]
+    fn path_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(path!("foo"));
+        set.insert(path!("bar"));
+        set.insert(path!("foo")); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn path_clone() {
+        let p1 = path!("foo/bar");
+        let p2 = p1.clone();
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn path_debug() {
+        let p = path!("foo/bar");
+        let debug = format!("{:?}", p);
+        assert!(debug.contains("foo"));
+        assert!(debug.contains("bar"));
+    }
 }

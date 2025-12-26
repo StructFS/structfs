@@ -60,6 +60,7 @@
 //! ```
 
 pub mod error;
+pub mod executor;
 pub mod handle;
 pub mod types;
 
@@ -67,6 +68,7 @@ mod core;
 
 // Re-export main types
 pub use error::Error;
+pub use executor::{HttpExecutor, ReqwestExecutor};
 pub use handle::{RequestState, RequestStatus};
 pub use types::{HttpRequest, HttpResponse, Method};
 

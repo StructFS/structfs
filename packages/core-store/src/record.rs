@@ -418,4 +418,110 @@ mod tests {
         assert!(record.is_raw());
         assert_eq!(record.as_bytes().map(|b| b.len()), Some(4));
     }
+
+    /// Codec that supports both JSON and a custom format
+    struct MultiFormatCodec;
+
+    impl Codec for MultiFormatCodec {
+        fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
+            if format == &Format::JSON {
+                let json: serde_json::Value =
+                    serde_json::from_slice(bytes).map_err(|e| Error::Decode {
+                        format: format.clone(),
+                        message: e.to_string(),
+                    })?;
+                Ok(json_to_value(json))
+            } else if format.as_str() == "text/plain" {
+                let s = String::from_utf8_lossy(bytes);
+                Ok(Value::String(s.to_string()))
+            } else {
+                Err(Error::UnsupportedFormat(format.clone()))
+            }
+        }
+
+        fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
+            if format == &Format::JSON {
+                let json = value_to_json(value);
+                let bytes = serde_json::to_vec(&json).map_err(|e| Error::Encode {
+                    format: format.clone(),
+                    message: e.to_string(),
+                })?;
+                Ok(Bytes::from(bytes))
+            } else if format.as_str() == "text/plain" {
+                match value {
+                    Value::String(s) => Ok(Bytes::from(s.clone())),
+                    _ => Ok(Bytes::from(format!("{:?}", value))),
+                }
+            } else {
+                Err(Error::UnsupportedFormat(format.clone()))
+            }
+        }
+
+        fn supports(&self, format: &Format) -> bool {
+            format == &Format::JSON || format.as_str() == "text/plain"
+        }
+    }
+
+    #[test]
+    fn into_bytes_transcode() {
+        // Test transcoding: Raw JSON -> text/plain
+        let codec = MultiFormatCodec;
+        let text_format = Format::new("text/plain");
+
+        // Create a raw JSON record
+        let record = Record::raw(Bytes::from_static(b"\"hello world\""), Format::JSON);
+
+        // Transcode to text/plain
+        let result = record.into_bytes(&codec, &text_format).unwrap();
+
+        // The JSON string "hello world" should be decoded then re-encoded as text/plain
+        assert_eq!(result.as_ref(), b"hello world");
+    }
+
+    #[test]
+    fn into_bytes_transcode_decode_error() {
+        // Test transcode error when decode fails
+        let codec = MultiFormatCodec;
+        let text_format = Format::new("text/plain");
+
+        // Create a raw record with invalid JSON
+        let record = Record::raw(Bytes::from_static(b"not valid json {{{"), Format::JSON);
+
+        // Transcode should fail during decode phase
+        let result = record.into_bytes(&codec, &text_format);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn into_value_decode_error() {
+        let codec = TestJsonCodec;
+        let record = Record::raw(Bytes::from_static(b"not valid json"), Format::JSON);
+        let result = record.into_value(&codec);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn into_bytes_parsed_encode_error() {
+        let codec = TestJsonCodec;
+        let record = Record::parsed(Value::from("test"));
+        // Try to encode as PROTOBUF which TestJsonCodec doesn't support
+        let result = record.into_bytes(&codec, &Format::PROTOBUF);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn format_raw_format_clone() {
+        // Verify that format() returns a cloned format, not a reference
+        let record = Record::raw(Bytes::from_static(b"data"), Format::new("custom/format"));
+        let format = record.format();
+        assert_eq!(format.as_str(), "custom/format");
+    }
+
+    #[test]
+    fn into_value_unsupported_format() {
+        let codec = TestJsonCodec;
+        let record = Record::raw(Bytes::from_static(b"data"), Format::PROTOBUF);
+        let result = record.into_value(&codec);
+        assert!(result.is_err());
+    }
 }

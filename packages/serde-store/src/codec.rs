@@ -163,4 +163,116 @@ mod tests {
 
         assert_eq!(value, decoded);
     }
+
+    #[test]
+    fn json_codec_encode_unsupported_format() {
+        let codec = JsonCodec;
+        let value = Value::from("test");
+        let result = codec.encode(&value, &Format::PROTOBUF);
+        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn json_codec_decode_invalid_json() {
+        let codec = JsonCodec;
+        let bytes = Bytes::from_static(b"not valid json {{{");
+        let result = codec.decode(&bytes, &Format::JSON);
+        assert!(matches!(result, Err(Error::Decode { .. })));
+    }
+
+    #[test]
+    fn multi_codec_decode_unsupported() {
+        let codec = MultiCodec::new(); // Empty, no codecs
+        let bytes = Bytes::from_static(b"hello");
+        let result = codec.decode(&bytes, &Format::JSON);
+        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn multi_codec_encode_unsupported() {
+        let codec = MultiCodec::new(); // Empty, no codecs
+        let value = Value::from("test");
+        let result = codec.encode(&value, &Format::JSON);
+        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn multi_codec_default() {
+        let codec = MultiCodec::default();
+        // Default includes JSON
+        assert!(codec.supports(&Format::JSON));
+    }
+
+    #[test]
+    fn multi_codec_add_custom() {
+        use structfs_core_store::Codec as CoreCodec;
+
+        struct CustomCodec;
+
+        impl CoreCodec for CustomCodec {
+            fn decode(&self, bytes: &Bytes, _format: &Format) -> Result<Value, Error> {
+                Ok(Value::Bytes(bytes.to_vec()))
+            }
+
+            fn encode(&self, _value: &Value, _format: &Format) -> Result<Bytes, Error> {
+                Ok(Bytes::from_static(b"custom"))
+            }
+
+            fn supports(&self, format: &Format) -> bool {
+                format == &Format::OCTET_STREAM
+            }
+        }
+
+        let mut codec = MultiCodec::new();
+        codec.add(CustomCodec);
+
+        assert!(codec.supports(&Format::OCTET_STREAM));
+        assert!(!codec.supports(&Format::JSON));
+
+        let decoded = codec
+            .decode(&Bytes::from_static(b"data"), &Format::OCTET_STREAM)
+            .unwrap();
+        assert_eq!(decoded, Value::Bytes(b"data".to_vec()));
+
+        let encoded = codec.encode(&Value::Null, &Format::OCTET_STREAM).unwrap();
+        assert_eq!(encoded.as_ref(), b"custom");
+    }
+
+    #[test]
+    fn json_codec_supports() {
+        let codec = JsonCodec;
+        assert!(codec.supports(&Format::JSON));
+        assert!(!codec.supports(&Format::PROTOBUF));
+        assert!(!codec.supports(&Format::OCTET_STREAM));
+    }
+
+    #[test]
+    fn json_codec_default() {
+        let codec: JsonCodec = Default::default();
+        assert!(codec.supports(&Format::JSON));
+    }
+
+    #[test]
+    fn json_codec_copy() {
+        let codec1 = JsonCodec;
+        let codec2 = codec1; // Copy
+                             // Both should work the same
+        let bytes = codec1.encode(&Value::from("test"), &Format::JSON).unwrap();
+        let decoded = codec2.decode(&bytes, &Format::JSON).unwrap();
+        assert_eq!(decoded, Value::from("test"));
+    }
+
+    #[test]
+    fn json_codec_debug() {
+        let codec = JsonCodec;
+        let debug = format!("{:?}", codec);
+        assert!(debug.contains("JsonCodec"));
+    }
+
+    #[test]
+    fn multi_codec_supports_empty() {
+        let codec = MultiCodec::new();
+        assert!(!codec.supports(&Format::JSON));
+        assert!(!codec.supports(&Format::PROTOBUF));
+    }
 }

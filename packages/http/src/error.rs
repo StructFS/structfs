@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("Store error: {0}")]
     Store(#[from] CoreError),
+
+    #[error("{message}")]
+    Other { message: String },
 }
 
 impl From<Error> for CoreError {
