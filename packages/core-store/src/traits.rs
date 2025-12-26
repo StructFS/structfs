@@ -214,4 +214,157 @@ mod tests {
         let result = boxed.read(&path).unwrap();
         assert!(result.is_some());
     }
+
+    #[test]
+    fn no_codec_decode_fails() {
+        let codec = NoCodec;
+        let bytes = Bytes::from_static(b"hello");
+        let result = codec.decode(&bytes, &Format::JSON);
+        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn no_codec_encode_fails() {
+        let codec = NoCodec;
+        let value = Value::from("test");
+        let result = codec.encode(&value, &Format::JSON);
+        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn no_codec_supports_nothing() {
+        let codec = NoCodec;
+        assert!(!codec.supports(&Format::JSON));
+        assert!(!codec.supports(&Format::PROTOBUF));
+        assert!(!codec.supports(&Format::OCTET_STREAM));
+    }
+
+    #[test]
+    fn ref_mut_reader_works() {
+        use crate::path;
+
+        let mut store = TestStore::new();
+        let path = path!("test");
+        store
+            .write(&path, Record::parsed(Value::from("value")))
+            .unwrap();
+
+        // Use &mut reference as Reader
+        let store_ref: &mut TestStore = &mut store;
+        let result = store_ref.read(&path).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn ref_mut_writer_works() {
+        use crate::path;
+
+        let mut store = TestStore::new();
+
+        // Use &mut reference as Writer
+        let store_ref: &mut TestStore = &mut store;
+        let path = path!("test");
+        let result = store_ref.write(&path, Record::parsed(Value::from("data")));
+        assert!(result.is_ok());
+
+        // Verify it was written
+        let read_result = store.read(&path).unwrap();
+        assert!(read_result.is_some());
+    }
+
+    #[test]
+    fn boxed_reader_works() {
+        use crate::path;
+
+        let mut store = TestStore::new();
+        let path = path!("boxed_test");
+        store
+            .write(&path, Record::parsed(Value::from("boxed_value")))
+            .unwrap();
+
+        // Use Box as Reader
+        let mut boxed: Box<TestStore> = Box::new(store);
+        let result = boxed.read(&path).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn boxed_writer_works() {
+        use crate::path;
+
+        let store = TestStore::new();
+        let mut boxed: Box<TestStore> = Box::new(store);
+
+        let path = path!("boxed_write");
+        let result = boxed.write(&path, Record::parsed(Value::from("data")));
+        assert!(result.is_ok());
+
+        // Verify it was written
+        let read_result = boxed.read(&path).unwrap();
+        assert!(read_result.is_some());
+    }
+
+    #[test]
+    fn boxed_codec_works() {
+        // Create a simple test codec
+        struct TestCodec;
+
+        impl Codec for TestCodec {
+            fn decode(&self, bytes: &Bytes, _format: &Format) -> Result<Value, Error> {
+                // Simple: treat bytes as UTF-8 string
+                let s = String::from_utf8_lossy(bytes);
+                Ok(Value::String(s.to_string()))
+            }
+
+            fn encode(&self, value: &Value, _format: &Format) -> Result<Bytes, Error> {
+                match value {
+                    Value::String(s) => Ok(Bytes::from(s.clone())),
+                    _ => Err(Error::Encode {
+                        format: Format::OCTET_STREAM,
+                        message: "only strings".to_string(),
+                    }),
+                }
+            }
+
+            fn supports(&self, format: &Format) -> bool {
+                format == &Format::OCTET_STREAM
+            }
+        }
+
+        let boxed: Box<dyn Codec> = Box::new(TestCodec);
+
+        // Test supports
+        assert!(boxed.supports(&Format::OCTET_STREAM));
+        assert!(!boxed.supports(&Format::JSON));
+
+        // Test decode
+        let decoded = boxed
+            .decode(&Bytes::from_static(b"hello"), &Format::OCTET_STREAM)
+            .unwrap();
+        assert_eq!(decoded, Value::String("hello".to_string()));
+
+        // Test encode
+        let encoded = boxed
+            .encode(&Value::String("world".to_string()), &Format::OCTET_STREAM)
+            .unwrap();
+        assert_eq!(encoded.as_ref(), b"world");
+    }
+
+    #[test]
+    fn store_trait_auto_impl() {
+        // Verify that anything implementing Reader + Writer auto-implements Store
+        fn requires_store<S: Store>(_s: &mut S) {}
+
+        let mut store = TestStore::new();
+        requires_store(&mut store); // This compiles because TestStore: Reader + Writer
+    }
+
+    #[test]
+    fn read_missing_returns_none() {
+        use crate::path;
+
+        let mut store = TestStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
 }

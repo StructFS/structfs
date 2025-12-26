@@ -480,4 +480,263 @@ mod tests {
             assert_eq!(config, back);
         }
     }
+
+    #[test]
+    fn mount_store_directly() {
+        let mut store = MountStore::new(TestFactory);
+
+        // Mount a store directly without using factory
+        let test_store = Box::new(TestStore::new());
+        store.mount_store("direct", test_store).unwrap();
+
+        // Write to it
+        store
+            .write(
+                &path!("direct/test"),
+                Record::parsed(Value::from("direct_value")),
+            )
+            .unwrap();
+
+        // Read back
+        let record = store.read(&path!("direct/test")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::from("direct_value"));
+    }
+
+    #[test]
+    fn unmount_nonexistent_fails() {
+        let mut store = MountStore::new(TestFactory);
+
+        let result = store.unmount("nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No mount"));
+    }
+
+    #[test]
+    fn read_specific_mount_config() {
+        let mut store = MountStore::new(TestFactory);
+
+        store
+            .mount(
+                "mydata",
+                MountConfig::Local {
+                    path: "/my/path".to_string(),
+                },
+            )
+            .unwrap();
+
+        // Read /ctx/mounts/mydata
+        let record = store.read(&path!("ctx/mounts/mydata")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("type"), Some(&Value::String("local".to_string())));
+                assert_eq!(
+                    map.get("path"),
+                    Some(&Value::String("/my/path".to_string()))
+                );
+            }
+            _ => panic!("expected map"),
+        }
+    }
+
+    #[test]
+    fn read_nonexistent_mount_config() {
+        let mut store = MountStore::new(TestFactory);
+
+        // Read /ctx/mounts/nonexistent
+        let result = store.read(&path!("ctx/mounts/nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn write_directly_to_mounts_fails() {
+        let mut store = MountStore::new(TestFactory);
+
+        // Try to write directly to /ctx/mounts (without specifying a name)
+        let result = store.write(&path!("ctx/mounts"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot write"));
+    }
+
+    #[test]
+    fn value_to_config_unknown_type_fails() {
+        let mut map = BTreeMap::new();
+        map.insert("type".to_string(), Value::String("unknown".to_string()));
+        let result = value_to_config(&Value::Map(map));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown mount type"));
+    }
+
+    #[test]
+    fn value_to_config_non_map_fails() {
+        let result = value_to_config(&Value::String("not a map".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a map"));
+    }
+
+    #[test]
+    fn value_to_config_missing_type_fails() {
+        let map = BTreeMap::new();
+        let result = value_to_config(&Value::Map(map));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing 'type'"));
+    }
+
+    #[test]
+    fn value_to_config_type_not_string_fails() {
+        let mut map = BTreeMap::new();
+        map.insert("type".to_string(), Value::Integer(123));
+        let result = value_to_config(&Value::Map(map));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing 'type'"));
+    }
+
+    #[test]
+    fn value_to_config_local_missing_path_fails() {
+        let mut map = BTreeMap::new();
+        map.insert("type".to_string(), Value::String("local".to_string()));
+        let result = value_to_config(&Value::Map(map));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing 'path'"));
+    }
+
+    #[test]
+    fn value_to_config_http_missing_url_fails() {
+        let mut map = BTreeMap::new();
+        map.insert("type".to_string(), Value::String("http".to_string()));
+        let result = value_to_config(&Value::Map(map));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing 'url'"));
+    }
+
+    #[test]
+    fn value_to_config_structfs_missing_url_fails() {
+        let mut map = BTreeMap::new();
+        map.insert("type".to_string(), Value::String("structfs".to_string()));
+        let result = value_to_config(&Value::Map(map));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing 'url'"));
+    }
+
+    // Factory that fails
+    struct FailingFactory;
+
+    impl StoreFactory for FailingFactory {
+        fn create(&self, _config: &MountConfig) -> Result<StoreBox, Error> {
+            Err(Error::Other {
+                message: "Factory failed".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn mount_with_failing_factory() {
+        let mut store = MountStore::new(FailingFactory);
+
+        let result = store.mount("data", MountConfig::Memory);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Factory failed"));
+    }
+
+    #[test]
+    fn mount_info_serialization() {
+        let info = MountInfo {
+            path: "/test".to_string(),
+            config: MountConfig::Memory,
+        };
+
+        // Test Debug impl
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("/test"));
+        assert!(debug.contains("Memory"));
+
+        // Test Clone
+        let cloned = info.clone();
+        assert_eq!(cloned.path, "/test");
+    }
+
+    #[test]
+    fn mount_config_debug_clone() {
+        // Test Debug and Clone on MountConfig
+        let config = MountConfig::Http {
+            url: "https://test.com".to_string(),
+        };
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("https://test.com"));
+
+        let cloned = config.clone();
+        assert_eq!(cloned, config);
+    }
+
+    #[test]
+    fn nested_mount_path() {
+        let mut store = MountStore::new(TestFactory);
+
+        // Mount via write to a nested path: /ctx/mounts/nested/path
+        let config = config_to_value(&MountConfig::Memory);
+        store
+            .write(&path!("ctx/mounts/nested/path"), Record::parsed(config))
+            .unwrap();
+
+        // Verify mount exists with nested name
+        let mounts = store.list_mounts();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].path, "nested/path");
+    }
+
+    #[test]
+    fn delegate_to_overlay_read() {
+        let mut store = MountStore::new(TestFactory);
+
+        // Read from unmounted path (delegates to empty overlay)
+        // Overlay returns an error when no route is found
+        let result = store.read(&path!("unmounted/path"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No route"));
+    }
+
+    #[test]
+    fn is_mounts_path_variations() {
+        // Test the is_mounts_path helper
+        assert!(MountStore::<TestFactory>::is_mounts_path(&path!(
+            "ctx/mounts"
+        )));
+        assert!(MountStore::<TestFactory>::is_mounts_path(&path!(
+            "ctx/mounts/foo"
+        )));
+        assert!(MountStore::<TestFactory>::is_mounts_path(&path!(
+            "ctx/mounts/foo/bar"
+        )));
+        assert!(!MountStore::<TestFactory>::is_mounts_path(&path!("ctx")));
+        assert!(!MountStore::<TestFactory>::is_mounts_path(&path!(
+            "ctx/other"
+        )));
+        assert!(!MountStore::<TestFactory>::is_mounts_path(&path!("other")));
+    }
+
+    #[test]
+    fn get_mount_name_variations() {
+        // Test the get_mount_name helper
+        assert_eq!(
+            MountStore::<TestFactory>::get_mount_name(&path!("ctx/mounts/foo")),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            MountStore::<TestFactory>::get_mount_name(&path!("ctx/mounts/foo/bar")),
+            Some("foo/bar".to_string())
+        );
+        assert_eq!(
+            MountStore::<TestFactory>::get_mount_name(&path!("ctx/mounts")),
+            None
+        );
+        assert_eq!(
+            MountStore::<TestFactory>::get_mount_name(&path!("ctx")),
+            None
+        );
+    }
 }

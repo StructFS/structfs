@@ -14,6 +14,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use structfs_core_store::{path, Error, NoCodec, Path, Reader, Record, Writer};
 use structfs_serde_store::{from_value, to_value};
 
+use crate::executor::{HttpExecutor, ReqwestExecutor};
 use crate::handle::RequestStatus;
 
 use crate::types::{HttpRequest, HttpResponse};
@@ -25,24 +26,23 @@ type RequestId = u64;
 /// HTTP broker store for sync (blocking) requests (new architecture).
 ///
 /// Write requests are queued and executed when reading from the handle path.
-pub struct HttpBrokerStore {
+/// Generic over the HTTP executor to allow mocking in tests.
+pub struct HttpBrokerStore<E: HttpExecutor = ReqwestExecutor> {
     requests: BTreeMap<RequestId, HttpRequest>,
     next_request_id: RequestId,
-    http_client: Client,
+    executor: E,
 }
 
-impl HttpBrokerStore {
+impl HttpBrokerStore<ReqwestExecutor> {
     /// Create a new HTTP broker store with the given request timeout.
     pub fn new(timeout: Duration) -> Result<Self, crate::Error> {
-        let http_client = Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(crate::Error::from)?;
+        let executor =
+            ReqwestExecutor::new(timeout).map_err(|e| crate::Error::InvalidUrl { message: e })?;
 
         Ok(Self {
             requests: BTreeMap::new(),
             next_request_id: 0,
-            http_client,
+            executor,
         })
     }
 
@@ -50,61 +50,18 @@ impl HttpBrokerStore {
     pub fn with_default_timeout() -> Result<Self, crate::Error> {
         Self::new(Duration::from_secs(30))
     }
+}
 
-    /// Execute an HTTP request and return the response.
-    fn execute_request(&self, request: HttpRequest) -> Result<HttpResponse, crate::Error> {
-        let method: http::Method = request.method.into();
-
-        let mut headers = HeaderMap::new();
-        for (name, value) in &request.headers {
-            let header_name =
-                HeaderName::try_from(name.as_str()).map_err(|e| crate::Error::InvalidUrl {
-                    message: e.to_string(),
-                })?;
-            let header_value =
-                HeaderValue::try_from(value.as_str()).map_err(|e| crate::Error::InvalidUrl {
-                    message: e.to_string(),
-                })?;
-            headers.insert(header_name, header_value);
+impl<E: HttpExecutor> HttpBrokerStore<E> {
+    /// Create a new HTTP broker store with a custom executor.
+    ///
+    /// This is primarily useful for testing with mock executors.
+    pub fn with_executor(executor: E) -> Self {
+        Self {
+            requests: BTreeMap::new(),
+            next_request_id: 0,
+            executor,
         }
-
-        let mut req_builder = self.http_client.request(method, &request.path);
-        req_builder = req_builder.headers(headers);
-
-        if !request.query.is_empty() {
-            req_builder = req_builder.query(&request.query);
-        }
-
-        if let Some(body) = &request.body {
-            req_builder = req_builder.json(body);
-        }
-
-        let response = req_builder.send()?;
-
-        let status = response.status().as_u16();
-        let status_text = response
-            .status()
-            .canonical_reason()
-            .unwrap_or("Unknown")
-            .to_string();
-
-        let mut resp_headers = std::collections::HashMap::new();
-        for (name, value) in response.headers() {
-            if let Ok(v) = value.to_str() {
-                resp_headers.insert(name.to_string(), v.to_string());
-            }
-        }
-
-        let body_text = response.text()?;
-        let body = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
-
-        Ok(HttpResponse {
-            status,
-            status_text,
-            headers: resp_headers,
-            body,
-            body_text: Some(body_text),
-        })
     }
 
     /// Parse request ID from a path like "outstanding/123".
@@ -117,9 +74,15 @@ impl HttpBrokerStore {
         }
         path[1].parse().ok()
     }
+
+    /// Get a reference to the queued requests (for testing).
+    #[cfg(test)]
+    pub fn requests(&self) -> &BTreeMap<RequestId, HttpRequest> {
+        &self.requests
+    }
 }
 
-impl Reader for HttpBrokerStore {
+impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         let request_id = Self::parse_request_id(from).ok_or_else(|| Error::Other {
             message: format!(
@@ -135,7 +98,7 @@ impl Reader for HttpBrokerStore {
                 message: format!("Request with ID {} not found", request_id),
             })?;
 
-        let response = self.execute_request(request).map_err(|e| Error::Other {
+        let response = self.executor.execute(&request).map_err(|e| Error::Other {
             message: format!("HTTP request failed: {}", e),
         })?;
 
@@ -149,7 +112,7 @@ impl Reader for HttpBrokerStore {
     }
 }
 
-impl Writer for HttpBrokerStore {
+impl<E: HttpExecutor> Writer for HttpBrokerStore<E> {
     fn write(&mut self, _to: &Path, data: Record) -> Result<Path, Error> {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
@@ -170,20 +133,37 @@ impl Writer for HttpBrokerStore {
 /// HTTP client store for direct requests (new architecture).
 ///
 /// Maps read/write operations to GET/POST requests.
-pub struct HttpClientStore {
-    client: Client,
+/// Generic over the HTTP executor to allow mocking in tests.
+pub struct HttpClientStore<E: HttpExecutor = ReqwestExecutor> {
+    executor: E,
     base_url: url::Url,
     default_headers: std::collections::HashMap<String, String>,
 }
 
-impl HttpClientStore {
+impl HttpClientStore<ReqwestExecutor> {
     /// Create a new HTTP client store with the given base URL
     pub fn new(base_url: &str) -> Result<Self, crate::Error> {
         let base_url = url::Url::parse(base_url)?;
-        let client = Client::new();
+        let executor = ReqwestExecutor::with_default_timeout()
+            .map_err(|e| crate::Error::InvalidUrl { message: e })?;
 
         Ok(Self {
-            client,
+            executor,
+            base_url,
+            default_headers: std::collections::HashMap::new(),
+        })
+    }
+}
+
+impl<E: HttpExecutor> HttpClientStore<E> {
+    /// Create a new HTTP client store with a custom executor.
+    ///
+    /// This is primarily useful for testing with mock executors.
+    pub fn with_executor(base_url: &str, executor: E) -> Result<Self, crate::Error> {
+        let base_url = url::Url::parse(base_url)?;
+
+        Ok(Self {
+            executor,
             base_url,
             default_headers: std::collections::HashMap::new(),
         })
@@ -199,70 +179,23 @@ impl HttpClientStore {
         self
     }
 
-    /// Execute an HTTP request and return the response
-    fn execute_request(&self, request: &HttpRequest) -> Result<HttpResponse, crate::Error> {
-        // Build URL
-        let url = if request.path.starts_with("http://") || request.path.starts_with("https://") {
-            url::Url::parse(&request.path)?
-        } else {
-            self.base_url.join(&request.path)?
-        };
-
-        // Build the request
-        let method: http::Method = request.method.clone().into();
-        let mut req_builder = self.client.request(method, url);
-
-        // Add query parameters
-        if !request.query.is_empty() {
-            req_builder = req_builder.query(&request.query);
-        }
-
-        // Add default headers
-        for (name, value) in &self.default_headers {
-            req_builder = req_builder.header(name, value);
-        }
-
-        // Add request headers
-        for (name, value) in &request.headers {
-            req_builder = req_builder.header(name, value);
-        }
-
-        // Add body if present
-        if let Some(body) = &request.body {
-            req_builder = req_builder.json(body);
-        }
-
-        // Execute request
-        let response = req_builder.send()?;
-
-        // Build response
-        let status = response.status().as_u16();
-        let status_text = response
-            .status()
-            .canonical_reason()
-            .unwrap_or("Unknown")
-            .to_string();
-
-        let mut headers = std::collections::HashMap::new();
-        for (name, value) in response.headers() {
-            if let Ok(v) = value.to_str() {
-                headers.insert(name.to_string(), v.to_string());
+    /// Build a full request with base URL, default headers, etc.
+    fn build_request(&self, mut request: HttpRequest) -> HttpRequest {
+        // Resolve relative URLs against base URL
+        if !request.path.starts_with("http://") && !request.path.starts_with("https://") {
+            if let Ok(url) = self.base_url.join(&request.path) {
+                request.path = url.to_string();
             }
         }
 
-        // Get body as text first
-        let body_text = response.text()?;
+        // Add default headers (request headers take precedence)
+        for (name, value) in &self.default_headers {
+            if !request.headers.contains_key(name) {
+                request.headers.insert(name.clone(), value.clone());
+            }
+        }
 
-        // Try to parse as JSON
-        let body = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
-
-        Ok(HttpResponse {
-            status,
-            status_text,
-            headers,
-            body,
-            body_text: Some(body_text),
-        })
+        request
     }
 
     /// Perform a GET request and return the response
@@ -272,11 +205,14 @@ impl HttpClientStore {
             path: path.components.join("/"),
             ..Default::default()
         };
-        self.execute_request(&request)
+        let full_request = self.build_request(request);
+        self.executor
+            .execute(&full_request)
+            .map_err(|e| crate::Error::Other { message: e })
     }
 }
 
-impl Reader for HttpClientStore {
+impl<E: HttpExecutor> Reader for HttpClientStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         let response = self.get(from).map_err(|e| Error::Other {
             message: e.to_string(),
@@ -307,7 +243,7 @@ impl Reader for HttpClientStore {
     }
 }
 
-impl Writer for HttpClientStore {
+impl<E: HttpExecutor> Writer for HttpClientStore<E> {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         let value = data.into_value(&NoCodec)?;
 
@@ -315,9 +251,10 @@ impl Writer for HttpClientStore {
         let response = if to.is_empty() {
             if let Ok(request) = from_value::<HttpRequest>(value.clone()) {
                 // It's an HttpRequest, execute it directly
-                self.execute_request(&request).map_err(|e| Error::Other {
-                    message: e.to_string(),
-                })?
+                let full_request = self.build_request(request);
+                self.executor
+                    .execute(&full_request)
+                    .map_err(|e| Error::Other { message: e })?
             } else {
                 // Not an HttpRequest, POST to root with the value as body
                 let json_value = structfs_serde_store::value_to_json(value);
@@ -327,9 +264,10 @@ impl Writer for HttpClientStore {
                     body: Some(json_value),
                     ..Default::default()
                 };
-                self.execute_request(&request).map_err(|e| Error::Other {
-                    message: e.to_string(),
-                })?
+                let full_request = self.build_request(request);
+                self.executor
+                    .execute(&full_request)
+                    .map_err(|e| Error::Other { message: e })?
             }
         } else {
             // POST to the path
@@ -340,9 +278,10 @@ impl Writer for HttpClientStore {
                 body: Some(json_value),
                 ..Default::default()
             };
-            self.execute_request(&request).map_err(|e| Error::Other {
-                message: e.to_string(),
-            })?
+            let full_request = self.build_request(request);
+            self.executor
+                .execute(&full_request)
+                .map_err(|e| Error::Other { message: e })?
         };
 
         if !response.is_success() {
@@ -563,22 +502,36 @@ impl Writer for AsyncHttpBrokerStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::mock::MockExecutor;
+
+    // ==================== HttpBrokerStore tests ====================
 
     #[test]
     fn test_parse_request_id() {
         assert_eq!(
-            HttpBrokerStore::parse_request_id(&path!("outstanding/0")),
+            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/0")),
             Some(0)
         );
         assert_eq!(
-            HttpBrokerStore::parse_request_id(&path!("outstanding/123")),
+            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/123")),
             Some(123)
         );
         assert_eq!(
-            HttpBrokerStore::parse_request_id(&path!("outstanding")),
+            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding")),
             None
         );
-        assert_eq!(HttpBrokerStore::parse_request_id(&path!("other/123")), None);
+        assert_eq!(
+            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("other/123")),
+            None
+        );
+        assert_eq!(
+            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/abc")),
+            None
+        );
+        assert_eq!(
+            HttpBrokerStore::<ReqwestExecutor>::parse_request_id(&path!("outstanding/0/extra")),
+            None
+        );
     }
 
     #[test]
@@ -601,6 +554,292 @@ mod tests {
     }
 
     #[test]
+    fn test_broker_with_mock_executor() {
+        let mock = MockExecutor::new().with_response(
+            "https://api.example.com/users",
+            MockExecutor::success_response(serde_json::json!({"users": ["alice", "bob"]})),
+        );
+
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        let request = HttpRequest::get("https://api.example.com/users");
+        let request_value = to_value(&request).unwrap();
+        let handle = broker
+            .write(&path!(""), Record::parsed(request_value))
+            .unwrap();
+
+        // Execute and get response
+        let record = broker.read(&handle).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        let response: HttpResponse = from_value(value).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body,
+            serde_json::json!({"users": ["alice", "bob"]})
+        );
+    }
+
+    #[test]
+    fn test_broker_multiple_requests() {
+        let mock = MockExecutor::new()
+            .with_response(
+                "/a",
+                MockExecutor::success_response(serde_json::json!({"id": "a"})),
+            )
+            .with_response(
+                "/b",
+                MockExecutor::success_response(serde_json::json!({"id": "b"})),
+            );
+
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue two requests
+        let h1 = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/a")).unwrap()),
+            )
+            .unwrap();
+        let h2 = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/b")).unwrap()),
+            )
+            .unwrap();
+
+        assert_eq!(h1.to_string(), "outstanding/0");
+        assert_eq!(h2.to_string(), "outstanding/1");
+        assert_eq!(broker.requests().len(), 2);
+
+        // Execute in reverse order
+        let r2 = broker.read(&h2).unwrap().unwrap();
+        let v2: HttpResponse = from_value(r2.into_value(&NoCodec).unwrap()).unwrap();
+        assert_eq!(v2.body, serde_json::json!({"id": "b"}));
+
+        let r1 = broker.read(&h1).unwrap().unwrap();
+        let v1: HttpResponse = from_value(r1.into_value(&NoCodec).unwrap()).unwrap();
+        assert_eq!(v1.body, serde_json::json!({"id": "a"}));
+    }
+
+    #[test]
+    fn test_broker_request_not_found() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("outstanding/999"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_broker_invalid_handle_path() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("invalid"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid handle path"));
+    }
+
+    #[test]
+    fn test_broker_http_error() {
+        let mock = MockExecutor::new().fail_with("Connection refused");
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        let request = HttpRequest::get("https://example.com");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // Execute should fail
+        let result = broker.read(&handle);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Connection refused"));
+    }
+
+    #[test]
+    fn test_broker_invalid_request_data() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Write invalid data (not an HttpRequest)
+        let result = broker.write(
+            &path!(""),
+            Record::parsed(to_value(&"not a request").unwrap()),
+        );
+        assert!(result.is_err());
+    }
+
+    // ==================== HttpClientStore tests ====================
+
+    #[test]
+    fn test_client_store_with_mock() {
+        let mock = MockExecutor::new().with_response(
+            "https://api.example.com/users/1",
+            MockExecutor::success_response(serde_json::json!({"id": 1, "name": "Alice"})),
+        );
+
+        let mut client = HttpClientStore::with_executor("https://api.example.com", mock).unwrap();
+
+        let record = client.read(&path!("users/1")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        let expected = to_value(&serde_json::json!({"id": 1, "name": "Alice"})).unwrap();
+
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn test_client_store_404_returns_none() {
+        let mock = MockExecutor::new()
+            .with_response("https://api.example.com/missing", MockExecutor::not_found());
+
+        let mut client = HttpClientStore::with_executor("https://api.example.com", mock).unwrap();
+
+        let result = client.read(&path!("missing")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_client_store_server_error() {
+        let mock = MockExecutor::new().with_response(
+            "https://api.example.com/error",
+            MockExecutor::error_response(500, "Internal Server Error"),
+        );
+
+        let mut client = HttpClientStore::with_executor("https://api.example.com", mock).unwrap();
+
+        let result = client.read(&path!("error"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("500"));
+    }
+
+    #[test]
+    fn test_client_store_write_post() {
+        let mock = MockExecutor::new().with_default_response(MockExecutor::success_response(
+            serde_json::json!({"created": true}),
+        ));
+
+        let mut client =
+            HttpClientStore::with_executor("https://api.example.com", mock.clone()).unwrap();
+
+        let data = serde_json::json!({"name": "Bob"});
+        let result = client.write(&path!("users"), Record::parsed(to_value(&data).unwrap()));
+        assert!(result.is_ok());
+
+        let requests = mock.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, crate::types::Method::POST);
+    }
+
+    #[test]
+    fn test_client_store_write_http_request() {
+        let mock = MockExecutor::new()
+            .with_default_response(MockExecutor::success_response(serde_json::Value::Null));
+
+        let mut client =
+            HttpClientStore::with_executor("https://api.example.com", mock.clone()).unwrap();
+
+        // Write an HttpRequest directly to root
+        let request = HttpRequest::delete("/users/1");
+        let result = client.write(&path!(""), Record::parsed(to_value(&request).unwrap()));
+        assert!(result.is_ok());
+
+        let requests = mock.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, crate::types::Method::DELETE);
+    }
+
+    #[test]
+    fn test_client_store_default_headers() {
+        let mock = MockExecutor::new()
+            .with_default_response(MockExecutor::success_response(serde_json::Value::Null));
+
+        let mut client = HttpClientStore::with_executor("https://api.example.com", mock.clone())
+            .unwrap()
+            .with_default_header("Authorization", "Bearer token123");
+
+        client.read(&path!("data")).unwrap();
+
+        let requests = mock.recorded_requests();
+        assert_eq!(
+            requests[0].headers.get("Authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_client_store_base_url_resolution() {
+        let mock = MockExecutor::new()
+            .with_default_response(MockExecutor::success_response(serde_json::Value::Null));
+
+        let client =
+            HttpClientStore::with_executor("https://api.example.com/v1/", mock.clone()).unwrap();
+
+        let request = HttpRequest::get("users");
+        let full_request = client.build_request(request);
+
+        assert_eq!(full_request.path, "https://api.example.com/v1/users");
+    }
+
+    #[test]
+    fn test_client_store_absolute_url_preserved() {
+        let mock = MockExecutor::new()
+            .with_default_response(MockExecutor::success_response(serde_json::Value::Null));
+
+        let client =
+            HttpClientStore::with_executor("https://api.example.com", mock.clone()).unwrap();
+
+        let request = HttpRequest::get("https://other.com/data");
+        let full_request = client.build_request(request);
+
+        assert_eq!(full_request.path, "https://other.com/data");
+    }
+
+    #[test]
+    fn test_client_store_request_headers_override_default() {
+        let mock = MockExecutor::new()
+            .with_default_response(MockExecutor::success_response(serde_json::Value::Null));
+
+        let client = HttpClientStore::with_executor("https://api.example.com", mock.clone())
+            .unwrap()
+            .with_default_header("X-Custom", "default");
+
+        let request = HttpRequest::get("/data").with_header("X-Custom", "override");
+        let full_request = client.build_request(request);
+
+        assert_eq!(
+            full_request.headers.get("X-Custom"),
+            Some(&"override".to_string())
+        );
+    }
+
+    #[test]
+    fn test_client_store_write_failure() {
+        let mock = MockExecutor::new()
+            .with_default_response(MockExecutor::error_response(400, "Bad Request"));
+
+        let mut client = HttpClientStore::with_executor("https://api.example.com", mock).unwrap();
+
+        let result = client.write(
+            &path!("data"),
+            Record::parsed(to_value(&serde_json::json!({})).unwrap()),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("400"));
+    }
+
+    // ==================== AsyncHttpBrokerStore tests ====================
+
+    #[test]
     fn test_async_broker_parse_handle_path() {
         assert_eq!(
             AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/0")),
@@ -617,6 +856,15 @@ mod tests {
         assert_eq!(
             AsyncHttpBrokerStore::parse_handle_path(&path!("other/123")),
             None
+        );
+        assert_eq!(AsyncHttpBrokerStore::parse_handle_path(&path!("")), None);
+        assert_eq!(
+            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/abc")),
+            None
+        );
+        assert_eq!(
+            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/0/foo/bar")),
+            Some((0, Some("foo/bar".to_string())))
         );
     }
 
@@ -638,5 +886,107 @@ mod tests {
         // Should be able to read the status (pending initially)
         let status = broker.read(&handle).unwrap();
         assert!(status.is_some());
+    }
+
+    #[test]
+    fn test_async_broker_invalid_path() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("invalid"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid handle path"));
+    }
+
+    #[test]
+    fn test_async_broker_request_not_found() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("outstanding/999"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_async_broker_unknown_subpath() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request
+        let request_value = to_value(&HttpRequest::get("https://example.com")).unwrap();
+        broker
+            .write(&path!(""), Record::parsed(request_value))
+            .unwrap();
+
+        let result = broker.read(&path!("outstanding/0/unknown"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown sub-path"));
+    }
+
+    #[test]
+    fn test_async_broker_response_not_ready() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request that will timeout/fail (we don't wait for it)
+        let request_value = to_value(&HttpRequest::get("https://example.com")).unwrap();
+        broker
+            .write(&path!(""), Record::parsed(request_value))
+            .unwrap();
+
+        // Immediately try to get response (before background thread completes)
+        let result = broker.read(&path!("outstanding/0/response")).unwrap();
+        // It might be None if not ready yet
+        // We just check it doesn't error
+        let _ = result;
+    }
+
+    #[test]
+    fn test_async_broker_invalid_request_data() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.write(
+            &path!(""),
+            Record::parsed(to_value(&"not a request").unwrap()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_async_broker_custom_timeout() {
+        let broker = AsyncHttpBrokerStore::new(Duration::from_secs(5)).unwrap();
+        assert_eq!(broker.timeout, Duration::from_secs(5));
+    }
+
+    // ==================== Production executor tests ====================
+
+    #[test]
+    fn test_reqwest_executor_creation() {
+        let executor = ReqwestExecutor::with_default_timeout();
+        assert!(executor.is_ok());
+    }
+
+    #[test]
+    fn test_reqwest_executor_custom_timeout() {
+        let executor = ReqwestExecutor::new(Duration::from_secs(10));
+        assert!(executor.is_ok());
+    }
+
+    #[test]
+    fn test_broker_store_creation() {
+        let broker = HttpBrokerStore::with_default_timeout();
+        assert!(broker.is_ok());
+    }
+
+    #[test]
+    fn test_client_store_creation() {
+        let client = HttpClientStore::new("https://example.com");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_client_store_invalid_url() {
+        let client = HttpClientStore::new("not a url");
+        assert!(client.is_err());
     }
 }

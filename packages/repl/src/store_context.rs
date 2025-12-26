@@ -30,8 +30,11 @@ pub enum ContextError {
     InvalidPath(String),
 }
 
-/// Factory for creating stores from mount configurations (new architecture)
-struct CoreReplStoreFactory;
+/// Factory for creating stores from mount configurations.
+///
+/// This is the default factory used by StoreContext. It creates stores for
+/// all standard mount configurations (memory, HTTP, sys, help, etc.).
+pub struct CoreReplStoreFactory;
 
 impl StoreFactory for CoreReplStoreFactory {
     fn create(&self, config: &MountConfig) -> Result<StoreBox, CoreError> {
@@ -174,35 +177,84 @@ impl Writer for RegisterStore {
     }
 }
 
-/// Store context using the new architecture
-pub struct StoreContext {
-    store: MountStore<CoreReplStoreFactory>,
+/// Store context using the new architecture.
+///
+/// The context is generic over a `StoreFactory` implementation, allowing
+/// different factories to be used for testing or alternative configurations.
+/// By default, it uses `CoreReplStoreFactory` which creates all standard stores.
+pub struct StoreContext<F: StoreFactory = CoreReplStoreFactory> {
+    store: MountStore<F>,
     registers: RegisterStore,
     current_path: Path,
 }
 
-impl StoreContext {
+impl StoreContext<CoreReplStoreFactory> {
+    /// Create a new context with the default factory and standard mounts.
+    ///
+    /// This creates a context with the following mounts:
+    /// - `/ctx/http` - Async HTTP broker (background execution)
+    /// - `/ctx/http_sync` - Sync HTTP broker (blocking execution)
+    /// - `/ctx/sys` - System utilities (time, env, proc, fs, random)
+    /// - `/ctx/help` - Help system
     pub fn new() -> Self {
-        let mut store = MountStore::new(CoreReplStoreFactory);
+        Self::with_factory_and_mounts(CoreReplStoreFactory, true)
+    }
+}
 
-        // Mount async HTTP broker (background execution)
-        if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
-            eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
-        }
+/// Check if a path string refers to a register (starts with @)
+pub fn is_register_path(path_str: &str) -> bool {
+    path_str.starts_with('@')
+}
 
-        // Mount sync HTTP broker (blocking execution)
-        if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
-            eprintln!("Warning: Failed to mount HTTP broker: {}", e);
-        }
+/// Parse a register path into (register_name, sub_path)
+pub fn parse_register_path(path_str: &str) -> Option<(String, Path)> {
+    if !path_str.starts_with('@') {
+        return None;
+    }
 
-        // Mount sys store
-        if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
-            eprintln!("Warning: Failed to mount sys store: {}", e);
-        }
+    let without_at = &path_str[1..];
+    if without_at.is_empty() {
+        return Some(("".to_string(), Path::parse("").unwrap()));
+    }
 
-        // Mount help store
-        if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
-            eprintln!("Warning: Failed to mount help store: {}", e);
+    if let Some(slash_pos) = without_at.find('/') {
+        let name = &without_at[..slash_pos];
+        let sub_path_str = &without_at[slash_pos + 1..];
+        let sub_path = Path::parse(sub_path_str).ok()?;
+        Some((name.to_string(), sub_path))
+    } else {
+        Some((without_at.to_string(), Path::parse("").unwrap()))
+    }
+}
+
+impl<F: StoreFactory> StoreContext<F> {
+    /// Create a context with a custom factory and optionally mount defaults.
+    ///
+    /// If `mount_defaults` is true, the standard mounts (http, sys, help) are added.
+    /// If false, the context starts with no mounts.
+    pub fn with_factory_and_mounts(factory: F, mount_defaults: bool) -> Self {
+        let mut store = MountStore::new(factory);
+
+        if mount_defaults {
+            // Mount async HTTP broker (background execution)
+            if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
+                eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
+            }
+
+            // Mount sync HTTP broker (blocking execution)
+            if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
+                eprintln!("Warning: Failed to mount HTTP broker: {}", e);
+            }
+
+            // Mount sys store
+            if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
+                eprintln!("Warning: Failed to mount sys store: {}", e);
+            }
+
+            // Mount help store
+            if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
+                eprintln!("Warning: Failed to mount help store: {}", e);
+            }
         }
 
         Self {
@@ -212,35 +264,25 @@ impl StoreContext {
         }
     }
 
-    /// Check if a path string refers to a register (starts with @)
-    pub fn is_register_path(path_str: &str) -> bool {
-        path_str.starts_with('@')
+    /// Create a minimal context with a custom factory and no default mounts.
+    ///
+    /// This is useful for testing when you want full control over what stores
+    /// are mounted.
+    pub fn with_factory(factory: F) -> Self {
+        Self::with_factory_and_mounts(factory, false)
     }
 
-    /// Parse a register path into (register_name, sub_path)
-    pub fn parse_register_path(path_str: &str) -> Option<(String, Path)> {
-        if !path_str.starts_with('@') {
-            return None;
-        }
-
-        let without_at = &path_str[1..];
-        if without_at.is_empty() {
-            return Some(("".to_string(), Path::parse("").unwrap()));
-        }
-
-        if let Some(slash_pos) = without_at.find('/') {
-            let name = &without_at[..slash_pos];
-            let sub_path_str = &without_at[slash_pos + 1..];
-            let sub_path = Path::parse(sub_path_str).ok()?;
-            Some((name.to_string(), sub_path))
-        } else {
-            Some((without_at.to_string(), Path::parse("").unwrap()))
-        }
+    /// Mount a store at a path.
+    ///
+    /// This allows tests to add specific stores as needed.
+    pub fn mount(&mut self, path: &str, config: MountConfig) -> Result<(), ContextError> {
+        self.store.mount(path, config)?;
+        Ok(())
     }
 
     /// Read from a register path
     pub fn read_register(&mut self, path_str: &str) -> Result<Option<Value>, ContextError> {
-        let (name, sub_path) = Self::parse_register_path(path_str)
+        let (name, sub_path) = parse_register_path(path_str)
             .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
 
         let full_path = if name.is_empty() {
@@ -260,7 +302,7 @@ impl StoreContext {
 
     /// Write to a register path
     pub fn write_register(&mut self, path_str: &str, value: Value) -> Result<Path, ContextError> {
-        let (name, sub_path) = Self::parse_register_path(path_str)
+        let (name, sub_path) = parse_register_path(path_str)
             .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
 
         if name.is_empty() {
@@ -369,7 +411,7 @@ impl StoreContext {
     }
 }
 
-impl Default for StoreContext {
+impl Default for StoreContext<CoreReplStoreFactory> {
     fn default() -> Self {
         Self::new()
     }
@@ -380,6 +422,140 @@ mod tests {
     use super::*;
     use structfs_core_store::path;
 
+    // RegisterStore tests
+    #[test]
+    fn register_store_new() {
+        let store = RegisterStore::new();
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn register_store_default() {
+        let store: RegisterStore = Default::default();
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn register_store_get_set() {
+        let mut store = RegisterStore::new();
+        store.set("foo", Value::String("bar".to_string()));
+        assert_eq!(store.get("foo"), Some(&Value::String("bar".to_string())));
+        assert_eq!(store.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn register_store_list() {
+        let mut store = RegisterStore::new();
+        store.set("a", Value::Integer(1));
+        store.set("b", Value::Integer(2));
+        let list = store.list();
+        assert_eq!(list.len(), 2);
+        assert!(list.contains(&&"a".to_string()));
+        assert!(list.contains(&&"b".to_string()));
+    }
+
+    #[test]
+    fn register_store_read_root() {
+        let mut store = RegisterStore::new();
+        store.set("x", Value::Integer(42));
+        store.set("y", Value::Integer(99));
+        let result = store.read(&path!("")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn register_store_read_register() {
+        let mut store = RegisterStore::new();
+        store.set("test", Value::String("hello".to_string()));
+        let result = store.read(&path!("test")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn register_store_read_nonexistent() {
+        let mut store = RegisterStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn register_store_read_nested_map() {
+        let mut store = RegisterStore::new();
+        let mut map = BTreeMap::new();
+        map.insert("inner".to_string(), Value::String("value".to_string()));
+        store.set("outer", Value::Map(map));
+
+        let result = store.read(&path!("outer/inner")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("value".to_string()));
+    }
+
+    #[test]
+    fn register_store_read_nested_array() {
+        let mut store = RegisterStore::new();
+        store.set(
+            "arr",
+            Value::Array(vec![
+                Value::Integer(10),
+                Value::Integer(20),
+                Value::Integer(30),
+            ]),
+        );
+
+        let result = store.read(&path!("arr/1")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::Integer(20));
+    }
+
+    #[test]
+    fn register_store_read_nested_invalid_path() {
+        let mut store = RegisterStore::new();
+        store.set("scalar", Value::Integer(42));
+        let result = store.read(&path!("scalar/invalid")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn register_store_read_nested_array_invalid_index() {
+        let mut store = RegisterStore::new();
+        store.set("arr", Value::Array(vec![Value::Integer(1)]));
+        let result = store.read(&path!("arr/notanumber")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn register_store_read_nested_array_out_of_bounds() {
+        let mut store = RegisterStore::new();
+        store.set("arr", Value::Array(vec![Value::Integer(1)]));
+        let result = store.read(&path!("arr/100")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn register_store_write_register() {
+        let mut store = RegisterStore::new();
+        let result = store
+            .write(&path!("newreg"), Record::parsed(Value::Integer(123)))
+            .unwrap();
+        assert_eq!(result.to_string(), "newreg");
+        assert_eq!(store.get("newreg"), Some(&Value::Integer(123)));
+    }
+
+    #[test]
+    fn register_store_write_root_error() {
+        let mut store = RegisterStore::new();
+        let result = store.write(&path!(""), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    // StoreContext tests
     #[test]
     fn test_register_write_read() {
         let mut ctx = StoreContext::new();
@@ -413,6 +589,143 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_empty_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo").unwrap());
+        let path = ctx.resolve_path("").unwrap();
+        assert_eq!(path.to_string(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_dot_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo").unwrap());
+        let path = ctx.resolve_path(".").unwrap();
+        assert_eq!(path.to_string(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_root_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        let path = ctx.resolve_path("/").unwrap();
+        assert_eq!(path.to_string(), "");
+    }
+
+    #[test]
+    fn test_resolve_parent_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        let path = ctx.resolve_path("..").unwrap();
+        assert_eq!(path.to_string(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_parent_relative_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo/bar/baz").unwrap());
+        let path = ctx.resolve_path("../qux").unwrap();
+        assert_eq!(path.to_string(), "foo/bar/qux");
+    }
+
+    #[test]
+    fn test_resolve_multiple_parent_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("a/b/c/d").unwrap());
+        let path = ctx.resolve_path("../../x").unwrap();
+        assert_eq!(path.to_string(), "a/b/x");
+    }
+
+    #[test]
+    fn test_current_path() {
+        let mut ctx = StoreContext::new();
+        assert_eq!(ctx.current_path().to_string(), "");
+        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        assert_eq!(ctx.current_path().to_string(), "foo/bar");
+    }
+
+    #[test]
+    fn test_is_register_path() {
+        assert!(is_register_path("@foo"));
+        assert!(is_register_path("@foo/bar"));
+        assert!(!is_register_path("/foo"));
+        assert!(!is_register_path("foo"));
+    }
+
+    #[test]
+    fn test_parse_register_path_simple() {
+        let (name, sub) = parse_register_path("@foo").unwrap();
+        assert_eq!(name, "foo");
+        assert!(sub.is_empty());
+    }
+
+    #[test]
+    fn test_parse_register_path_with_subpath() {
+        let (name, sub) = parse_register_path("@foo/bar/baz").unwrap();
+        assert_eq!(name, "foo");
+        assert_eq!(sub.to_string(), "bar/baz");
+    }
+
+    #[test]
+    fn test_parse_register_path_empty() {
+        let (name, sub) = parse_register_path("@").unwrap();
+        assert_eq!(name, "");
+        assert!(sub.is_empty());
+    }
+
+    #[test]
+    fn test_parse_register_path_not_register() {
+        let result = parse_register_path("/foo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_register() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("test", Value::Integer(42));
+        let value = ctx.read_register("@test").unwrap().unwrap();
+        assert_eq!(value, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_read_register_not_found() {
+        let mut ctx = StoreContext::new();
+        let value = ctx.read_register("@nonexistent").unwrap();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn test_read_register_root() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("a", Value::Integer(1));
+        let value = ctx.read_register("@").unwrap().unwrap();
+        match value {
+            Value::Array(arr) => assert_eq!(arr.len(), 1),
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_write_register() {
+        let mut ctx = StoreContext::new();
+        let path = ctx
+            .write_register("@myvar", Value::String("value".to_string()))
+            .unwrap();
+        assert_eq!(path.to_string(), "myvar");
+        assert_eq!(
+            ctx.get_register("myvar"),
+            Some(&Value::String("value".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_write_register_root_error() {
+        let mut ctx = StoreContext::new();
+        let result = ctx.write_register("@", Value::Null);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_read_sys_time() {
         let mut ctx = StoreContext::new();
         let value = ctx.read(&path!("ctx/sys/time/now")).unwrap();
@@ -435,5 +748,73 @@ mod tests {
             }
             _ => panic!("Expected map"),
         }
+    }
+
+    #[test]
+    fn test_read_as_json() {
+        let mut ctx = StoreContext::new();
+        let json = ctx
+            .read_as_json(&path!("ctx/sys/time/now_unix"))
+            .unwrap()
+            .unwrap();
+        assert!(json.is_number());
+    }
+
+    #[test]
+    fn test_read_as_json_not_found() {
+        let mut ctx = StoreContext::new();
+        // Use a path under a valid mount but that doesn't exist
+        let json = ctx
+            .read_as_json(&path!("ctx/sys/env/NONEXISTENT_ENV_VAR_12345"))
+            .unwrap();
+        assert!(json.is_none());
+    }
+
+    #[test]
+    fn test_write_json() {
+        let mut ctx = StoreContext::new();
+        ctx.mount("test", MountConfig::Memory).unwrap();
+        let json = serde_json::json!({"key": "value"});
+        ctx.write_json(&path!("test/data"), &json).unwrap();
+        let result = ctx.read_as_json(&path!("test/data")).unwrap().unwrap();
+        assert_eq!(result, json);
+    }
+
+    #[test]
+    fn test_with_factory_no_mounts() {
+        let ctx = StoreContext::with_factory(CoreReplStoreFactory);
+        // Should not have default mounts
+        let result = ctx.resolve_path("/ctx/sys").unwrap();
+        assert_eq!(result.to_string(), "ctx/sys");
+    }
+
+    #[test]
+    fn test_with_factory_and_mounts_false() {
+        let ctx = StoreContext::with_factory_and_mounts(CoreReplStoreFactory, false);
+        // No default mounts
+        let result = ctx.resolve_path("/").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_mount() {
+        let mut ctx = StoreContext::with_factory(CoreReplStoreFactory);
+        ctx.mount("mystore", MountConfig::Memory).unwrap();
+        ctx.write(&path!("mystore/key"), Value::Integer(123))
+            .unwrap();
+        let value = ctx.read(&path!("mystore/key")).unwrap().unwrap();
+        assert_eq!(value, Value::Integer(123));
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let ctx: StoreContext = Default::default();
+        assert!(ctx.current_path().is_empty());
+    }
+
+    #[test]
+    fn context_error_display() {
+        let err = ContextError::InvalidPath("test error".to_string());
+        assert!(err.to_string().contains("test error"));
     }
 }

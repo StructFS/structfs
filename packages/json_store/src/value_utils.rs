@@ -182,6 +182,8 @@ mod tests {
         Value::Map(root)
     }
 
+    // ==================== get_path tests ====================
+
     #[test]
     fn get_root() {
         let tree = test_tree();
@@ -215,6 +217,126 @@ mod tests {
         let tree = test_tree();
         let result = get_path(&tree, &path!("nonexistent")).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_array_invalid_index_error() {
+        let tree = test_tree();
+        let result = get_path(&tree, &path!("scores/abc"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expected array index"));
+    }
+
+    #[test]
+    fn get_array_out_of_bounds_none() {
+        let tree = test_tree();
+        let result = get_path(&tree, &path!("scores/999")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_traverse_into_primitive_none() {
+        let tree = test_tree();
+        // Try to traverse into a string value
+        let result = get_path(&tree, &path!("name/invalid")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_traverse_into_integer_none() {
+        let tree = test_tree();
+        let result = get_path(&tree, &path!("age/invalid")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_nested_missing_intermediate() {
+        let tree = test_tree();
+        let result = get_path(&tree, &path!("address/missing/deep")).unwrap();
+        assert!(result.is_none());
+    }
+
+    // ==================== get_path_mut tests ====================
+
+    #[test]
+    fn get_path_mut_root() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("")).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn get_path_mut_direct_child() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("name")).unwrap().unwrap();
+        *result = Value::String("Bob".to_string());
+
+        let check = get_path(&tree, &path!("name")).unwrap().unwrap();
+        assert_eq!(check, &Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn get_path_mut_nested() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("address/city"))
+            .unwrap()
+            .unwrap();
+        *result = Value::String("LA".to_string());
+
+        let check = get_path(&tree, &path!("address/city")).unwrap().unwrap();
+        assert_eq!(check, &Value::String("LA".to_string()));
+    }
+
+    #[test]
+    fn get_path_mut_array_element() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("scores/0"))
+            .unwrap()
+            .unwrap();
+        *result = Value::Integer(100);
+
+        let check = get_path(&tree, &path!("scores/0")).unwrap().unwrap();
+        assert_eq!(check, &Value::Integer(100));
+    }
+
+    #[test]
+    fn get_path_mut_missing_returns_none() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_path_mut_array_invalid_index_error() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("scores/abc"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_path_mut_array_out_of_bounds_none() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("scores/999")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_path_mut_traverse_into_primitive_none() {
+        let mut tree = test_tree();
+        let result = get_path_mut(&mut tree, &path!("name/invalid")).unwrap();
+        assert!(result.is_none());
+    }
+
+    // ==================== set_path tests ====================
+
+    #[test]
+    fn set_root_replaces_entire_tree() {
+        let mut tree = test_tree();
+        set_path(&mut tree, &path!(""), Value::String("replaced".to_string())).unwrap();
+        assert_eq!(tree, Value::String("replaced".to_string()));
     }
 
     #[test]
@@ -265,5 +387,98 @@ mod tests {
 
         let result = get_path(&tree, &path!("scores/3")).unwrap().unwrap();
         assert_eq!(result, &Value::Integer(88));
+    }
+
+    #[test]
+    fn set_array_out_of_bounds_error() {
+        let mut tree = test_tree();
+        // scores has 3 elements (indices 0, 1, 2), appending at 3 is ok, but 5 is out of bounds
+        let result = set_path(&mut tree, &path!("scores/5"), Value::Integer(99));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn set_array_invalid_index_error() {
+        let mut tree = test_tree();
+        let result = set_path(&mut tree, &path!("scores/abc"), Value::Integer(99));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expected array index"));
+    }
+
+    #[test]
+    fn set_on_primitive_error() {
+        let mut tree = test_tree();
+        let result = set_path(&mut tree, &path!("name/child"), Value::Integer(1));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot set child"));
+    }
+
+    #[test]
+    fn set_parent_not_exists_error() {
+        let mut tree = test_tree();
+        let result = set_path(&mut tree, &path!("missing/deep/path"), Value::Integer(1));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn set_new_key_in_map() {
+        let mut tree = test_tree();
+        set_path(&mut tree, &path!("new_key"), Value::Bool(true)).unwrap();
+
+        let result = get_path(&tree, &path!("new_key")).unwrap().unwrap();
+        assert_eq!(result, &Value::Bool(true));
+    }
+
+    #[test]
+    fn set_deeply_nested() {
+        let mut tree = test_tree();
+        // First create the intermediate path
+        set_path(
+            &mut tree,
+            &path!("address/state"),
+            Value::String("NY".to_string()),
+        )
+        .unwrap();
+
+        let result = get_path(&tree, &path!("address/state")).unwrap().unwrap();
+        assert_eq!(result, &Value::String("NY".to_string()));
+    }
+
+    #[test]
+    fn set_replaces_nested_structure() {
+        let mut tree = test_tree();
+        // Replace the entire address map with a string
+        set_path(
+            &mut tree,
+            &path!("address"),
+            Value::String("unknown".to_string()),
+        )
+        .unwrap();
+
+        let result = get_path(&tree, &path!("address")).unwrap().unwrap();
+        assert_eq!(result, &Value::String("unknown".to_string()));
+    }
+
+    #[test]
+    fn set_array_first_element() {
+        let mut tree = test_tree();
+        set_path(&mut tree, &path!("scores/0"), Value::Integer(999)).unwrap();
+
+        let result = get_path(&tree, &path!("scores/0")).unwrap().unwrap();
+        assert_eq!(result, &Value::Integer(999));
+    }
+
+    #[test]
+    fn set_array_last_element() {
+        let mut tree = test_tree();
+        set_path(&mut tree, &path!("scores/2"), Value::Integer(777)).unwrap();
+
+        let result = get_path(&tree, &path!("scores/2")).unwrap().unwrap();
+        assert_eq!(result, &Value::Integer(777));
     }
 }

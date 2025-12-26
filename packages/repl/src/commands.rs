@@ -9,9 +9,10 @@ use serde_json::Value as JsonValue;
 use structfs_core_store::{Path, Value};
 use structfs_serde_store::{json_to_value, value_to_json};
 
-use crate::store_context::StoreContext;
+use crate::store_context::{is_register_path, StoreContext};
 
 /// Result of executing a command
+#[derive(Debug)]
 pub enum CommandResult {
     /// Command succeeded, optionally with output to display and a value to capture
     Ok {
@@ -315,7 +316,7 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
         Err(e) => return CommandResult::Error(e),
     };
 
-    if StoreContext::is_register_path(&path_str) {
+    if is_register_path(&path_str) {
         match ctx.read_register(&path_str) {
             Ok(Some(value)) => {
                 let json = value_to_json(value.clone());
@@ -400,7 +401,7 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
     };
 
     // Check if destination is a register
-    if StoreContext::is_register_path(&path_str) {
+    if is_register_path(&path_str) {
         match ctx.write_register(&path_str, value) {
             Ok(result_path) => {
                 let path_string = format_path(&result_path);
@@ -606,6 +607,411 @@ fn format_json(value: &JsonValue) -> String {
 mod tests {
     use super::*;
 
+    // Pure function tests
+    #[test]
+    fn strip_ansi_codes_no_codes() {
+        assert_eq!(strip_ansi_codes("hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_ansi_codes_with_codes() {
+        assert_eq!(strip_ansi_codes("\x1b[31mred\x1b[0m"), "red");
+    }
+
+    #[test]
+    fn strip_ansi_codes_multiple_codes() {
+        assert_eq!(
+            strip_ansi_codes("\x1b[1m\x1b[32mbold green\x1b[0m"),
+            "bold green"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_empty() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn contains_dereference_true() {
+        assert!(contains_dereference("*@foo"));
+        assert!(contains_dereference("/path/*@reg/more"));
+        assert!(contains_dereference("prefix*@suffix"));
+    }
+
+    #[test]
+    fn contains_dereference_false() {
+        assert!(!contains_dereference("@foo"));
+        assert!(!contains_dereference("/path/reg"));
+        assert!(!contains_dereference("*foo"));
+        assert!(!contains_dereference(""));
+    }
+
+    #[test]
+    fn format_help_contains_commands() {
+        let help = format_help();
+        assert!(help.contains("read"));
+        assert!(help.contains("write"));
+        assert!(help.contains("cd"));
+        assert!(help.contains("pwd"));
+        assert!(help.contains("help"));
+        assert!(help.contains("exit"));
+    }
+
+    #[test]
+    fn format_help_contains_mounts() {
+        let help = format_help();
+        assert!(help.contains("/ctx/sys"));
+        assert!(help.contains("/ctx/http_sync"));
+    }
+
+    #[test]
+    fn format_help_contains_register_info() {
+        let help = format_help();
+        assert!(help.contains("@result"));
+        assert!(help.contains("*@"));
+    }
+
+    #[test]
+    fn format_json_null() {
+        let formatted = format_json(&serde_json::Value::Null);
+        // Should contain "null" (possibly with ANSI codes)
+        assert!(strip_ansi_codes(&formatted).contains("null"));
+    }
+
+    #[test]
+    fn format_json_bool() {
+        let formatted = format_json(&serde_json::json!(true));
+        assert!(strip_ansi_codes(&formatted).contains("true"));
+    }
+
+    #[test]
+    fn format_json_number() {
+        let formatted = format_json(&serde_json::json!(42));
+        assert!(strip_ansi_codes(&formatted).contains("42"));
+    }
+
+    #[test]
+    fn format_json_string() {
+        let formatted = format_json(&serde_json::json!("hello"));
+        assert!(strip_ansi_codes(&formatted).contains("hello"));
+    }
+
+    #[test]
+    fn format_json_object() {
+        let formatted = format_json(&serde_json::json!({"key": "value"}));
+        let plain = strip_ansi_codes(&formatted);
+        assert!(plain.contains("key"));
+        assert!(plain.contains("value"));
+    }
+
+    #[test]
+    fn format_json_array() {
+        let formatted = format_json(&serde_json::json!([1, 2, 3]));
+        let plain = strip_ansi_codes(&formatted);
+        assert!(plain.contains("1"));
+        assert!(plain.contains("2"));
+        assert!(plain.contains("3"));
+    }
+
+    #[test]
+    fn format_json_with_escapes() {
+        let formatted = format_json(&serde_json::json!("hello\\nworld"));
+        let plain = strip_ansi_codes(&formatted);
+        assert!(plain.contains("hello"));
+    }
+
+    #[test]
+    fn format_json_nested() {
+        let formatted = format_json(&serde_json::json!({"outer": {"inner": 42}}));
+        let plain = strip_ansi_codes(&formatted);
+        assert!(plain.contains("outer"));
+        assert!(plain.contains("inner"));
+        assert!(plain.contains("42"));
+    }
+
+    #[test]
+    fn format_json_false() {
+        let formatted = format_json(&serde_json::json!(false));
+        assert!(strip_ansi_codes(&formatted).contains("false"));
+    }
+
+    #[test]
+    fn format_json_negative_number() {
+        let formatted = format_json(&serde_json::json!(-42));
+        assert!(strip_ansi_codes(&formatted).contains("-42"));
+    }
+
+    #[test]
+    fn format_json_float() {
+        let formatted = format_json(&serde_json::json!(2.75));
+        let plain = strip_ansi_codes(&formatted);
+        assert!(plain.contains("2.75"));
+    }
+
+    // Command execution tests with context
+    #[test]
+    fn execute_empty_input() {
+        let mut ctx = StoreContext::new();
+        let result = execute("", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => assert!(display.is_none()),
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_whitespace_input() {
+        let mut ctx = StoreContext::new();
+        let result = execute("   ", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => assert!(display.is_none()),
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_help_command() {
+        let mut ctx = StoreContext::new();
+        assert!(matches!(execute("help", &mut ctx), CommandResult::Help));
+        assert!(matches!(execute("?", &mut ctx), CommandResult::Help));
+    }
+
+    #[test]
+    fn execute_exit_command() {
+        let mut ctx = StoreContext::new();
+        assert!(matches!(execute("exit", &mut ctx), CommandResult::Exit));
+        assert!(matches!(execute("quit", &mut ctx), CommandResult::Exit));
+        assert!(matches!(execute("q", &mut ctx), CommandResult::Exit));
+    }
+
+    #[test]
+    fn execute_unknown_command() {
+        let mut ctx = StoreContext::new();
+        let result = execute("unknown_cmd", &mut ctx);
+        match result {
+            CommandResult::Error(msg) => assert!(msg.contains("Unknown command")),
+            _ => panic!("Expected Error"),
+        }
+    }
+
+    #[test]
+    fn execute_pwd() {
+        let mut ctx = StoreContext::new();
+        let result = execute("pwd", &mut ctx);
+        match result {
+            CommandResult::Ok { display, capture } => {
+                assert!(display.is_some());
+                assert!(capture.is_some());
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_cd_root() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        execute("cd /", &mut ctx);
+        assert!(ctx.current_path().is_empty());
+    }
+
+    #[test]
+    fn execute_cd_relative() {
+        let mut ctx = StoreContext::new();
+        execute("cd foo", &mut ctx);
+        assert_eq!(ctx.current_path().to_string(), "foo");
+    }
+
+    #[test]
+    fn execute_cd_no_args() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        execute("cd", &mut ctx);
+        assert!(ctx.current_path().is_empty());
+    }
+
+    #[test]
+    fn execute_registers_empty() {
+        let mut ctx = StoreContext::new();
+        let result = execute("registers", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => {
+                let text = display.unwrap();
+                assert!(strip_ansi_codes(&text).contains("No registers"));
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_registers_with_values() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("foo", Value::Integer(42));
+        let result = execute("registers", &mut ctx);
+        match result {
+            CommandResult::Ok { display, capture } => {
+                assert!(display.is_some());
+                assert!(capture.is_some());
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_read_sys_time() {
+        let mut ctx = StoreContext::new();
+        let result = execute("read /ctx/sys/time/now", &mut ctx);
+        match result {
+            CommandResult::Ok { display, capture } => {
+                assert!(display.is_some());
+                assert!(capture.is_some());
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_read_nonexistent() {
+        let mut ctx = StoreContext::new();
+        ctx.mount(
+            "test",
+            structfs_core_store::mount_store::MountConfig::Memory,
+        )
+        .unwrap();
+        let result = execute("read /test/nonexistent", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => {
+                let text = strip_ansi_codes(&display.unwrap());
+                assert!(text.contains("null"));
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_read_register() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("foo", Value::String("bar".to_string()));
+        let result = execute("read @foo", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => {
+                let text = strip_ansi_codes(&display.unwrap());
+                assert!(text.contains("bar"));
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_read_register_not_found() {
+        let mut ctx = StoreContext::new();
+        let result = execute("read @nonexistent", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => {
+                let text = strip_ansi_codes(&display.unwrap());
+                assert!(text.contains("null"));
+            }
+            _ => panic!("Expected Ok"),
+        }
+    }
+
+    #[test]
+    fn execute_write_to_memory() {
+        let mut ctx = StoreContext::new();
+        ctx.mount(
+            "test",
+            structfs_core_store::mount_store::MountConfig::Memory,
+        )
+        .unwrap();
+        let result = execute("write /test/key 42", &mut ctx);
+        match result {
+            CommandResult::Ok { display, .. } => {
+                let text = strip_ansi_codes(&display.unwrap());
+                assert!(text.contains("ok"));
+            }
+            _ => panic!("Expected Ok, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn execute_write_json_object() {
+        let mut ctx = StoreContext::new();
+        ctx.mount(
+            "test",
+            structfs_core_store::mount_store::MountConfig::Memory,
+        )
+        .unwrap();
+        let result = execute("write /test/data {\"key\": \"value\"}", &mut ctx);
+        assert!(matches!(result, CommandResult::Ok { .. }));
+    }
+
+    #[test]
+    fn execute_write_invalid_json() {
+        let mut ctx = StoreContext::new();
+        let result = execute("write /test/data {invalid}", &mut ctx);
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[test]
+    fn execute_write_no_value() {
+        let mut ctx = StoreContext::new();
+        let result = execute("write /test/path", &mut ctx);
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[test]
+    fn execute_register_capture() {
+        let mut ctx = StoreContext::new();
+        let result = execute("@result pwd", &mut ctx);
+        assert!(matches!(result, CommandResult::Ok { .. }));
+        assert!(ctx.get_register("result").is_some());
+    }
+
+    #[test]
+    fn execute_register_capture_with_read() {
+        let mut ctx = StoreContext::new();
+        execute("@time read /ctx/sys/time/now_unix", &mut ctx);
+        let reg = ctx.get_register("time");
+        assert!(reg.is_some());
+    }
+
+    #[test]
+    fn execute_dereference() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("path", Value::String("/ctx/sys/time/now".to_string()));
+        let result = execute("read *@path", &mut ctx);
+        assert!(matches!(result, CommandResult::Ok { .. }));
+    }
+
+    #[test]
+    fn execute_dereference_nonexistent() {
+        let mut ctx = StoreContext::new();
+        let result = execute("read *@nonexistent", &mut ctx);
+        assert!(matches!(result, CommandResult::Error(_)));
+    }
+
+    #[test]
+    fn execute_write_to_register() {
+        let mut ctx = StoreContext::new();
+        let result = execute("write @myreg 42", &mut ctx);
+        assert!(matches!(result, CommandResult::Ok { .. }));
+        assert_eq!(ctx.get_register("myreg"), Some(&Value::Integer(42)));
+    }
+
+    #[test]
+    fn execute_write_from_register() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("source", Value::Integer(99));
+        ctx.mount(
+            "test",
+            structfs_core_store::mount_store::MountConfig::Memory,
+        )
+        .unwrap();
+        let result = execute("write /test/dest @source", &mut ctx);
+        assert!(matches!(result, CommandResult::Ok { .. }));
+    }
+
+    // Original tests
     #[test]
     fn test_parse_write_args() {
         assert_eq!(
