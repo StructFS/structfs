@@ -7,11 +7,6 @@ repository.workspace = true
 description = "OS primitives exposed through StructFS paths"
 
 [dependencies]
-# Legacy (to be deprecated)
-structfs-store = { workspace = true }
-erased-serde = { workspace = true }
-
-# New architecture
 structfs-core-store = { path = "../core-store" }
 
 serde = { workspace = true }

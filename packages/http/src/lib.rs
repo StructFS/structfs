@@ -1,125 +1,74 @@
 //! # structfs-http
 //!
-//! HTTP client and server stores for StructFS.
+//! HTTP client stores for StructFS.
 //!
 //! This crate provides StructFS Store implementations that map read/write
-//! operations to HTTP requests. It follows the StructFS philosophy of
-//! "synchronous interface, asynchronous effects".
+//! operations to HTTP requests.
 //!
-//! ## Two Client Modes
+//! ## Store Types
 //!
-//! ### 1. Blocking Client (`HttpClientStore`)
+//! ### HttpBrokerStore (Sync)
 //!
-//! Synchronous HTTP - calls block until the response arrives:
+//! Blocking HTTP broker - write queues a request, read from handle executes it:
 //!
 //! ```ignore
-//! use structfs_http::blocking::HttpClientStore;
-//! use structfs_store::{Reader, Writer, Path};
+//! use structfs_http::{HttpBrokerStore, HttpRequest};
+//! use structfs_core_store::{Reader, Writer, Path};
+//!
+//! let mut broker = HttpBrokerStore::with_default_timeout()?;
+//!
+//! // Queue a request
+//! let handle = broker.write(&Path::parse("")?, Record::parsed(to_value(&HttpRequest::get("https://example.com"))?))?;
+//!
+//! // Execute and get response (blocks)
+//! let response = broker.read(&handle)?;
+//! ```
+//!
+//! ### AsyncHttpBrokerStore
+//!
+//! Non-blocking HTTP broker - requests execute in background threads:
+//!
+//! ```ignore
+//! use structfs_http::{AsyncHttpBrokerStore, HttpRequest};
+//!
+//! let mut broker = AsyncHttpBrokerStore::with_default_timeout()?;
+//!
+//! // Queue request (starts executing immediately in background)
+//! let handle = broker.write(&Path::parse("")?, Record::parsed(to_value(&HttpRequest::get("https://example.com"))?))?;
+//!
+//! // Check status
+//! let status = broker.read(&handle)?;
+//!
+//! // Get response when ready
+//! let response = broker.read(&handle.join(&Path::parse("response")?))?;
+//! ```
+//!
+//! ### HttpClientStore
+//!
+//! Direct HTTP client with a base URL:
+//!
+//! ```ignore
+//! use structfs_http::HttpClientStore;
 //!
 //! let mut client = HttpClientStore::new("https://api.example.com")?;
 //!
-//! // GET request via read_owned() - blocks until complete
-//! let user: User = client.read_owned(&Path::parse("users/123")?)?.unwrap();
+//! // GET request via read
+//! let data = client.read(&Path::parse("users/123")?)?;
 //!
-//! // POST request via write() - blocks until complete
-//! client.write(&Path::parse("users")?, &new_user)?;
+//! // POST request via write
+//! client.write(&Path::parse("users")?, data)?;
 //! ```
-//!
-//! ### 2. Async Client (`AsyncHttpClientStore`)
-//!
-//! Non-blocking HTTP via the handle pattern - requests return immediately
-//! with a handle path that can be queried for status:
-//!
-//! ```ignore
-//! use structfs_http::async_client::AsyncHttpClientStore;
-//! use structfs_http::{HttpRequest, RequestStatus};
-//! use structfs_store::{Reader, Writer, Path};
-//!
-//! let mut client = AsyncHttpClientStore::new("https://api.example.com")?;
-//!
-//! // Initiate request - returns immediately with handle path
-//! let handle = client.write(&Path::parse("")?, &HttpRequest::get("users/123"))?;
-//! // handle = "handles/0000000000000000"
-//!
-//! // Query status (non-blocking)
-//! let status: RequestStatus = client.read_owned(&handle)?.unwrap();
-//! // status.state = Pending | Complete | Failed
-//!
-//! // Block until complete
-//! client.write(&handle.join(&Path::parse("await")?), &())?;
-//!
-//! // Read the response
-//! let response: HttpResponse = client.read_owned(
-//!     &handle.join(&Path::parse("response")?)
-//! )?.unwrap();
-//! ```
-//!
-//! ## Full Control with HttpRequest
-//!
-//! For requests that need custom methods, headers, or query parameters:
-//!
-//! ```ignore
-//! use structfs_http::HttpRequest;
-//!
-//! let request = HttpRequest::put("users/123")
-//!     .with_header("Authorization", "Bearer token")
-//!     .with_query("version", "2")
-//!     .with_body(&user)?;
-//!
-//! // Write the request to execute it
-//! client.write(&Path::parse("")?, &request)?;
-//! ```
-//!
-//! ## Async Client Path Reference
-//!
-//! | Path | Operation | Description |
-//! |------|-----------|-------------|
-//! | `""` | write(HttpRequest) | Initiate request, returns handle path |
-//! | `handles/{id}` | read | Get RequestStatus |
-//! | `handles/{id}/response` | read | Get HttpResponse (None if pending) |
-//! | `handles/{id}/await` | write | Block until complete |
-//! | `handles/{id}/await_timeout` | write(ms) | Block with timeout |
 
 pub mod error;
 pub mod handle;
 pub mod types;
 
-// Legacy implementations (to be deprecated)
-#[cfg(feature = "blocking")]
-pub mod async_broker;
-
-#[cfg(feature = "blocking")]
-pub mod blocking;
-
-#[cfg(feature = "blocking")]
-pub mod broker;
-
-#[cfg(feature = "blocking")]
-pub mod remote;
-
-#[cfg(feature = "async")]
-pub mod async_client;
-
-// New core-store based implementations
-#[cfg(feature = "blocking")]
-pub mod core;
+mod core;
 
 // Re-export main types
 pub use error::Error;
 pub use handle::{RequestState, RequestStatus};
 pub use types::{HttpRequest, HttpResponse, Method};
 
-#[cfg(feature = "blocking")]
-pub use async_broker::AsyncHttpBrokerStore;
-
-#[cfg(feature = "blocking")]
-pub use blocking::HttpClientStore;
-
-#[cfg(feature = "blocking")]
-pub use broker::HttpBrokerStore;
-
-#[cfg(feature = "blocking")]
-pub use remote::RemoteStore;
-
-#[cfg(feature = "async")]
-pub use async_client::AsyncHttpClientStore;
+// Re-export stores
+pub use crate::core::{AsyncHttpBrokerStore, HttpBrokerStore, HttpClientStore};

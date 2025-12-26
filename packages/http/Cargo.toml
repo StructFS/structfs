@@ -4,19 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "HTTP client and server stores for StructFS"
+description = "HTTP client stores for StructFS"
 
 [features]
 default = ["blocking"]
 blocking = ["reqwest/blocking"]
-async = ["tokio"]
 
 [dependencies]
-# Legacy (to be deprecated)
-structfs-store = { workspace = true }
-erased-serde = { workspace = true }
-
-# New architecture
 structfs-core-store = { path = "../core-store" }
 structfs-serde-store = { path = "../serde-store" }
 
@@ -26,8 +20,6 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 http = { workspace = true }
 url = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

@@ -1,198 +1,203 @@
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::value::Value as JsonValue;
+//! In-memory store using the new core-store architecture.
+//!
+//! This is the new architecture equivalent of SerdeJSONInMemoryStore.
 
-use crate::json_utils;
-use structfs_store as store;
-use structfs_store::Path;
+use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
 
-pub struct SerdeJSONInMemoryStore {
-    root: JsonValue,
+use crate::value_utils;
+
+/// An in-memory store using core_store::Value as the storage format.
+///
+/// This is the new architecture version of SerdeJSONInMemoryStore.
+///
+/// # Example
+///
+/// ```rust
+/// use structfs_json_store::InMemoryStore;
+/// use structfs_core_store::{Reader, Writer, Record, Value, path};
+///
+/// let mut store = InMemoryStore::new();
+///
+/// // Write a value at the root
+/// store.write(&path!("name"), Record::parsed(Value::String("Alice".to_string()))).unwrap();
+///
+/// // Read it back
+/// let record = store.read(&path!("name")).unwrap().unwrap();
+/// let value = record.into_value(&structfs_core_store::NoCodec).unwrap();
+/// assert_eq!(value, Value::String("Alice".to_string()));
+/// ```
+pub struct InMemoryStore {
+    root: Value,
 }
 
-impl SerdeJSONInMemoryStore {
-    pub fn new() -> Result<SerdeJSONInMemoryStore, store::Error> {
-        Ok(SerdeJSONInMemoryStore {
-            root: JsonValue::Null,
-        })
+impl InMemoryStore {
+    /// Create a new empty in-memory store.
+    pub fn new() -> Self {
+        Self { root: Value::Null }
     }
 
-    fn write_value(&mut self, to: &Path, value: JsonValue) -> Result<(), store::Error> {
-        json_utils::set_path(&mut self.root, to, value)
+    /// Create a store with initial data.
+    pub fn with_data(root: Value) -> Self {
+        Self { root }
     }
 
-    fn read_value(&mut self, from: &Path) -> Result<Option<&JsonValue>, store::Error> {
-        json_utils::get_path(&self.root, from)
+    /// Get a reference to the root value.
+    pub fn root(&self) -> &Value {
+        &self.root
+    }
+
+    /// Get a mutable reference to the root value.
+    pub fn root_mut(&mut self) -> &mut Value {
+        &mut self.root
+    }
+}
+
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reader for InMemoryStore {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        match value_utils::get_path(&self.root, from)? {
+            Some(value) => {
+                let cloned: Value = value.clone();
+                Ok(Some(Record::parsed(cloned)))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+impl Writer for InMemoryStore {
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+        let value = data.into_value(&NoCodec)?;
+        value_utils::set_path(&mut self.root, to, value)?;
+        Ok(to.clone())
     }
 }
 
 #[cfg(test)]
-mod serde_json_in_memory_store_tests {
+mod tests {
     use super::*;
-    use serde_json::json;
+    use std::collections::BTreeMap;
+    use structfs_core_store::path;
 
     #[test]
-    fn works() {
-        let mut store = SerdeJSONInMemoryStore::new().unwrap();
+    fn basic_write_read() {
+        let mut store = InMemoryStore::new();
 
-        // Add the root structure.
         store
-            .write_value(
-                &Path::parse("").unwrap(),
-                json!({
-                    "example": "Hello, world!",
-                }),
-            )
-            .unwrap();
-        // Add a new path pointing to a structure.
-        store
-            .write_value(
-                &Path::parse("foo").unwrap(),
-                json!({
-                    "bar": "baz",
-                    "flibbity": [1, 2, 3, 4, 5],
-                }),
-            )
-            .unwrap();
-        // Overwrite an existing path with a new structure.
-        store
-            .write_value(&Path::parse("foo/bar").unwrap(), json!({}))
-            .unwrap();
-        store
-            .write_value(
-                &Path::parse("foo/bar/baz").unwrap(),
-                json!({
-                    "quuux": 1,
-                    "flub": 1.2,
-                }),
+            .write(
+                &path!("foo"),
+                Record::parsed(Value::String("bar".to_string())),
             )
             .unwrap();
 
-        let root_path = Path::parse("").unwrap();
-        let actual_value = store.read_value(&root_path).unwrap().unwrap();
-        let expected_value = json!({
-            "example": "Hello, world!",
-            "foo": {
-                "bar": {
-                    "baz": {
-                        "quuux": 1,
-                        "flub": 1.2,
-                    },
-                },
-                "flibbity": [1, 2, 3, 4, 5],
-            },
-        });
-        assert_eq!(actual_value, &expected_value);
-    }
-}
-
-impl store::Writer for SerdeJSONInMemoryStore {
-    fn write<D: Serialize>(&mut self, destination: &Path, data: D) -> Result<Path, store::Error> {
-        let value = serde_json::to_value(data).map_err(store::LocalStoreError::from)?;
-        self.write_value(destination, value)?;
-
-        Ok(destination.clone())
-    }
-}
-
-impl store::Reader for SerdeJSONInMemoryStore {
-    fn read_to_deserializer<'de, 'this>(
-        &'this mut self,
-        from: &Path,
-    ) -> Result<Option<Box<dyn erased_serde::Deserializer<'de>>>, store::Error>
-    where
-        'this: 'de,
-    {
-        Ok(self.read_value(from)?.map(|v| {
-            let de: Box<dyn erased_serde::Deserializer> =
-                Box::new(<dyn erased_serde::Deserializer>::erase(v.clone()));
-            de
-        }))
-    }
-
-    fn read_owned<RecordType: DeserializeOwned>(
-        &mut self,
-        from: &Path,
-    ) -> Result<Option<RecordType>, store::Error> {
-        if let Some(value) = self.read_value(from)? {
-            // TODO(akesling): Handle type mismatch error between dynamic JSON value in store and
-            // caller-requested static type.
-            let data: RecordType = serde_json::from_value(value.clone())
-                .map_err(store::LocalStoreError::from)
-                .map_err(|err| store::Error::RecordDeserialization {
-                    message: format!(
-                        concat!(
-                            "Value ({:?}) at path '{}' could not be transformed ",
-                            "to Rust type with error: {}"
-                        ),
-                        value, from, err
-                    ),
-                })?;
-
-            Ok(Some(data))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[cfg(test)]
-mod store_impl_for_json_local_store_tests {
-    use super::*;
-    use serde_json::json;
-    use structfs_store::store::trait_test_suite;
-
-    #[test]
-    fn read_owned_works() {
-        {
-            let mut store = SerdeJSONInMemoryStore::new().unwrap();
-            store
-                .write_value(
-                    &Path::parse("").unwrap(),
-                    json!({
-                        "example": "Hello, world!",
-                    }),
-                )
-                .unwrap();
-
-            trait_test_suite::read_owned_simple_struct_works(&mut store);
-        }
-
-        {
-            let mut store = SerdeJSONInMemoryStore::new().unwrap();
-            store
-                .write_value(
-                    &Path::parse("").unwrap(),
-                    json!({
-                        "sub_struct": {
-                            "example": "Hello, world!",
-                        },
-                        "array_of_things": [
-                            {
-                                "example": "Oh my goodness.",
-                            },
-                            {
-                                "example": "Look how working this is",
-                            },
-                            {
-                                "example": "Just so functional!",
-                            },
-                        ],
-                    }),
-                )
-                .unwrap();
-
-            trait_test_suite::read_owned_complex_struct_works(&mut store);
-        }
+        let record = store.read(&path!("foo")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("bar".to_string()));
     }
 
     #[test]
-    fn write_works() {
-        trait_test_suite::write_works(|| SerdeJSONInMemoryStore::new().unwrap())
+    fn nested_write_read() {
+        let mut store = InMemoryStore::new();
+
+        // First create parent
+        store
+            .write(&path!("users"), Record::parsed(Value::Map(BTreeMap::new())))
+            .unwrap();
+
+        // Then write child
+        store
+            .write(
+                &path!("users/alice"),
+                Record::parsed(Value::String("Alice".to_string())),
+            )
+            .unwrap();
+
+        let record = store.read(&path!("users/alice")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("Alice".to_string()));
     }
 
     #[test]
-    fn arrays_work() {
-        trait_test_suite::arrays_work(|| SerdeJSONInMemoryStore::new().unwrap())
+    fn read_nonexistent_returns_none() {
+        let mut store = InMemoryStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn overwrite_works() {
+        let mut store = InMemoryStore::new();
+
+        store
+            .write(
+                &path!("value"),
+                Record::parsed(Value::String("first".to_string())),
+            )
+            .unwrap();
+
+        store
+            .write(
+                &path!("value"),
+                Record::parsed(Value::String("second".to_string())),
+            )
+            .unwrap();
+
+        let record = store.read(&path!("value")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("second".to_string()));
+    }
+
+    #[test]
+    fn complex_structure() {
+        let mut store = InMemoryStore::new();
+
+        // Build a complex structure
+        let mut user = BTreeMap::new();
+        user.insert("name".to_string(), Value::String("Alice".to_string()));
+        user.insert("age".to_string(), Value::Integer(30));
+        user.insert(
+            "hobbies".to_string(),
+            Value::Array(vec![
+                Value::String("reading".to_string()),
+                Value::String("coding".to_string()),
+            ]),
+        );
+
+        store
+            .write(&path!(""), Record::parsed(Value::Map(user)))
+            .unwrap();
+
+        // Read various paths
+        let name = store.read(&path!("name")).unwrap().unwrap();
+        assert_eq!(
+            name.into_value(&NoCodec).unwrap(),
+            Value::String("Alice".to_string())
+        );
+
+        let age = store.read(&path!("age")).unwrap().unwrap();
+        assert_eq!(age.into_value(&NoCodec).unwrap(), Value::Integer(30));
+
+        let hobby = store.read(&path!("hobbies/0")).unwrap().unwrap();
+        assert_eq!(
+            hobby.into_value(&NoCodec).unwrap(),
+            Value::String("reading".to_string())
+        );
+    }
+
+    #[test]
+    fn with_data_constructor() {
+        let mut data = BTreeMap::new();
+        data.insert("key".to_string(), Value::String("value".to_string()));
+
+        let mut store = InMemoryStore::with_data(Value::Map(data));
+
+        let record = store.read(&path!("key")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("value".to_string()));
     }
 }
