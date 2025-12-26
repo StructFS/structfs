@@ -110,8 +110,34 @@ read @handle                     # Read register contents
 
 ## Testing
 
-- Unit tests live alongside code in `#[cfg(test)]` modules
-- REPL tests are mostly ignored (require interactive testing)
+Unit tests live alongside code in `#[cfg(test)]` modules. Current coverage: ~93% line coverage.
+
+### Testing Infrastructure
+
+The codebase uses dependency injection to enable testing without external dependencies:
+
+**TestHost** (`packages/repl/src/io/test_host.rs`): In-memory I/O for testing REPL without a terminal.
+```rust
+let mut host = TestHost::new();
+host.queue_input("read /ctx/sys/time/now");
+// Run REPL loop with host...
+let outputs = host.outputs();
+```
+
+**HttpExecutor/MockExecutor** (`packages/http/src/executor.rs`): Mock HTTP responses without network.
+```rust
+let executor = MockExecutor::new()
+    .with_response("/api/data", MockExecutor::success_response(json!({"key": "value"})));
+let store = HttpBrokerStore::with_executor(executor);
+```
+
+**StoreFactory injection**: `StoreContext` is generic over a factory for testing with mock stores.
+
+### Untestable Code
+
+Some files remain at 0% coverage by design:
+- `repl/src/host/terminal.rs` - Real terminal I/O (reedline integration)
+- `repl/src/lib.rs`, `repl/src/main.rs` - Entry points
 
 ## Files to Know
 
@@ -119,7 +145,9 @@ read @handle                     # Read register contents
 - `packages/core-store/src/mount_store.rs` - MountConfig enum and mount management
 - `packages/core-store/src/overlay_store.rs` - OverlayStore for composing stores
 - `packages/http/src/core.rs` - HTTP broker store implementations
+- `packages/http/src/executor.rs` - HttpExecutor trait and MockExecutor for testing
 - `packages/sys/src/lib.rs` - SysStore with all sub-stores
 - `packages/repl/src/store_context.rs` - REPL's store factory and default mounts
 - `packages/repl/src/help_store.rs` - Help system
 - `packages/repl/src/commands.rs` - Command parsing, register handling, dereference syntax
+- `packages/repl/src/io/test_host.rs` - TestHost for testing REPL without terminal
