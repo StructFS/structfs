@@ -1,6 +1,6 @@
 //! Utilities for working with core_store::Value trees.
 //!
-//! This is the new architecture equivalent of json_utils.rs.
+//! Utility functions for navigating and modifying Value trees.
 
 use std::collections::BTreeMap;
 

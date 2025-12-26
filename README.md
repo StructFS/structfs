@@ -33,8 +33,10 @@ cargo run -p structfs-repl
 
 | Package | Description |
 |---------|-------------|
-| `structfs-store` | Core traits (`Reader`, `Writer`, `Path`) and mount system |
-| `structfs-json-store` | JSON-based stores (in-memory, local filesystem) |
+| `structfs-ll-store` | Low-level byte stream traits |
+| `structfs-core-store` | Core traits (`Reader`, `Writer`, `Path`, `Value`) and mount system |
+| `structfs-serde-store` | Serde integration for typed access |
+| `structfs-json-store` | JSON-based in-memory store |
 | `structfs-http` | HTTP client store and broker for arbitrary requests |
 | `structfs-sys` | OS primitives (environment, time, filesystem, process, random) |
 | `structfs-repl` | Interactive REPL with the `structfs` binary |

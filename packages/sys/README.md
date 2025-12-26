@@ -22,18 +22,16 @@ exclusively through StructFS operations.
 
 ```rust
 use structfs_sys::SysStore;
-use structfs_store::{Reader, Writer, Path};
+use structfs_core_store::{Reader, Writer, Path, Value, NoCodec};
 
 let mut store = SysStore::new();
 
 // Read environment variable
-let home: Option<String> = store.read_owned(&Path::parse("env/HOME").unwrap()).unwrap();
+let record = store.read(&Path::parse("env/HOME").unwrap())?.unwrap();
+let value = record.into_value(&NoCodec)?;
 
 // Get current time
-let now: Option<String> = store.read_owned(&Path::parse("time/now").unwrap()).unwrap();
-
-// Read documentation
-let docs: Option<serde_json::Value> = store.read_owned(&Path::parse("docs").unwrap()).unwrap();
+let record = store.read(&Path::parse("time/now").unwrap())?.unwrap();
 ```
 
 ## Subsystems

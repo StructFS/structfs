@@ -1,6 +1,6 @@
 //! In-memory store using the new core-store architecture.
 //!
-//! This is the new architecture equivalent of SerdeJSONInMemoryStore.
+//! In-memory JSON store using Value type.
 
 use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
 
@@ -8,7 +8,7 @@ use crate::value_utils;
 
 /// An in-memory store using core_store::Value as the storage format.
 ///
-/// This is the new architecture version of SerdeJSONInMemoryStore.
+/// In-memory store that uses the core-store Value type.
 ///
 /// # Example
 ///

@@ -6,55 +6,55 @@ HTTP stores for StructFS.
 
 ### HttpBrokerStore
 
-The broker store allows making HTTP requests to any URL using a deferred execution pattern:
-
-1. **Write** an `HttpRequest` → returns a handle path
-2. **Read** from the handle → executes the request and returns `HttpResponse`
+Synchronous HTTP broker - write queues a request, read from handle executes it:
 
 ```rust
-use structfs_http::broker::HttpBrokerStore;
-use structfs_http::{HttpRequest, HttpResponse};
-use structfs_store::{Reader, Writer, path};
+use structfs_http::{HttpBrokerStore, HttpRequest};
+use structfs_core_store::{Reader, Writer, Record, path};
+use structfs_serde_store::to_value;
 
 let mut broker = HttpBrokerStore::with_default_timeout()?;
 
 // Queue a request
 let request = HttpRequest::get("https://api.example.com/users/1")
     .with_header("Authorization", "Bearer token");
-let handle = broker.write(&path!(""), &request)?;
+let handle = broker.write(&path!(""), Record::parsed(to_value(&request)?))?;
 // handle = "outstanding/0"
 
 // Execute by reading
-let response: HttpResponse = broker.read_owned(&handle)?.unwrap();
-println!("Status: {}", response.status);
+let record = broker.read(&handle)?.unwrap();
+```
+
+### AsyncHttpBrokerStore
+
+Async HTTP broker - requests execute in background threads:
+
+```rust
+use structfs_http::AsyncHttpBrokerStore;
+
+let mut broker = AsyncHttpBrokerStore::with_default_timeout()?;
+
+// Queue request (starts executing immediately)
+let handle = broker.write(&path!(""), Record::parsed(to_value(&request)?))?;
+
+// Check status
+let status = broker.read(&handle)?;
+
+// Get response when ready
+let response = broker.read(&handle.join(&path!("response")))?;
 ```
 
 ### HttpClientStore
 
-HTTP client with a fixed base URL. Simpler but less flexible than the broker:
+HTTP client with a fixed base URL:
 
 ```rust
-use structfs_http::blocking::HttpClientStore;
+use structfs_http::HttpClientStore;
 
-let mut client = HttpClientStore::new("https://api.example.com")?
-    .with_default_header("Authorization", "Bearer token");
+let mut client = HttpClientStore::new("https://api.example.com")?;
 
 // GET /users/123
-let user: User = client.read_owned(&path!("users/123"))?.unwrap();
-
-// POST /users with body
-client.write(&path!("users"), &new_user)?;
-```
-
-### RemoteStore
-
-Connect to a remote StructFS server:
-
-```rust
-use structfs_http::RemoteStore;
-
-let mut remote = RemoteStore::new("https://structfs.example.com")?;
-let data: MyType = remote.read_owned(&path!("some/path"))?.unwrap();
+let record = client.read(&path!("users/123"))?;
 ```
 
 ## Types
@@ -92,10 +92,8 @@ pub struct HttpResponse {
 response.is_success();      // 2xx
 response.is_client_error(); // 4xx
 response.is_server_error(); // 5xx
-response.json::<T>()?;      // Deserialize body
 ```
 
 ## Features
 
 - `blocking` (default): Synchronous HTTP client using reqwest
-- `async`: Async HTTP client (not yet implemented)
