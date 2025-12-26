@@ -42,7 +42,7 @@ mod convert;
 mod typed;
 
 pub use codec::{JsonCodec, MultiCodec};
-pub use convert::{from_value, to_value};
+pub use convert::{from_value, json_to_value, to_value, value_to_json};
 pub use typed::{TypedReader, TypedWriter};
 
 // Re-export core types for convenience

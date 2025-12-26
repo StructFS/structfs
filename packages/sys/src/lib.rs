@@ -36,12 +36,16 @@
 //! let docs: Option<serde_json::Value> = store.read_owned(&Path::parse("docs").unwrap()).unwrap();
 //! ```
 
+// Legacy implementations (to be deprecated)
 pub mod docs;
 pub mod env;
 pub mod fs;
 pub mod proc;
 pub mod random;
 pub mod time;
+
+// New core-store based implementations
+pub mod core;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
