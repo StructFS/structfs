@@ -625,4 +625,156 @@ mod tests {
 
         assert_eq!(parse_write_args(""), None);
     }
+
+    #[test]
+    fn test_parse_write_args_with_nested_json() {
+        let result = parse_write_args("/data {\"nested\": {\"key\": \"value\"}}");
+        assert!(result.is_some());
+        let (path, val) = result.unwrap();
+        assert_eq!(path, "/data");
+        assert!(val.contains("nested"));
+    }
+
+    #[test]
+    fn test_parse_write_args_array() {
+        let result = parse_write_args("/items [1, 2, 3]");
+        assert!(result.is_some());
+        let (path, val) = result.unwrap();
+        assert_eq!(path, "/items");
+        assert!(val.contains("["));
+    }
+
+    #[test]
+    fn test_parse_write_args_string_value() {
+        let result = parse_write_args("/name \"Alice\"");
+        assert!(result.is_some());
+        let (path, val) = result.unwrap();
+        assert_eq!(path, "/name");
+        assert_eq!(val, "\"Alice\"");
+    }
+
+    #[test]
+    fn test_parse_write_args_null() {
+        let result = parse_write_args("/delete null");
+        assert!(result.is_some());
+        let (path, val) = result.unwrap();
+        assert_eq!(path, "/delete");
+        assert_eq!(val, "null");
+    }
+
+    #[test]
+    fn test_parse_write_args_path_only() {
+        let result = parse_write_args("/only/path");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_register_capture_valid() {
+        let result = parse_register_capture("@result read /foo");
+        assert!(result.is_some());
+        let (name, cmd) = result.unwrap();
+        assert_eq!(name, "result");
+        assert_eq!(cmd, "read /foo");
+    }
+
+    #[test]
+    fn test_parse_register_capture_write() {
+        let result = parse_register_capture("@handle write /foo {\"x\": 1}");
+        assert!(result.is_some());
+        let (name, cmd) = result.unwrap();
+        assert_eq!(name, "handle");
+        assert!(cmd.starts_with("write"));
+    }
+
+    #[test]
+    fn test_parse_register_capture_no_at() {
+        let result = parse_register_capture("read /foo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_register_capture_no_command() {
+        let result = parse_register_capture("@name");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_register_capture_empty_name() {
+        let result = parse_register_capture("@ read /foo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_register_capture_invalid_name_with_slash() {
+        let result = parse_register_capture("@foo/bar read /baz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_register_capture_non_command() {
+        let result = parse_register_capture("@name something /foo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_register_capture_aliases() {
+        assert!(parse_register_capture("@r get /foo").is_some());
+        assert!(parse_register_capture("@r r /foo").is_some());
+        assert!(parse_register_capture("@r set /foo 1").is_some());
+        assert!(parse_register_capture("@r w /foo 1").is_some());
+        assert!(parse_register_capture("@r cd /foo").is_some());
+        assert!(parse_register_capture("@r pwd").is_some());
+        assert!(parse_register_capture("@r mounts").is_some());
+        assert!(parse_register_capture("@r ls /").is_some());
+    }
+
+    #[test]
+    fn command_result_ok_display() {
+        let result = CommandResult::ok_display("test");
+        match result {
+            CommandResult::Ok { display, capture } => {
+                assert_eq!(display, Some("test".to_string()));
+                assert!(capture.is_none());
+            }
+            _ => panic!("Expected Ok variant"),
+        }
+    }
+
+    #[test]
+    fn command_result_ok_with_capture() {
+        let result = CommandResult::ok_with_capture("test", Value::Integer(42));
+        match result {
+            CommandResult::Ok { display, capture } => {
+                assert_eq!(display, Some("test".to_string()));
+                assert_eq!(capture, Some(Value::Integer(42)));
+            }
+            _ => panic!("Expected Ok variant"),
+        }
+    }
+
+    #[test]
+    fn command_result_ok_none() {
+        let result = CommandResult::ok_none();
+        match result {
+            CommandResult::Ok { display, capture } => {
+                assert!(display.is_none());
+                assert!(capture.is_none());
+            }
+            _ => panic!("Expected Ok variant"),
+        }
+    }
+
+    #[test]
+    fn format_path_simple() {
+        let path = Path::parse("foo/bar").unwrap();
+        let formatted = format_path(&path);
+        assert!(formatted.contains("foo/bar"));
+    }
+
+    #[test]
+    fn format_path_empty() {
+        let path = Path::parse("").unwrap();
+        let formatted = format_path(&path);
+        assert!(formatted.contains("/"));
+    }
 }

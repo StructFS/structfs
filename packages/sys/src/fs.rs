@@ -452,7 +452,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use structfs_core_store::path;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     #[test]
     fn open_and_read_file() {
@@ -494,5 +494,483 @@ mod tests {
             Value::Array(_) => {}
             _ => panic!("Expected array"),
         }
+    }
+
+    #[test]
+    fn read_root() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("open"));
+                assert!(map.contains_key("handles"));
+                assert!(map.contains_key("stat"));
+                assert!(map.contains_key("mkdir"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_nonexistent() {
+        let mut store = FsStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn open_write_close() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open for write
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str.clone()));
+        open_map.insert("mode".to_string(), Value::String("write".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Write content (as UTF-8 string)
+        store
+            .write(
+                &handle_path,
+                Record::parsed(Value::String("test content".to_string())),
+            )
+            .unwrap();
+
+        // Close handle
+        let close_path = handle_path.join(&path!("close"));
+        store
+            .write(&close_path, Record::parsed(Value::Null))
+            .unwrap();
+
+        // Verify file content
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "test content");
+    }
+
+    #[test]
+    fn open_write_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test_bytes.bin");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open for write
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str.clone()));
+        open_map.insert("mode".to_string(), Value::String("write".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Write content as bytes
+        store
+            .write(&handle_path, Record::parsed(Value::Bytes(vec![1, 2, 3, 4])))
+            .unwrap();
+
+        // Verify file content
+        let content = std::fs::read(&file_path).unwrap();
+        assert_eq!(content, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn open_append_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("append.txt");
+        std::fs::write(&file_path, "first").unwrap();
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str.clone()));
+        open_map.insert("mode".to_string(), Value::String("append".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        store
+            .write(
+                &handle_path,
+                Record::parsed(Value::String("second".to_string())),
+            )
+            .unwrap();
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "firstsecond");
+    }
+
+    #[test]
+    fn open_readwrite_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("readwrite.txt");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str));
+        open_map.insert("mode".to_string(), Value::String("readwrite".to_string()));
+
+        let result = store.write(&path!("open"), Record::parsed(Value::Map(open_map)));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_createnew_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("new.txt");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str));
+        open_map.insert("mode".to_string(), Value::String("createnew".to_string()));
+
+        let result = store.write(&path!("open"), Record::parsed(Value::Map(open_map)));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_missing_path_error() {
+        let mut store = FsStore::new();
+
+        let open_map = BTreeMap::new();
+        let result = store.write(&path!("open"), Record::parsed(Value::Map(open_map)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_nonexistent_file_error() {
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert(
+            "path".to_string(),
+            Value::String("/nonexistent/path/12345".to_string()),
+        );
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let result = store.write(&path!("open"), Record::parsed(Value::Map(open_map)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handle_meta() {
+        let mut temp = NamedTempFile::new().unwrap();
+        writeln!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read meta
+        let meta_path = handle_path.join(&path!("meta"));
+        let record = store.read(&meta_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("size"));
+                assert!(map.contains_key("is_file"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn handle_seek() {
+        let mut temp = NamedTempFile::new().unwrap();
+        writeln!(temp, "0123456789").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Seek to position
+        let seek_path = handle_path.join(&path!("seek"));
+        let mut seek_map = BTreeMap::new();
+        seek_map.insert("pos".to_string(), Value::Integer(5));
+
+        store
+            .write(&seek_path, Record::parsed(Value::Map(seek_map)))
+            .unwrap();
+    }
+
+    #[test]
+    fn handle_seek_missing_pos_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        writeln!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let seek_path = handle_path.join(&path!("seek"));
+        let seek_map = BTreeMap::new();
+
+        let result = store.write(&seek_path, Record::parsed(Value::Map(seek_map)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handle_seek_invalid_type_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        writeln!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let seek_path = handle_path.join(&path!("seek"));
+        let result = store.write(&seek_path, Record::parsed(Value::String("5".to_string())));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handle_invalid_id_error() {
+        let mut store = FsStore::new();
+        let result = store.read(&path!("handles/invalid"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handle_not_found_error() {
+        let mut store = FsStore::new();
+        let result = store.read(&path!("handles/999999"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mkdir_and_rmdir() {
+        let temp_dir = TempDir::new().unwrap();
+        let new_dir = temp_dir.path().join("newdir");
+        let path_str = new_dir.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Create directory
+        let mut mkdir_map = BTreeMap::new();
+        mkdir_map.insert("path".to_string(), Value::String(path_str.clone()));
+
+        store
+            .write(&path!("mkdir"), Record::parsed(Value::Map(mkdir_map)))
+            .unwrap();
+
+        assert!(new_dir.exists());
+
+        // Remove directory
+        let mut rmdir_map = BTreeMap::new();
+        rmdir_map.insert("path".to_string(), Value::String(path_str));
+
+        store
+            .write(&path!("rmdir"), Record::parsed(Value::Map(rmdir_map)))
+            .unwrap();
+
+        assert!(!new_dir.exists());
+    }
+
+    #[test]
+    fn mkdir_recursive() {
+        let temp_dir = TempDir::new().unwrap();
+        let deep_dir = temp_dir.path().join("a/b/c");
+        let path_str = deep_dir.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut mkdir_map = BTreeMap::new();
+        mkdir_map.insert("path".to_string(), Value::String(path_str));
+        mkdir_map.insert("recursive".to_string(), Value::Bool(true));
+
+        store
+            .write(&path!("mkdir"), Record::parsed(Value::Map(mkdir_map)))
+            .unwrap();
+
+        assert!(deep_dir.exists());
+    }
+
+    #[test]
+    fn stat_file() {
+        let temp = NamedTempFile::new().unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut stat_map = BTreeMap::new();
+        stat_map.insert("path".to_string(), Value::String(temp_path));
+
+        store
+            .write(&path!("stat"), Record::parsed(Value::Map(stat_map)))
+            .unwrap();
+    }
+
+    #[test]
+    fn unlink_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("to_delete.txt");
+        std::fs::write(&file_path, "content").unwrap();
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut unlink_map = BTreeMap::new();
+        unlink_map.insert("path".to_string(), Value::String(path_str));
+
+        store
+            .write(&path!("unlink"), Record::parsed(Value::Map(unlink_map)))
+            .unwrap();
+
+        assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn rename_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let old_path = temp_dir.path().join("old.txt");
+        let new_path = temp_dir.path().join("new.txt");
+        std::fs::write(&old_path, "content").unwrap();
+
+        let mut store = FsStore::new();
+
+        let mut rename_map = BTreeMap::new();
+        rename_map.insert(
+            "from".to_string(),
+            Value::String(old_path.to_string_lossy().to_string()),
+        );
+        rename_map.insert(
+            "to".to_string(),
+            Value::String(new_path.to_string_lossy().to_string()),
+        );
+
+        store
+            .write(&path!("rename"), Record::parsed(Value::Map(rename_map)))
+            .unwrap();
+
+        assert!(!old_path.exists());
+        assert!(new_path.exists());
+    }
+
+    #[test]
+    fn rename_missing_from_error() {
+        let mut store = FsStore::new();
+
+        let mut rename_map = BTreeMap::new();
+        rename_map.insert("to".to_string(), Value::String("/tmp/new".to_string()));
+
+        let result = store.write(&path!("rename"), Record::parsed(Value::Map(rename_map)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rename_missing_to_error() {
+        let mut store = FsStore::new();
+
+        let mut rename_map = BTreeMap::new();
+        rename_map.insert("from".to_string(), Value::String("/tmp/old".to_string()));
+
+        let result = store.write(&path!("rename"), Record::parsed(Value::Map(rename_map)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rename_invalid_type_error() {
+        let mut store = FsStore::new();
+        let result = store.write(
+            &path!("rename"),
+            Record::parsed(Value::String("x".to_string())),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_to_root_error() {
+        let mut store = FsStore::new();
+        let result = store.write(&path!(""), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_unknown_operation_error() {
+        let mut store = FsStore::new();
+        let result = store.write(&path!("unknown"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_invalid_content_type_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str));
+        open_map.insert("mode".to_string(), Value::String("write".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Try to write an invalid type
+        let result = store.write(&handle_path, Record::parsed(Value::Integer(123)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn close_nonexistent_handle_error() {
+        let mut store = FsStore::new();
+        let result = store.write(&path!("handles/999999/close"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_impl() {
+        let store = FsStore::default();
+        assert!(std::ptr::eq(&store as *const _, &store as *const _));
+    }
+
+    #[test]
+    fn open_mode_default() {
+        let mode = OpenMode::default();
+        assert_eq!(mode, OpenMode::Read);
     }
 }

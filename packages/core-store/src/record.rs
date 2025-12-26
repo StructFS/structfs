@@ -188,6 +188,86 @@ impl From<Bytes> for Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    /// Simple test codec that handles JSON
+    struct TestJsonCodec;
+
+    impl Codec for TestJsonCodec {
+        fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
+            if format != &Format::JSON {
+                return Err(Error::UnsupportedFormat(format.clone()));
+            }
+            let json: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(|e| Error::Decode {
+                    format: format.clone(),
+                    message: e.to_string(),
+                })?;
+            Ok(json_to_value(json))
+        }
+
+        fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
+            if format != &Format::JSON {
+                return Err(Error::UnsupportedFormat(format.clone()));
+            }
+            let json = value_to_json(value);
+            let bytes = serde_json::to_vec(&json).map_err(|e| Error::Encode {
+                format: format.clone(),
+                message: e.to_string(),
+            })?;
+            Ok(Bytes::from(bytes))
+        }
+
+        fn supports(&self, format: &Format) -> bool {
+            format == &Format::JSON
+        }
+    }
+
+    fn json_to_value(json: serde_json::Value) -> Value {
+        match json {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Integer(i)
+                } else {
+                    Value::Float(n.as_f64().unwrap_or(0.0))
+                }
+            }
+            serde_json::Value::String(s) => Value::String(s),
+            serde_json::Value::Array(arr) => {
+                Value::Array(arr.into_iter().map(json_to_value).collect())
+            }
+            serde_json::Value::Object(obj) => {
+                let map: BTreeMap<String, Value> = obj
+                    .into_iter()
+                    .map(|(k, v)| (k, json_to_value(v)))
+                    .collect();
+                Value::Map(map)
+            }
+        }
+    }
+
+    fn value_to_json(value: &Value) -> serde_json::Value {
+        match value {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Integer(i) => serde_json::Value::Number((*i).into()),
+            Value::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::String(s) => serde_json::Value::String(s.clone()),
+            Value::Bytes(b) => serde_json::Value::String(format!("bytes:{}", b.len())),
+            Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_json).collect()),
+            Value::Map(map) => {
+                let obj: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), value_to_json(v)))
+                    .collect();
+                serde_json::Value::Object(obj)
+            }
+        }
+    }
 
     #[test]
     fn raw_record_inspection() {
@@ -226,5 +306,116 @@ mod tests {
 
         let result = record.try_into_bytes(&Format::PROTOBUF);
         assert!(result.is_err()); // Returns the record back
+    }
+
+    #[test]
+    fn into_value_parsed() {
+        let codec = TestJsonCodec;
+        let record = Record::parsed(Value::from("hello"));
+        let value = record.into_value(&codec).unwrap();
+        assert_eq!(value, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn into_value_raw() {
+        let codec = TestJsonCodec;
+        let record = Record::raw(Bytes::from_static(b"{\"name\":\"Alice\"}"), Format::JSON);
+        let value = record.into_value(&codec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("name"), Some(&Value::String("Alice".to_string())));
+            }
+            _ => panic!("expected map"),
+        }
+    }
+
+    #[test]
+    fn into_bytes_raw_matching_format() {
+        let codec = TestJsonCodec;
+        let bytes = Bytes::from_static(b"{\"a\":1}");
+        let record = Record::raw(bytes.clone(), Format::JSON);
+        let result = record.into_bytes(&codec, &Format::JSON).unwrap();
+        assert_eq!(result, bytes);
+    }
+
+    #[test]
+    fn into_bytes_parsed() {
+        let codec = TestJsonCodec;
+        let record = Record::parsed(Value::from("hello"));
+        let result = record.into_bytes(&codec, &Format::JSON).unwrap();
+        assert_eq!(result, Bytes::from_static(b"\"hello\""));
+    }
+
+    #[test]
+    fn into_bytes_raw_different_format_error() {
+        let codec = TestJsonCodec;
+        let record = Record::raw(Bytes::from_static(b"data"), Format::JSON);
+        // Trying to transcode to PROTOBUF, which our codec doesn't support
+        let result = record.into_bytes(&codec, &Format::PROTOBUF);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_into_bytes_parsed_returns_err() {
+        let record = Record::parsed(Value::Null);
+        let result = record.try_into_bytes(&Format::JSON);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn debug_raw_record() {
+        let record = Record::raw(Bytes::from_static(b"hello"), Format::JSON);
+        let debug = format!("{:?}", record);
+        assert!(debug.contains("Record::Raw"));
+        assert!(debug.contains("bytes_len"));
+        assert!(debug.contains("format"));
+    }
+
+    #[test]
+    fn debug_parsed_record() {
+        let record = Record::parsed(Value::from(42));
+        let debug = format!("{:?}", record);
+        assert!(debug.contains("Record::Parsed"));
+    }
+
+    #[test]
+    fn from_value_impl() {
+        let value = Value::from("test");
+        let record: Record = value.into();
+        assert!(record.is_parsed());
+        assert_eq!(record.as_value(), Some(&Value::String("test".to_string())));
+    }
+
+    #[test]
+    fn from_bytes_impl() {
+        let bytes = Bytes::from_static(b"test data");
+        let record: Record = bytes.clone().into();
+        assert!(record.is_raw());
+        assert_eq!(record.format(), Format::OCTET_STREAM);
+        assert_eq!(record.as_bytes(), Some(&bytes));
+    }
+
+    #[test]
+    fn clone_raw_record() {
+        let record = Record::raw(Bytes::from_static(b"data"), Format::JSON);
+        let cloned = record.clone();
+        assert!(cloned.is_raw());
+        assert_eq!(cloned.format(), Format::JSON);
+    }
+
+    #[test]
+    fn clone_parsed_record() {
+        let record = Record::parsed(Value::from(123));
+        let cloned = record.clone();
+        assert!(cloned.is_parsed());
+        assert_eq!(cloned.as_value(), Some(&Value::Integer(123)));
+    }
+
+    #[test]
+    fn raw_with_vec_bytes() {
+        let vec = vec![1u8, 2, 3, 4];
+        let record = Record::raw(vec, Format::OCTET_STREAM);
+        assert!(record.is_raw());
+        assert_eq!(record.as_bytes().map(|b| b.len()), Some(4));
     }
 }

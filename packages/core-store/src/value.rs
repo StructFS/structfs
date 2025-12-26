@@ -325,4 +325,289 @@ mod tests {
         assert_eq!(value.get(&path!("items/2")), Some(&Value::from("c")));
         assert_eq!(value.get(&path!("items/3")), None);
     }
+
+    #[test]
+    fn value_constructors() {
+        assert!(Value::null().is_null());
+        assert!(Value::map().is_map());
+        assert!(Value::array().is_array());
+    }
+
+    #[test]
+    fn value_default_is_null() {
+        let value = Value::default();
+        assert!(value.is_null());
+    }
+
+    #[test]
+    fn value_type_checks() {
+        assert!(Value::Null.is_null());
+        assert!(!Value::Null.is_map());
+        assert!(!Value::Null.is_array());
+
+        assert!(!Value::Bool(true).is_null());
+        assert!(!Value::Bool(true).is_map());
+        assert!(!Value::Bool(true).is_array());
+
+        assert!(Value::Map(BTreeMap::new()).is_map());
+        assert!(!Value::Map(BTreeMap::new()).is_null());
+
+        assert!(Value::Array(vec![]).is_array());
+        assert!(!Value::Array(vec![]).is_null());
+    }
+
+    #[test]
+    fn get_on_empty_path_returns_self() {
+        let value = Value::from("hello");
+        assert_eq!(value.get(&path!("")), Some(&value));
+    }
+
+    #[test]
+    fn get_on_primitive_returns_none() {
+        let value = Value::from("hello");
+        assert_eq!(value.get(&path!("foo")), None);
+    }
+
+    #[test]
+    fn get_mut_works() {
+        let mut value = Value::map();
+        value.set(&path!("foo"), Value::from("bar")).unwrap();
+
+        let foo = value.get_mut(&path!("foo")).unwrap();
+        *foo = Value::from("baz");
+
+        assert_eq!(value.get(&path!("foo")), Some(&Value::from("baz")));
+    }
+
+    #[test]
+    fn get_mut_on_array() {
+        let mut value = Value::Array(vec![Value::from(1i64), Value::from(2i64)]);
+
+        let first = value.get_mut(&path!("0")).unwrap();
+        *first = Value::from(100i64);
+
+        assert_eq!(value.get(&path!("0")), Some(&Value::from(100i64)));
+    }
+
+    #[test]
+    fn get_mut_on_primitive_returns_none() {
+        let mut value = Value::from("hello");
+        assert!(value.get_mut(&path!("foo")).is_none());
+    }
+
+    #[test]
+    fn set_at_empty_path_replaces_self() {
+        let mut value = Value::from("old");
+        value.set(&path!(""), Value::from("new")).unwrap();
+        assert_eq!(value, Value::from("new"));
+    }
+
+    #[test]
+    fn set_array_element() {
+        let mut value = Value::Array(vec![Value::from("a"), Value::from("b")]);
+        value.set(&path!("0"), Value::from("x")).unwrap();
+        assert_eq!(value.get(&path!("0")), Some(&Value::from("x")));
+    }
+
+    #[test]
+    fn set_array_append() {
+        let mut value = Value::Array(vec![Value::from("a")]);
+        value.set(&path!("1"), Value::from("b")).unwrap();
+        assert_eq!(value.get(&path!("1")), Some(&Value::from("b")));
+    }
+
+    #[test]
+    fn set_array_out_of_bounds_error() {
+        let mut value = Value::Array(vec![Value::from("a")]);
+        let result = value.set(&path!("5"), Value::from("x"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_on_primitive_error() {
+        let mut value = Value::from("hello");
+        let result = value.set(&path!("foo"), Value::from("bar"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_invalid_array_index_error() {
+        let mut value = Value::Array(vec![Value::from("a")]);
+        let result = value.set(&path!("not_a_number"), Value::from("x"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_through_array() {
+        let mut value = Value::map();
+        value
+            .set(
+                &path!("items"),
+                Value::Array(vec![Value::map(), Value::map()]),
+            )
+            .unwrap();
+        value
+            .set(&path!("items/0/name"), Value::from("first"))
+            .unwrap();
+
+        assert_eq!(
+            value.get(&path!("items/0/name")),
+            Some(&Value::from("first"))
+        );
+    }
+
+    #[test]
+    fn set_through_array_invalid_index_error() {
+        let mut value = Value::map();
+        value.set(&path!("items"), Value::Array(vec![])).unwrap();
+        let result = value.set(&path!("items/0/name"), Value::from("x"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_through_primitive_error() {
+        let mut value = Value::map();
+        value.set(&path!("foo"), Value::from("primitive")).unwrap();
+        let result = value.set(&path!("foo/bar"), Value::from("x"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_at_empty_path() {
+        let mut value = Value::from("hello");
+        let removed = value.remove(&path!("")).unwrap();
+        assert_eq!(removed, Some(Value::from("hello")));
+        assert!(value.is_null());
+    }
+
+    #[test]
+    fn remove_nonexistent() {
+        let mut value = Value::map();
+        let removed = value.remove(&path!("nonexistent")).unwrap();
+        assert_eq!(removed, None);
+    }
+
+    #[test]
+    fn remove_from_array() {
+        let mut value = Value::Array(vec![Value::from("a"), Value::from("b"), Value::from("c")]);
+        let removed = value.remove(&path!("1")).unwrap();
+        assert_eq!(removed, Some(Value::from("b")));
+
+        // Array should now be [a, c]
+        match &value {
+            Value::Array(arr) => assert_eq!(arr.len(), 2),
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn remove_from_array_out_of_bounds() {
+        let mut value = Value::Array(vec![Value::from("a")]);
+        let removed = value.remove(&path!("5")).unwrap();
+        assert_eq!(removed, None);
+    }
+
+    #[test]
+    fn remove_invalid_array_index_error() {
+        let mut value = Value::Array(vec![Value::from("a")]);
+        let result = value.remove(&path!("not_a_number"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_from_primitive() {
+        let mut value = Value::map();
+        value.set(&path!("foo"), Value::from("primitive")).unwrap();
+        let removed = value.remove(&path!("foo/bar")).unwrap();
+        assert_eq!(removed, None);
+    }
+
+    #[test]
+    fn from_bool() {
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(Value::from(false), Value::Bool(false));
+    }
+
+    #[test]
+    fn from_i64() {
+        assert_eq!(Value::from(42i64), Value::Integer(42));
+        assert_eq!(Value::from(-100i64), Value::Integer(-100));
+    }
+
+    #[test]
+    fn from_i32() {
+        assert_eq!(Value::from(42i32), Value::Integer(42));
+    }
+
+    #[test]
+    fn from_f64() {
+        assert_eq!(Value::from(2.75f64), Value::Float(2.75));
+    }
+
+    #[test]
+    fn from_string() {
+        assert_eq!(
+            Value::from("hello".to_string()),
+            Value::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn from_str() {
+        assert_eq!(Value::from("hello"), Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn from_vec_u8() {
+        assert_eq!(Value::from(vec![1u8, 2, 3]), Value::Bytes(vec![1u8, 2, 3]));
+    }
+
+    #[test]
+    fn from_vec_values() {
+        let values: Vec<i64> = vec![1, 2, 3];
+        let value = Value::from(values);
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], Value::Integer(1));
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn value_equality() {
+        assert_eq!(Value::Null, Value::Null);
+        assert_eq!(Value::Bool(true), Value::Bool(true));
+        assert_ne!(Value::Bool(true), Value::Bool(false));
+        assert_eq!(Value::Integer(42), Value::Integer(42));
+        assert_ne!(Value::Integer(42), Value::Integer(43));
+        assert_eq!(
+            Value::String("a".to_string()),
+            Value::String("a".to_string())
+        );
+        assert_ne!(
+            Value::String("a".to_string()),
+            Value::String("b".to_string())
+        );
+    }
+
+    #[test]
+    fn value_clone() {
+        let original = Value::Map({
+            let mut m = BTreeMap::new();
+            m.insert("key".to_string(), Value::from("value"));
+            m
+        });
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn value_debug() {
+        let value = Value::from("test");
+        let debug = format!("{:?}", value);
+        assert!(debug.contains("String"));
+        assert!(debug.contains("test"));
+    }
 }

@@ -102,3 +102,87 @@ impl HandleState {
         self.status = RequestStatus::failed(self.status.id.clone(), error);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn request_status_pending() {
+        let status = RequestStatus::pending("123".to_string());
+        assert!(status.is_pending());
+        assert!(!status.is_complete());
+        assert!(!status.is_failed());
+        assert_eq!(status.id, "123");
+        assert!(status.error.is_none());
+        assert!(status.response_path.is_none());
+    }
+
+    #[test]
+    fn request_status_complete() {
+        let status = RequestStatus::complete("456".to_string());
+        assert!(!status.is_pending());
+        assert!(status.is_complete());
+        assert!(!status.is_failed());
+        assert_eq!(status.id, "456");
+        assert!(status.error.is_none());
+        assert_eq!(
+            status.response_path,
+            Some("handles/456/response".to_string())
+        );
+    }
+
+    #[test]
+    fn request_status_failed() {
+        let status = RequestStatus::failed("789".to_string(), "connection refused".to_string());
+        assert!(!status.is_pending());
+        assert!(!status.is_complete());
+        assert!(status.is_failed());
+        assert_eq!(status.id, "789");
+        assert_eq!(status.error, Some("connection refused".to_string()));
+        assert!(status.response_path.is_none());
+    }
+
+    #[test]
+    fn handle_state_new() {
+        let state = HandleState::new("test".to_string());
+        assert!(state.status.is_pending());
+        assert!(state.response.is_none());
+    }
+
+    #[test]
+    fn handle_state_complete() {
+        let mut state = HandleState::new("test".to_string());
+        let response = HttpResponse {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::json!({"result": "success"}),
+            body_text: None,
+        };
+        state.complete(response.clone());
+
+        assert!(state.status.is_complete());
+        assert!(state.response.is_some());
+        assert_eq!(state.response.unwrap().status, 200);
+    }
+
+    #[test]
+    fn handle_state_fail() {
+        let mut state = HandleState::new("test".to_string());
+        state.fail("network error".to_string());
+
+        assert!(state.status.is_failed());
+        assert_eq!(state.status.error, Some("network error".to_string()));
+        assert!(state.response.is_none());
+    }
+
+    #[test]
+    fn request_state_equality() {
+        assert_eq!(RequestState::Pending, RequestState::Pending);
+        assert_eq!(RequestState::Complete, RequestState::Complete);
+        assert_eq!(RequestState::Failed, RequestState::Failed);
+        assert_ne!(RequestState::Pending, RequestState::Complete);
+    }
+}

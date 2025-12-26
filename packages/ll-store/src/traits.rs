@@ -177,4 +177,40 @@ mod tests {
         let result = boxed.ll_read(&[b"test"]).unwrap();
         assert_eq!(result, Some(Bytes::from_static(b"data")));
     }
+
+    #[test]
+    fn mut_ref_blanket_impl_works() {
+        let mut store = TestLLStore::new();
+        let store_ref: &mut TestLLStore = &mut store;
+
+        store_ref
+            .ll_write(&[b"ref_test"], Bytes::from_static(b"ref_data"))
+            .unwrap();
+        let result = store_ref.ll_read(&[b"ref_test"]).unwrap();
+        assert_eq!(result, Some(Bytes::from_static(b"ref_data")));
+    }
+
+    #[test]
+    fn box_blanket_impl_works() {
+        let store = TestLLStore::new();
+        let mut boxed: Box<TestLLStore> = Box::new(store);
+
+        boxed
+            .ll_write(&[b"box_test"], Bytes::from_static(b"box_data"))
+            .unwrap();
+        let result = boxed.ll_read(&[b"box_test"]).unwrap();
+        assert_eq!(result, Some(Bytes::from_static(b"box_data")));
+    }
+
+    #[test]
+    fn box_dyn_works() {
+        let store = TestLLStore::new();
+        let mut boxed: Box<dyn LLStore> = Box::new(store);
+
+        boxed
+            .ll_write(&[b"dyn_test"], Bytes::from_static(b"dyn_data"))
+            .unwrap();
+        let result = boxed.ll_read(&[b"dyn_test"]).unwrap();
+        assert_eq!(result, Some(Bytes::from_static(b"dyn_data")));
+    }
 }
