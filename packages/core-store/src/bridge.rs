@@ -469,17 +469,13 @@ mod tests {
 
     impl Reader for ErrorCoreStore {
         fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
-            Err(Error::Other {
-                message: "read error".into(),
-            })
+            Err(Error::store("test", "read", "read error"))
         }
     }
 
     impl Writer for ErrorCoreStore {
         fn write(&mut self, _to: &Path, _data: Record) -> Result<Path, Error> {
-            Err(Error::Other {
-                message: "write error".into(),
-            })
+            Err(Error::store("test", "write", "write error"))
         }
     }
 

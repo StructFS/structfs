@@ -42,33 +42,45 @@ impl StoreFactory for CoreReplStoreFactory {
             MountConfig::Memory => Ok(Box::new(InMemoryStore::new())),
             MountConfig::Local { path: _ } => {
                 // Local disk store not yet migrated to new architecture
-                Err(CoreError::Other {
-                    message: "Local disk store not yet available in new architecture".to_string(),
-                })
+                Err(CoreError::store(
+                    "factory",
+                    "create",
+                    "Local disk store not yet available in new architecture",
+                ))
             }
             MountConfig::Http { url: _ } => {
                 // HTTP client not using direct mode in REPL context
-                Err(CoreError::Other {
-                    message: "HTTP client store not yet available in new architecture".to_string(),
-                })
+                Err(CoreError::store(
+                    "factory",
+                    "create",
+                    "HTTP client store not yet available in new architecture",
+                ))
             }
             MountConfig::HttpBroker => {
-                let store =
-                    HttpBrokerStore::with_default_timeout().map_err(|e| CoreError::Other {
-                        message: format!("Failed to create HTTP broker: {}", e),
-                    })?;
+                let store = HttpBrokerStore::with_default_timeout().map_err(|e| {
+                    CoreError::store(
+                        "factory",
+                        "create",
+                        format!("Failed to create HTTP broker: {}", e),
+                    )
+                })?;
                 Ok(Box::new(store))
             }
             MountConfig::AsyncHttpBroker => {
-                let store =
-                    AsyncHttpBrokerStore::with_default_timeout().map_err(|e| CoreError::Other {
-                        message: format!("Failed to create async HTTP broker: {}", e),
-                    })?;
+                let store = AsyncHttpBrokerStore::with_default_timeout().map_err(|e| {
+                    CoreError::store(
+                        "factory",
+                        "create",
+                        format!("Failed to create async HTTP broker: {}", e),
+                    )
+                })?;
                 Ok(Box::new(store))
             }
-            MountConfig::Structfs { url: _ } => Err(CoreError::Other {
-                message: "Remote StructFS not yet available in new architecture".to_string(),
-            }),
+            MountConfig::Structfs { url: _ } => Err(CoreError::store(
+                "factory",
+                "create",
+                "Remote StructFS not yet available in new architecture",
+            )),
             MountConfig::Help => Ok(Box::new(HelpStore::new())),
             MountConfig::Sys => Ok(Box::new(SysStore::new())),
         }
@@ -161,10 +173,11 @@ impl Reader for RegisterStore {
 impl Writer for RegisterStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, CoreError> {
         if to.is_empty() {
-            return Err(CoreError::Other {
-                message: "Cannot write to register root. Use @name to specify a register."
-                    .to_string(),
-            });
+            return Err(CoreError::store(
+                "register",
+                "write",
+                "Cannot write to register root. Use @name to specify a register.",
+            ));
         }
 
         let value = data.into_value(&NoCodec)?;

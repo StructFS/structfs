@@ -108,8 +108,12 @@ impl LazyRecord {
         }
 
         // Slow path: need to parse
-        let (bytes, format) = self.raw.as_ref().ok_or_else(|| Error::Other {
-            message: "LazyRecord has no raw data to parse".into(),
+        let (bytes, format) = self.raw.as_ref().ok_or_else(|| {
+            Error::store(
+                "lazy_record",
+                "value",
+                "LazyRecord has no raw data to parse",
+            )
         })?;
 
         let value = codec.decode(bytes, format)?;
@@ -218,11 +222,8 @@ mod tests {
             if format != &Format::JSON {
                 return Err(Error::UnsupportedFormat(format.clone()));
             }
-            let json: serde_json::Value =
-                serde_json::from_slice(bytes).map_err(|e| Error::Decode {
-                    format: format.clone(),
-                    message: e.to_string(),
-                })?;
+            let json: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|e| Error::decode(format.clone(), e.to_string()))?;
             Ok(json_to_value(json))
         }
 
@@ -231,10 +232,8 @@ mod tests {
                 return Err(Error::UnsupportedFormat(format.clone()));
             }
             let json = value_to_json(value);
-            let bytes = serde_json::to_vec(&json).map_err(|e| Error::Encode {
-                format: format.clone(),
-                message: e.to_string(),
-            })?;
+            let bytes = serde_json::to_vec(&json)
+                .map_err(|e| Error::encode(format.clone(), e.to_string()))?;
             Ok(Bytes::from(bytes))
         }
 

@@ -34,10 +34,8 @@ impl Codec for JsonCodec {
             return Err(Error::UnsupportedFormat(format.clone()));
         }
 
-        let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| Error::Decode {
-            format: format.clone(),
-            message: e.to_string(),
-        })?;
+        let json: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|e| Error::decode(format.clone(), e.to_string()))?;
 
         Ok(json_to_value(json))
     }
@@ -48,10 +46,8 @@ impl Codec for JsonCodec {
         }
 
         let json = value_to_json(value.clone());
-        let bytes = serde_json::to_vec(&json).map_err(|e| Error::Encode {
-            format: format.clone(),
-            message: e.to_string(),
-        })?;
+        let bytes =
+            serde_json::to_vec(&json).map_err(|e| Error::encode(format.clone(), e.to_string()))?;
 
         Ok(Bytes::from(bytes))
     }
@@ -177,7 +173,13 @@ mod tests {
         let codec = JsonCodec;
         let bytes = Bytes::from_static(b"not valid json {{{");
         let result = codec.decode(&bytes, &Format::JSON);
-        assert!(matches!(result, Err(Error::Decode { .. })));
+        assert!(matches!(
+            result,
+            Err(Error::Codec {
+                operation: structfs_core_store::CodecOperation::Decode,
+                ..
+            })
+        ));
     }
 
     #[test]

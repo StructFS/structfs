@@ -797,9 +797,7 @@ impl Reader for HelpStore {
 
 impl Writer for HelpStore {
     fn write(&mut self, _to: &Path, _data: Record) -> Result<Path, Error> {
-        Err(Error::Other {
-            message: "Help store is read-only".to_string(),
-        })
+        Err(Error::store("help", "write", "Help store is read-only"))
     }
 }
 
@@ -1030,10 +1028,10 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         match err {
-            Error::Other { message } => {
+            Error::Store { message, .. } => {
                 assert!(message.contains("read-only"));
             }
-            _ => panic!("Expected Other error"),
+            _ => panic!("Expected Store error"),
         }
     }
 
@@ -1144,9 +1142,7 @@ mod tests {
         struct ErrorDocsStore;
         impl Reader for ErrorDocsStore {
             fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
-                Err(Error::Other {
-                    message: "Read error".to_string(),
-                })
+                Err(Error::store("test", "read", "Read error"))
             }
         }
 

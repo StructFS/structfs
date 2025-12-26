@@ -158,9 +158,9 @@ impl<T: crate::Reader + Send + 'static> AsyncReader for SyncToAsync<T> {
         let path = from.clone();
         let inner = self.inner.clone();
 
-        let mut guard = inner.lock().map_err(|_| Error::Other {
-            message: "lock poisoned".into(),
-        })?;
+        let mut guard = inner
+            .lock()
+            .map_err(|_| Error::store("sync_to_async", "read", "lock poisoned"))?;
 
         guard.read(&path)
     }
@@ -172,9 +172,9 @@ impl<T: crate::Writer + Send + 'static> AsyncWriter for SyncToAsync<T> {
         let path = to.clone();
         let inner = self.inner.clone();
 
-        let mut guard = inner.lock().map_err(|_| Error::Other {
-            message: "lock poisoned".into(),
-        })?;
+        let mut guard = inner
+            .lock()
+            .map_err(|_| Error::store("sync_to_async", "write", "lock poisoned"))?;
 
         guard.write(&path, data)
     }

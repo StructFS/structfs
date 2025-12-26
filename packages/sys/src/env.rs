@@ -24,9 +24,11 @@ impl EnvStore {
             match std::env::var(name) {
                 Ok(value) => Ok(Some(Value::String(value))),
                 Err(std::env::VarError::NotPresent) => Ok(None),
-                Err(std::env::VarError::NotUnicode(_)) => Err(Error::Other {
-                    message: "Environment variable contains invalid UTF-8".to_string(),
-                }),
+                Err(std::env::VarError::NotUnicode(_)) => Err(Error::store(
+                    "env",
+                    "read",
+                    "Environment variable contains invalid UTF-8",
+                )),
             }
         } else {
             Ok(None)
@@ -49,15 +51,19 @@ impl Reader for EnvStore {
 impl Writer for EnvStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         if to.is_empty() {
-            return Err(Error::Other {
-                message: "Cannot write to root env path".to_string(),
-            });
+            return Err(Error::store(
+                "env",
+                "write",
+                "Cannot write to root env path",
+            ));
         }
 
         if to.len() != 1 {
-            return Err(Error::Other {
-                message: "Nested environment paths not supported".to_string(),
-            });
+            return Err(Error::store(
+                "env",
+                "write",
+                "Nested environment paths not supported",
+            ));
         }
 
         let name = &to[0];
@@ -72,9 +78,11 @@ impl Writer for EnvStore {
                 std::env::remove_var(name);
                 Ok(to.clone())
             }
-            _ => Err(Error::Other {
-                message: "Environment variable must be a string or null".to_string(),
-            }),
+            _ => Err(Error::store(
+                "env",
+                "write",
+                "Environment variable must be a string or null",
+            )),
         }
     }
 }

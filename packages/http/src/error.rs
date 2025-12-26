@@ -32,9 +32,7 @@ pub enum Error {
 
 impl From<Error> for CoreError {
     fn from(error: Error) -> Self {
-        CoreError::Other {
-            message: error.to_string(),
-        }
+        CoreError::store("http", "request", error.to_string())
     }
 }
 
@@ -67,9 +65,7 @@ mod tests {
 
     #[test]
     fn store_error_conversion() {
-        let store_err = CoreError::Other {
-            message: "test error".to_string(),
-        };
+        let store_err = CoreError::store("test", "op", "test error");
         let e = Error::from(store_err);
         assert!(e.to_string().contains("Store error"));
     }
