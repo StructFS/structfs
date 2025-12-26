@@ -3,7 +3,9 @@
 //! This module provides implementations using the new three-layer architecture
 //! (ll-store, core-store, serde-store) instead of the legacy erased_serde approach.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -11,6 +13,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use structfs_core_store::{path, Error, NoCodec, Path, Reader, Record, Writer};
 use structfs_serde_store::{from_value, to_value};
+
+use crate::handle::RequestStatus;
 
 use crate::types::{HttpRequest, HttpResponse};
 
@@ -356,6 +360,206 @@ impl Writer for HttpClientStore {
     }
 }
 
+/// Internal state for an async request
+struct AsyncRequestHandle {
+    status: RequestStatus,
+    response: Option<HttpResponse>,
+}
+
+/// Async HTTP broker store (new architecture).
+///
+/// Requests are executed in background threads. Write to queue a request,
+/// read from the handle to check status or get the response.
+pub struct AsyncHttpBrokerStore {
+    handles: Arc<Mutex<HashMap<RequestId, AsyncRequestHandle>>>,
+    next_request_id: RequestId,
+    timeout: Duration,
+}
+
+impl AsyncHttpBrokerStore {
+    /// Create a new async HTTP broker store with the given request timeout.
+    pub fn new(timeout: Duration) -> Result<Self, crate::Error> {
+        Ok(Self {
+            handles: Arc::new(Mutex::new(HashMap::new())),
+            next_request_id: 0,
+            timeout,
+        })
+    }
+
+    /// Create with default timeout of 30 seconds.
+    pub fn with_default_timeout() -> Result<Self, crate::Error> {
+        Self::new(Duration::from_secs(30))
+    }
+
+    /// Execute an HTTP request and return the response.
+    fn execute_request(request: HttpRequest, timeout: Duration) -> Result<HttpResponse, String> {
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let method: http::Method = request.method.into();
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in &request.headers {
+            let header_name = HeaderName::try_from(name.as_str()).map_err(|e| e.to_string())?;
+            let header_value = HeaderValue::try_from(value.as_str()).map_err(|e| e.to_string())?;
+            headers.insert(header_name, header_value);
+        }
+
+        let mut req_builder = client.request(method, &request.path);
+        req_builder = req_builder.headers(headers);
+
+        if !request.query.is_empty() {
+            req_builder = req_builder.query(&request.query);
+        }
+
+        if let Some(body) = &request.body {
+            req_builder = req_builder.json(body);
+        }
+
+        let response = req_builder.send().map_err(|e| e.to_string())?;
+
+        let status = response.status().as_u16();
+        let status_text = response
+            .status()
+            .canonical_reason()
+            .unwrap_or("Unknown")
+            .to_string();
+
+        let mut resp_headers = std::collections::HashMap::new();
+        for (name, value) in response.headers() {
+            if let Ok(v) = value.to_str() {
+                resp_headers.insert(name.to_string(), v.to_string());
+            }
+        }
+
+        let body_text = response.text().map_err(|e| e.to_string())?;
+        let body = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+
+        Ok(HttpResponse {
+            status,
+            status_text,
+            headers: resp_headers,
+            body,
+            body_text: Some(body_text),
+        })
+    }
+
+    /// Parse request ID and sub-path from a path like "outstanding/123" or "outstanding/123/response".
+    fn parse_handle_path(path: &Path) -> Option<(RequestId, Option<String>)> {
+        if path.is_empty() || path[0] != OUTSTANDING_PREFIX {
+            return None;
+        }
+        if path.len() < 2 {
+            return None;
+        }
+        let id: RequestId = path[1].parse().ok()?;
+        let sub_path = if path.len() > 2 {
+            Some(path.components[2..].join("/"))
+        } else {
+            None
+        };
+        Some((id, sub_path))
+    }
+}
+
+impl Reader for AsyncHttpBrokerStore {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| Error::Other {
+            message: format!(
+                "Invalid handle path '{}'. Expected format: outstanding/{{id}}[/response]",
+                from
+            ),
+        })?;
+
+        let handles = self.handles.lock().map_err(|e| Error::Other {
+            message: format!("Lock error: {}", e),
+        })?;
+
+        let handle = handles.get(&request_id).ok_or_else(|| Error::Other {
+            message: format!("Request with ID {} not found", request_id),
+        })?;
+
+        let value = match sub_path.as_deref() {
+            Some("response") => {
+                if let Some(ref response) = handle.response {
+                    to_value(response).map_err(|e| Error::Encode {
+                        format: structfs_core_store::Format::JSON,
+                        message: e.to_string(),
+                    })?
+                } else {
+                    return Ok(None); // Response not ready yet
+                }
+            }
+            None => to_value(&handle.status).map_err(|e| Error::Encode {
+                format: structfs_core_store::Format::JSON,
+                message: e.to_string(),
+            })?,
+            Some(other) => {
+                return Err(Error::Other {
+                    message: format!(
+                        "Unknown sub-path '{}'. Use 'response' to get the response.",
+                        other
+                    ),
+                });
+            }
+        };
+
+        Ok(Some(Record::parsed(value)))
+    }
+}
+
+impl Writer for AsyncHttpBrokerStore {
+    fn write(&mut self, _to: &Path, data: Record) -> Result<Path, Error> {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        // Convert Record to HttpRequest
+        let value = data.into_value(&NoCodec)?;
+        let request: HttpRequest = from_value(value).map_err(|e| Error::Decode {
+            format: structfs_core_store::Format::JSON,
+            message: format!("Data must be an HttpRequest: {}", e),
+        })?;
+
+        // Create initial pending status
+        let handle = AsyncRequestHandle {
+            status: RequestStatus::pending(request_id.to_string()),
+            response: None,
+        };
+
+        {
+            let mut handles = self.handles.lock().map_err(|e| Error::Other {
+                message: format!("Lock error: {}", e),
+            })?;
+            handles.insert(request_id, handle);
+        }
+
+        // Spawn background thread to execute the request
+        let handles = Arc::clone(&self.handles);
+        let timeout = self.timeout;
+        thread::spawn(move || {
+            let result = Self::execute_request(request, timeout);
+
+            if let Ok(mut handles) = handles.lock() {
+                if let Some(handle) = handles.get_mut(&request_id) {
+                    match result {
+                        Ok(response) => {
+                            handle.status = RequestStatus::complete(request_id.to_string());
+                            handle.response = Some(response);
+                        }
+                        Err(error) => {
+                            handle.status = RequestStatus::failed(request_id.to_string(), error);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +598,45 @@ mod tests {
 
         // Request should be queued
         assert_eq!(broker.requests.len(), 1);
+    }
+
+    #[test]
+    fn test_async_broker_parse_handle_path() {
+        assert_eq!(
+            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/0")),
+            Some((0, None))
+        );
+        assert_eq!(
+            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/123/response")),
+            Some((123, Some("response".to_string())))
+        );
+        assert_eq!(
+            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding")),
+            None
+        );
+        assert_eq!(
+            AsyncHttpBrokerStore::parse_handle_path(&path!("other/123")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_async_broker_queue_request() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Create a request
+        let request_value = to_value(&HttpRequest::get("https://example.com")).unwrap();
+
+        // Write the request (starts executing in background)
+        let handle = broker
+            .write(&path!(""), Record::parsed(request_value))
+            .unwrap();
+
+        // Check the handle path
+        assert_eq!(handle.to_string(), "outstanding/0");
+
+        // Should be able to read the status (pending initially)
+        let status = broker.read(&handle).unwrap();
+        assert!(status.is_some());
     }
 }

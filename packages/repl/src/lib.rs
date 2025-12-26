@@ -47,18 +47,39 @@ pub mod register_store;
 pub mod store_context;
 
 // New architecture implementations
+pub mod core_commands;
+pub mod core_help_store;
+pub mod core_repl;
 pub mod core_store_context;
 
-// Re-exports
+// Re-exports (legacy)
 pub use core::ReplCore;
 pub use host::TerminalHost;
 pub use io::{ExitReason, IoHost, Output, PromptConfig, Signal};
 pub use store_context::StoreContext;
 
-/// Run the REPL with the terminal host.
+// Re-exports (new architecture)
+pub use core_repl::ReplCore as CoreReplCore;
+pub use core_store_context::StoreContext as CoreStoreContext;
+
+/// Run the REPL with the terminal host (new architecture).
 ///
 /// This is the main entry point for the CLI application.
 pub fn run() -> std::io::Result<()> {
+    let mut core = CoreReplCore::new();
+    let mut host = TerminalHost::new()?;
+
+    match core.run(&mut host) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Run the legacy REPL with the terminal host.
+pub fn run_legacy() -> std::io::Result<()> {
     let mut core = ReplCore::new();
     let mut host = TerminalHost::new()?;
 
