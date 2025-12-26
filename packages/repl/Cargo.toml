@@ -11,14 +11,22 @@ name = "structfs"
 path = "src/main.rs"
 
 [dependencies]
+# Legacy (to be deprecated)
 structfs-store = { workspace = true }
+erased-serde = { workspace = true }
+
+# New architecture
+structfs-core-store = { path = "../core-store" }
+structfs-serde-store = { path = "../serde-store" }
+structfs-legacy-adapter = { path = "../legacy-adapter" }
+
+# Stores (using both old and new)
 structfs-json-store = { workspace = true }
 structfs-http = { workspace = true, features = ["blocking"] }
 structfs-sys = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
-erased-serde = { workspace = true }
 thiserror = { workspace = true }
 
 reedline = { workspace = true }

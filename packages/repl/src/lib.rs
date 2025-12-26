@@ -35,6 +35,7 @@
 //! > read /data/users/1
 //! ```
 
+// Legacy implementations (to be deprecated)
 pub mod commands;
 pub mod completer;
 pub mod core;
@@ -44,6 +45,9 @@ pub mod host;
 pub mod io;
 pub mod register_store;
 pub mod store_context;
+
+// New architecture implementations
+pub mod core_store_context;
 
 // Re-exports
 pub use core::ReplCore;
