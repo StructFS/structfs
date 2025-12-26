@@ -1,0 +1,120 @@
+//! Environment variable store.
+
+use std::collections::BTreeMap;
+use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
+
+/// Store for environment variable access.
+pub struct EnvStore;
+
+impl EnvStore {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
+        if path.is_empty() {
+            // Return all environment variables as a map
+            let vars: BTreeMap<String, Value> = std::env::vars()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect();
+            Ok(Some(Value::Map(vars)))
+        } else if path.len() == 1 {
+            // Return single variable
+            let name = &path[0];
+            match std::env::var(name) {
+                Ok(value) => Ok(Some(Value::String(value))),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(Error::Other {
+                    message: "Environment variable contains invalid UTF-8".to_string(),
+                }),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl Default for EnvStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reader for EnvStore {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        Ok(self.read_value(from)?.map(Record::parsed))
+    }
+}
+
+impl Writer for EnvStore {
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+        if to.is_empty() {
+            return Err(Error::Other {
+                message: "Cannot write to root env path".to_string(),
+            });
+        }
+
+        if to.len() != 1 {
+            return Err(Error::Other {
+                message: "Nested environment paths not supported".to_string(),
+            });
+        }
+
+        let name = &to[0];
+        let value = data.into_value(&NoCodec)?;
+
+        match value {
+            Value::String(s) => {
+                std::env::set_var(name, s);
+                Ok(to.clone())
+            }
+            Value::Null => {
+                std::env::remove_var(name);
+                Ok(to.clone())
+            }
+            _ => Err(Error::Other {
+                message: "Environment variable must be a string or null".to_string(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use structfs_core_store::path;
+
+    #[test]
+    fn read_all() {
+        let mut store = EnvStore::new();
+        let record = store.read(&path!("")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert!(matches!(value, Value::Map(_)));
+    }
+
+    #[test]
+    fn read_var() {
+        std::env::set_var("STRUCTFS_ENV_TEST", "test_value");
+        let mut store = EnvStore::new();
+        let record = store.read(&path!("STRUCTFS_ENV_TEST")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("test_value".to_string()));
+        std::env::remove_var("STRUCTFS_ENV_TEST");
+    }
+
+    #[test]
+    fn write_var() {
+        let mut store = EnvStore::new();
+        let path = path!("STRUCTFS_ENV_WRITE_TEST");
+        store
+            .write(&path, Record::parsed(Value::String("written".to_string())))
+            .unwrap();
+
+        let record = store.read(&path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("written".to_string()));
+
+        // Cleanup
+        store.write(&path, Record::parsed(Value::Null)).unwrap();
+    }
+}
