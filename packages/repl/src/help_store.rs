@@ -807,15 +807,159 @@ impl Writer for HelpStore {
 mod tests {
     use super::*;
 
+    fn read_help(help: &mut HelpStore, path: &str) -> Value {
+        let result = help.read(&Path::parse(path).unwrap()).unwrap();
+        result
+            .unwrap()
+            .into_value(&structfs_core_store::NoCodec)
+            .unwrap()
+    }
+
     #[test]
     fn test_help_root() {
         let mut help = HelpStore::new();
-        let result = help.read(&Path::parse("").unwrap()).unwrap();
-        assert!(result.is_some());
-        let value = result
-            .unwrap()
-            .into_value(&structfs_core_store::NoCodec)
-            .unwrap();
+        let value = read_help(&mut help, "");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("topics"));
+                assert!(map.contains_key("quick_start"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_commands() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "commands");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("commands"));
+                assert!(map.contains_key("examples"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_mounts() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "mounts");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("operations"));
+                assert!(map.contains_key("mount_configs"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_http() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "http");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("brokers"));
+                assert!(map.contains_key("async_usage"));
+                assert!(map.contains_key("sync_usage"));
+                assert!(map.contains_key("request_format"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_paths() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "paths");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("syntax"));
+                assert!(map.contains_key("notes"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_examples() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "examples");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("examples"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_stores() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "stores");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("stores"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_registers() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "registers");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+                assert!(map.contains_key("syntax"));
+                assert!(map.contains_key("capture_output"));
+                assert!(map.contains_key("notes"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_ctx() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "ctx");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("mounts"));
+                assert!(map.contains_key("usage"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_ctx_http() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "ctx/http");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("brokers"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_ctx_help() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "ctx/help");
         match value {
             Value::Map(map) => {
                 assert!(map.contains_key("title"));
@@ -826,18 +970,54 @@ mod tests {
     }
 
     #[test]
-    fn test_help_commands() {
+    fn test_help_ctx_mounts() {
         let mut help = HelpStore::new();
-        let result = help.read(&Path::parse("commands").unwrap()).unwrap();
-        assert!(result.is_some());
-        let value = result
-            .unwrap()
-            .into_value(&structfs_core_store::NoCodec)
-            .unwrap();
+        let value = read_help(&mut help, "ctx/mounts");
         match value {
             Value::Map(map) => {
                 assert!(map.contains_key("title"));
-                assert!(map.contains_key("commands"));
+                assert!(map.contains_key("operations"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_ctx_sys_no_mounted_docs() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "ctx/sys");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("message"));
+                assert!(map.contains_key("read_docs"));
+                assert!(map.contains_key("hint"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_ctx_sys_subpath_no_mounted_docs() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "ctx/sys/time");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("message"));
+                assert!(map.contains_key("read_docs"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_unknown_topic() {
+        let mut help = HelpStore::new();
+        let value = read_help(&mut help, "nonexistent");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("error"));
+                assert!(map.contains_key("hint"));
+                assert!(map.contains_key("available_topics"));
             }
             _ => panic!("Expected map"),
         }
@@ -848,5 +1028,146 @@ mod tests {
         let mut help = HelpStore::new();
         let result = help.write(&Path::parse("test").unwrap(), Record::parsed(Value::Null));
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            Error::Other { message } => {
+                assert!(message.contains("read-only"));
+            }
+            _ => panic!("Expected Other error"),
+        }
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let help = HelpStore::default();
+        assert!(help.mounted_topics.is_empty());
+    }
+
+    #[test]
+    fn test_mount_docs() {
+        use structfs_core_store::overlay_store::OnlyReadable;
+
+        // Create a simple mock docs store
+        struct MockDocsStore;
+        impl Reader for MockDocsStore {
+            fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert(
+                    "docs".to_string(),
+                    Value::String("Mock documentation".to_string()),
+                );
+                Ok(Some(Record::parsed(Value::Map(map))))
+            }
+        }
+
+        let mut help = HelpStore::new();
+        help.mount_docs("sys", Box::new(OnlyReadable::new(MockDocsStore)));
+
+        // Verify the topic was mounted
+        assert!(help.has_mounted_docs("sys"));
+        assert!(!help.has_mounted_docs("other"));
+
+        // Now reading sys should use mounted docs
+        let value = read_help(&mut help, "sys");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("docs"));
+            }
+            _ => panic!("Expected map from mounted docs"),
+        }
+    }
+
+    #[test]
+    fn test_ctx_sys_with_mounted_docs() {
+        use structfs_core_store::overlay_store::OnlyReadable;
+
+        struct MockDocsStore;
+        impl Reader for MockDocsStore {
+            fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert(
+                    "sys_docs".to_string(),
+                    Value::String("System docs".to_string()),
+                );
+                Ok(Some(Record::parsed(Value::Map(map))))
+            }
+        }
+
+        let mut help = HelpStore::new();
+        help.mount_docs("sys", Box::new(OnlyReadable::new(MockDocsStore)));
+
+        let value = read_help(&mut help, "ctx/sys");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("sys_docs"));
+            }
+            _ => panic!("Expected map from mounted docs"),
+        }
+    }
+
+    #[test]
+    fn test_ctx_sys_subpath_with_mounted_docs() {
+        use structfs_core_store::overlay_store::OnlyReadable;
+
+        struct MockDocsStore;
+        impl Reader for MockDocsStore {
+            fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+                if !from.is_empty() && from[0].as_str() == "time" {
+                    let mut map = std::collections::BTreeMap::new();
+                    map.insert(
+                        "time_docs".to_string(),
+                        Value::String("Time documentation".to_string()),
+                    );
+                    Ok(Some(Record::parsed(Value::Map(map))))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let mut help = HelpStore::new();
+        help.mount_docs("sys", Box::new(OnlyReadable::new(MockDocsStore)));
+
+        let value = read_help(&mut help, "ctx/sys/time");
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("time_docs"));
+            }
+            _ => panic!("Expected map from mounted docs"),
+        }
+    }
+
+    #[test]
+    fn test_try_mounted_docs_returns_none_for_read_error() {
+        use structfs_core_store::overlay_store::OnlyReadable;
+
+        struct ErrorDocsStore;
+        impl Reader for ErrorDocsStore {
+            fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
+                Err(Error::Other {
+                    message: "Read error".to_string(),
+                })
+            }
+        }
+
+        let mut help = HelpStore::new();
+        help.mount_docs("error", Box::new(OnlyReadable::new(ErrorDocsStore)));
+
+        // Should fall back to suggest_help since mounted docs returns error
+        let value = read_help(&mut help, "error");
+        match value {
+            Value::Map(map) => {
+                // Falls through to suggest_help
+                assert!(map.contains_key("error") || map.contains_key("hint"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_try_mounted_docs_empty_path_returns_none() {
+        let mut help = HelpStore::new();
+        let result = help.try_mounted_docs(&Path::parse("").unwrap());
+        assert!(result.is_none());
     }
 }

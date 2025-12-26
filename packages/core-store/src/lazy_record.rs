@@ -399,4 +399,125 @@ mod tests {
         let converted = record.into_record();
         assert!(matches!(converted, crate::Record::Parsed(_)));
     }
+
+    #[test]
+    fn format_method_works() {
+        let record = LazyRecord::from_raw(Bytes::from_static(b"test"), Format::JSON);
+        assert_eq!(record.format(), Some(&Format::JSON));
+
+        let record_parsed = LazyRecord::from_parsed(Value::Null);
+        assert!(record_parsed.format().is_none());
+    }
+
+    #[test]
+    fn debug_impl() {
+        let record = LazyRecord::from_raw(Bytes::from_static(b"test"), Format::JSON);
+        let debug = format!("{:?}", record);
+        assert!(debug.contains("LazyRecord"));
+        assert!(debug.contains("has_bytes: true"));
+        assert!(debug.contains("is_parsed: false"));
+    }
+
+    #[test]
+    fn from_record_raw() {
+        let raw_record = crate::Record::Raw {
+            bytes: Bytes::from_static(b"{\"a\":1}"),
+            format: Format::JSON,
+        };
+        let lazy: LazyRecord = raw_record.into();
+        assert!(lazy.has_bytes());
+        assert!(!lazy.is_parsed());
+    }
+
+    #[test]
+    fn from_record_parsed() {
+        let parsed_record = crate::Record::Parsed(Value::from(42i64));
+        let lazy: LazyRecord = parsed_record.into();
+        assert!(!lazy.has_bytes());
+        assert!(lazy.is_parsed());
+    }
+
+    #[test]
+    fn clone_unparsed_record() {
+        let record = LazyRecord::from_raw(Bytes::from_static(b"test"), Format::JSON);
+        assert!(!record.is_parsed());
+
+        let cloned = record.clone();
+        assert!(!cloned.is_parsed());
+        assert!(cloned.has_bytes());
+        assert_eq!(cloned.bytes(), record.bytes());
+    }
+
+    #[test]
+    fn value_if_parsed_returns_none_when_not_parsed() {
+        let record = LazyRecord::from_raw(Bytes::from_static(b"test"), Format::JSON);
+        assert!(record.value_if_parsed().is_none());
+    }
+
+    #[test]
+    fn value_if_parsed_returns_some_when_parsed() {
+        let value = Value::from("hello");
+        let record = LazyRecord::from_parsed(value.clone());
+        let retrieved = record.value_if_parsed();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap(), &value);
+    }
+
+    #[test]
+    fn bytes_returns_none_for_parsed_only() {
+        let record = LazyRecord::from_parsed(Value::Null);
+        assert!(record.bytes().is_none());
+    }
+
+    #[test]
+    fn has_bytes_returns_correct_value() {
+        let raw = LazyRecord::from_raw(Bytes::from_static(b"test"), Format::JSON);
+        assert!(raw.has_bytes());
+
+        let parsed = LazyRecord::from_parsed(Value::Null);
+        assert!(!parsed.has_bytes());
+
+        let both = LazyRecord::from_both(Bytes::from_static(b"test"), Format::JSON, Value::Null);
+        assert!(both.has_bytes());
+    }
+
+    #[test]
+    fn into_record_after_parse() {
+        let json = b"{\"name\":\"test\"}";
+        let record = LazyRecord::from_raw(Bytes::from_static(json), Format::JSON);
+
+        // Parse it first
+        let codec = TestJsonCodec;
+        let _ = record.value(&codec).unwrap();
+        assert!(record.is_parsed());
+
+        // into_record should return Parsed since it's been parsed
+        let converted = record.into_record();
+        assert!(matches!(converted, crate::Record::Parsed(_)));
+    }
+
+    #[test]
+    fn value_caches_across_calls() {
+        let json = b"{\"key\":\"value\"}";
+        let record = LazyRecord::from_raw(Bytes::from_static(json), Format::JSON);
+        let codec = TestJsonCodec;
+
+        let first = record.value(&codec).unwrap();
+        let second = record.value(&codec).unwrap();
+        let third = record.value(&codec).unwrap();
+
+        // All should be the same cached reference
+        assert!(std::ptr::eq(first, second));
+        assert!(std::ptr::eq(second, third));
+    }
+
+    #[test]
+    fn debug_shows_correct_state_after_parse() {
+        let record = LazyRecord::from_raw(Bytes::from_static(b"{}"), Format::JSON);
+        let codec = TestJsonCodec;
+        let _ = record.value(&codec).unwrap();
+
+        let debug = format!("{:?}", record);
+        assert!(debug.contains("is_parsed: true"));
+    }
 }

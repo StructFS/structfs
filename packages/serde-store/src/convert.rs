@@ -135,4 +135,206 @@ mod tests {
         let json = value_to_json(value);
         assert_eq!(json, serde_json::json!([1, 2, 3]));
     }
+
+    #[test]
+    fn value_to_json_null() {
+        let value = Value::Null;
+        let json = value_to_json(value);
+        assert_eq!(json, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn value_to_json_bool() {
+        assert_eq!(
+            value_to_json(Value::Bool(true)),
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            value_to_json(Value::Bool(false)),
+            serde_json::Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn value_to_json_string() {
+        let value = Value::String("hello world".to_string());
+        let json = value_to_json(value);
+        assert_eq!(json, serde_json::Value::String("hello world".to_string()));
+    }
+
+    #[test]
+    fn value_to_json_integer() {
+        let value = Value::Integer(12345);
+        let json = value_to_json(value);
+        assert_eq!(json, serde_json::json!(12345));
+    }
+
+    #[test]
+    fn value_to_json_float() {
+        let value = Value::Float(1.23456);
+        let json = value_to_json(value);
+        if let serde_json::Value::Number(n) = json {
+            assert!((n.as_f64().unwrap() - 1.23456).abs() < 0.00001);
+        } else {
+            panic!("expected number");
+        }
+    }
+
+    #[test]
+    fn value_to_json_nan_becomes_null() {
+        let value = Value::Float(f64::NAN);
+        let json = value_to_json(value);
+        assert_eq!(json, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn value_to_json_bytes() {
+        let value = Value::Bytes(vec![1, 2, 3, 4]);
+        let json = value_to_json(value);
+
+        // Should be base64 encoded
+        if let serde_json::Value::String(s) = json {
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&s)
+                .unwrap();
+            assert_eq!(decoded, vec![1, 2, 3, 4]);
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn value_to_json_map() {
+        use std::collections::BTreeMap;
+        let mut map = BTreeMap::new();
+        map.insert("key".to_string(), Value::String("value".to_string()));
+        map.insert("num".to_string(), Value::Integer(42));
+
+        let json = value_to_json(Value::Map(map));
+        assert_eq!(json, serde_json::json!({"key": "value", "num": 42}));
+    }
+
+    #[test]
+    fn json_to_value_null() {
+        let json = serde_json::Value::Null;
+        let value = json_to_value(json);
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn json_to_value_bool() {
+        assert_eq!(
+            json_to_value(serde_json::Value::Bool(true)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            json_to_value(serde_json::Value::Bool(false)),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn json_to_value_string() {
+        let json = serde_json::Value::String("test".to_string());
+        let value = json_to_value(json);
+        assert_eq!(value, Value::String("test".to_string()));
+    }
+
+    #[test]
+    fn json_to_value_array() {
+        let json = serde_json::json!([1, "two", true]);
+        let value = json_to_value(json);
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], Value::Integer(1));
+                assert_eq!(arr[1], Value::String("two".to_string()));
+                assert_eq!(arr[2], Value::Bool(true));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn json_to_value_object() {
+        let json = serde_json::json!({"a": 1, "b": "two"});
+        let value = json_to_value(json);
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("a"), Some(&Value::Integer(1)));
+                assert_eq!(map.get("b"), Some(&Value::String("two".to_string())));
+            }
+            _ => panic!("expected map"),
+        }
+    }
+
+    #[test]
+    fn from_value_error() {
+        // Try to deserialize a string into a struct
+        let value = Value::String("not a struct".to_string());
+        let result: Result<TestStruct, _> = from_value(value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn to_value_primitives() {
+        assert_eq!(to_value(&42i32).unwrap(), Value::Integer(42));
+        assert_eq!(
+            to_value(&"hello").unwrap(),
+            Value::String("hello".to_string())
+        );
+        assert_eq!(to_value(&true).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn to_value_vec() {
+        let vec = vec![1, 2, 3];
+        let value = to_value(&vec).unwrap();
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], Value::Integer(1));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_nested_struct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Inner {
+            value: i32,
+        }
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Outer {
+            inner: Inner,
+            items: Vec<String>,
+        }
+
+        let original = Outer {
+            inner: Inner { value: 99 },
+            items: vec!["a".to_string(), "b".to_string()],
+        };
+
+        let value = to_value(&original).unwrap();
+        let recovered: Outer = from_value(value).unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn roundtrip_option() {
+        let some_value: Option<i32> = Some(42);
+        let none_value: Option<i32> = None;
+
+        let some_converted = to_value(&some_value).unwrap();
+        let none_converted = to_value(&none_value).unwrap();
+
+        let some_recovered: Option<i32> = from_value(some_converted).unwrap();
+        let none_recovered: Option<i32> = from_value(none_converted).unwrap();
+
+        assert_eq!(some_recovered, Some(42));
+        assert_eq!(none_recovered, None);
+    }
 }

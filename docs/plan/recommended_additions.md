@@ -52,51 +52,6 @@ Files on disk map to StructFS paths:
 
 ---
 
-## 2. Delete Semantics
-
-**Priority:** High
-**Complexity:** Low
-**Dependencies:** None
-
-Currently "write null" is the convention for deletion. Make it explicit.
-
-### Design
-
-Add to `Writer` trait:
-
-```rust
-pub trait Writer: Send + Sync {
-    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error>;
-
-    /// Delete the value at the given path.
-    ///
-    /// Default implementation returns NotSupported.
-    fn delete(&mut self, path: &Path) -> Result<(), Error> {
-        Err(Error::NotSupported {
-            operation: "delete".into(),
-        })
-    }
-}
-```
-
-### Implementation Steps
-
-1. Add `NotSupported` variant to `Error` enum (if not present)
-2. Add `delete` method with default implementation to `Writer`
-3. Implement `delete` in:
-   - `InMemoryStore`: remove from HashMap
-   - `LocalDiskStore`: `std::fs::remove_file`
-   - `OverlayStore`: delegate to matched store
-   - `MountStore`: support unmounting via delete
-4. Update `FsStore` to use `delete` for unlink semantics
-5. Add REPL command: `delete /path` (distinct from `write /path null`)
-
-### Migration
-
-Existing stores continue to work (default returns error). Stores can opt-in to delete support incrementally.
-
----
-
 ## 3. Additional Codecs
 
 **Priority:** Medium

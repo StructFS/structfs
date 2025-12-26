@@ -77,6 +77,7 @@ impl From<std::io::Error> for LLError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as StdError;
 
     #[test]
     fn error_display_works() {
@@ -89,6 +90,64 @@ mod tests {
         };
         assert!(format!("{}", e).contains("42"));
         assert!(format!("{}", e).contains("something went wrong"));
+    }
+
+    #[test]
+    fn resource_exhausted_display() {
+        let e = LLError::ResourceExhausted;
+        assert_eq!(format!("{}", e), "resource exhausted");
+    }
+
+    #[test]
+    fn protocol_empty_detail_display() {
+        let e = LLError::Protocol {
+            code: 100,
+            detail: Bytes::new(),
+        };
+        assert_eq!(format!("{}", e), "protocol error: code 100");
+    }
+
+    #[test]
+    fn protocol_non_utf8_detail_display() {
+        let e = LLError::Protocol {
+            code: 200,
+            detail: Bytes::from_static(&[0xFF, 0xFE, 0x00]),
+        };
+        let display = format!("{}", e);
+        assert!(display.contains("200"));
+        // Should fall back to debug format
+        assert!(display.contains("protocol error"));
+    }
+
+    #[test]
+    fn transport_error_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let e = LLError::Transport(Box::new(io_err));
+        let display = format!("{}", e);
+        assert!(display.contains("transport error"));
+        assert!(display.contains("file not found"));
+    }
+
+    #[test]
+    fn transport_error_source() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let e = LLError::Transport(Box::new(io_err));
+        assert!(StdError::source(&e).is_some());
+    }
+
+    #[test]
+    fn non_transport_error_source_is_none() {
+        let e = LLError::NotSupported;
+        assert!(StdError::source(&e).is_none());
+
+        let e = LLError::ResourceExhausted;
+        assert!(StdError::source(&e).is_none());
+
+        let e = LLError::Protocol {
+            code: 1,
+            detail: Bytes::new(),
+        };
+        assert!(StdError::source(&e).is_none());
     }
 
     #[test]

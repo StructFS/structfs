@@ -183,7 +183,10 @@ mod tests {
         match value {
             Value::Map(map) => {
                 assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
                 assert!(map.contains_key("subsystems"));
+                assert!(map.contains_key("examples"));
+                assert!(map.contains_key("see_also"));
             }
             _ => panic!("Expected map"),
         }
@@ -197,8 +200,105 @@ mod tests {
         match value {
             Value::Map(map) => {
                 assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
             }
             _ => panic!("Expected map"),
         }
+    }
+
+    #[test]
+    fn read_time_docs() {
+        let mut store = DocsStore::new();
+        let record = store.read(&path!("time")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_random_docs() {
+        let mut store = DocsStore::new();
+        let record = store.read(&path!("random")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_proc_docs() {
+        let mut store = DocsStore::new();
+        let record = store.read(&path!("proc")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_fs_docs() {
+        let mut store = DocsStore::new();
+        let record = store.read(&path!("fs")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_nonexistent_returns_none() {
+        let mut store = DocsStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_with_subpath() {
+        let mut store = DocsStore::new();
+        // Subpaths should still return docs for the main topic
+        let record = store.read(&path!("env/subpath")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn write_returns_error() {
+        let mut store = DocsStore::new();
+        let result = store.write(&path!("test"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Other { message } => {
+                assert!(message.contains("read-only"));
+            }
+            _ => panic!("Expected Other error"),
+        }
+    }
+
+    #[test]
+    fn default_impl() {
+        let _store: DocsStore = Default::default();
+        // Just verify default works
     }
 }

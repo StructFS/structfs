@@ -80,6 +80,7 @@ impl From<structfs_ll_store::LLError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as StdError;
 
     #[test]
     fn error_display() {
@@ -90,5 +91,103 @@ mod tests {
 
         let e = Error::UnsupportedFormat(Format::PROTOBUF);
         assert!(format!("{}", e).contains("protobuf"));
+    }
+
+    #[test]
+    fn path_error_display() {
+        let e = Error::Path(PathError::InvalidComponent {
+            component: "bad".to_string(),
+            position: 1,
+            message: "invalid".to_string(),
+        });
+        assert!(format!("{}", e).contains("path error"));
+    }
+
+    #[test]
+    fn invalid_path_display() {
+        let e = Error::InvalidPath {
+            message: "bad path".to_string(),
+        };
+        assert!(format!("{}", e).contains("invalid path"));
+        assert!(format!("{}", e).contains("bad path"));
+    }
+
+    #[test]
+    fn decode_error_display() {
+        let e = Error::Decode {
+            format: Format::JSON,
+            message: "unexpected token".to_string(),
+        };
+        let display = format!("{}", e);
+        assert!(display.contains("decode error"));
+        assert!(display.contains("json"));
+        assert!(display.contains("unexpected token"));
+    }
+
+    #[test]
+    fn encode_error_display() {
+        let e = Error::Encode {
+            format: Format::CBOR,
+            message: "serialization failed".to_string(),
+        };
+        let display = format!("{}", e);
+        assert!(display.contains("encode error"));
+        assert!(display.contains("cbor"));
+        assert!(display.contains("serialization failed"));
+    }
+
+    #[test]
+    fn ll_error_display() {
+        let ll_err = structfs_ll_store::LLError::NotSupported;
+        let e = Error::Ll(ll_err);
+        let display = format!("{}", e);
+        assert!(display.contains("ll error"));
+    }
+
+    #[test]
+    fn other_error_display() {
+        let e = Error::Other {
+            message: "something went wrong".to_string(),
+        };
+        assert_eq!(format!("{}", e), "something went wrong");
+    }
+
+    #[test]
+    fn path_error_source() {
+        let e = Error::Path(PathError::InvalidPath {
+            message: "test".to_string(),
+        });
+        assert!(StdError::source(&e).is_some());
+    }
+
+    #[test]
+    fn ll_error_source() {
+        let ll_err = structfs_ll_store::LLError::NotSupported;
+        let e = Error::Ll(ll_err);
+        assert!(StdError::source(&e).is_some());
+    }
+
+    #[test]
+    fn other_error_source_is_none() {
+        let e = Error::Other {
+            message: "test".to_string(),
+        };
+        assert!(StdError::source(&e).is_none());
+    }
+
+    #[test]
+    fn path_error_conversion() {
+        let path_err = PathError::InvalidPath {
+            message: "test".to_string(),
+        };
+        let e: Error = path_err.into();
+        assert!(matches!(e, Error::Path(_)));
+    }
+
+    #[test]
+    fn ll_error_conversion() {
+        let ll_err = structfs_ll_store::LLError::ResourceExhausted;
+        let e: Error = ll_err.into();
+        assert!(matches!(e, Error::Ll(_)));
     }
 }

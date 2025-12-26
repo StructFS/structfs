@@ -178,4 +178,125 @@ mod tests {
             _ => panic!("Expected array"),
         }
     }
+
+    #[test]
+    fn read_cwd() {
+        let mut store = ProcStore::new();
+        let record = store.read(&path!("self/cwd")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => assert!(!s.is_empty()),
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn read_exe() {
+        let mut store = ProcStore::new();
+        let record = store.read(&path!("self/exe")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => assert!(!s.is_empty()),
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn read_env() {
+        let mut store = ProcStore::new();
+        let record = store.read(&path!("self/env")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => assert!(!map.is_empty()),
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_root() {
+        let mut store = ProcStore::new();
+        let record = store.read(&path!("")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("self"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_self() {
+        let mut store = ProcStore::new();
+        let record = store.read(&path!("self")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("pid"));
+                assert!(map.contains_key("cwd"));
+                assert!(map.contains_key("args"));
+                assert!(map.contains_key("exe"));
+                assert!(map.contains_key("env"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_nonexistent_returns_none() {
+        let mut store = ProcStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_self_nonexistent_returns_none() {
+        let mut store = ProcStore::new();
+        let result = store.read(&path!("self/nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_nested_path_returns_none() {
+        let mut store = ProcStore::new();
+        let result = store.read(&path!("self/pid/extra")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn write_invalid_path_error() {
+        let mut store = ProcStore::new();
+        let result = store.write(&path!("invalid"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_self_pid_error() {
+        let mut store = ProcStore::new();
+        let result = store.write(&path!("self/pid"), Record::parsed(Value::Integer(123)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_cwd_invalid_type_error() {
+        let mut store = ProcStore::new();
+        let result = store.write(&path!("self/cwd"), Record::parsed(Value::Integer(123)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_cwd_nonexistent_error() {
+        let mut store = ProcStore::new();
+        let result = store.write(
+            &path!("self/cwd"),
+            Record::parsed(Value::String("/nonexistent/path/12345".to_string())),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_impl() {
+        let store: ProcStore = Default::default();
+        assert!(std::ptr::eq(&store as *const _, &store as *const _));
+    }
 }

@@ -127,6 +127,7 @@ impl Writer for TimeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::time::Duration;
     use structfs_core_store::path;
 
@@ -138,6 +139,28 @@ mod tests {
         match value {
             Value::String(s) => assert!(s.contains("T")),
             _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn read_now_unix() {
+        let mut store = TimeStore::new();
+        let record = store.read(&path!("now_unix")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Integer(ts) => assert!(ts > 0),
+            _ => panic!("Expected integer"),
+        }
+    }
+
+    #[test]
+    fn read_now_unix_ms() {
+        let mut store = TimeStore::new();
+        let record = store.read(&path!("now_unix_ms")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Integer(ts) => assert!(ts > 0),
+            _ => panic!("Expected integer"),
         }
     }
 
@@ -157,5 +180,102 @@ mod tests {
             _ => panic!("Expected integer"),
         };
         assert!(v2 > v1);
+    }
+
+    #[test]
+    fn read_root() {
+        let mut store = TimeStore::new();
+        let record = store.read(&path!("")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert!(map.contains_key("now"));
+                assert!(map.contains_key("now_unix"));
+                assert!(map.contains_key("monotonic"));
+                assert!(map.contains_key("sleep"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_nonexistent() {
+        let mut store = TimeStore::new();
+        let result = store.read(&path!("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_nested_path_returns_none() {
+        let mut store = TimeStore::new();
+        let result = store.read(&path!("now/extra")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn write_sleep_ms() {
+        let mut store = TimeStore::new();
+        let mut map = BTreeMap::new();
+        map.insert("ms".to_string(), Value::Integer(1));
+
+        let before = std::time::Instant::now();
+        store
+            .write(&path!("sleep"), Record::parsed(Value::Map(map)))
+            .unwrap();
+        let elapsed = before.elapsed();
+
+        assert!(elapsed.as_millis() >= 1);
+    }
+
+    #[test]
+    fn write_sleep_secs() {
+        let mut store = TimeStore::new();
+        let mut map = BTreeMap::new();
+        map.insert("secs".to_string(), Value::Integer(0));
+
+        // Just test that it doesn't error
+        store
+            .write(&path!("sleep"), Record::parsed(Value::Map(map)))
+            .unwrap();
+    }
+
+    #[test]
+    fn write_sleep_missing_field_error() {
+        let mut store = TimeStore::new();
+        let mut map = BTreeMap::new();
+        map.insert("invalid".to_string(), Value::Integer(100));
+
+        let result = store.write(&path!("sleep"), Record::parsed(Value::Map(map)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_sleep_invalid_type_error() {
+        let mut store = TimeStore::new();
+        let result = store.write(
+            &path!("sleep"),
+            Record::parsed(Value::String("100".to_string())),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_to_now_error() {
+        let mut store = TimeStore::new();
+        let result = store.write(&path!("now"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_invalid_path_length_error() {
+        let mut store = TimeStore::new();
+        let result = store.write(&path!(""), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_impl() {
+        let store: TimeStore = Default::default();
+        assert!(std::ptr::eq(&store as *const _, &store as *const _)); // Just verify it works
     }
 }

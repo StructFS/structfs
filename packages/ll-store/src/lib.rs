@@ -67,3 +67,36 @@ pub fn ll_path_from_strs(components: &[&str]) -> LLPath {
         .map(|s| Bytes::copy_from_slice(s.as_bytes()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ll_path_creates_owned_path() {
+        let path = ll_path(&[b"users", b"123"]);
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].as_ref(), b"users");
+        assert_eq!(path[1].as_ref(), b"123");
+    }
+
+    #[test]
+    fn ll_path_from_strs_creates_owned_path() {
+        let path = ll_path_from_strs(&["users", "alice"]);
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].as_ref(), b"users");
+        assert_eq!(path[1].as_ref(), b"alice");
+    }
+
+    #[test]
+    fn ll_path_empty() {
+        let path = ll_path(&[]);
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn ll_path_from_strs_empty() {
+        let path = ll_path_from_strs(&[]);
+        assert!(path.is_empty());
+    }
+}
