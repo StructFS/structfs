@@ -4,6 +4,7 @@ members = [
     "packages/ll-store",
     "packages/core-store",
     "packages/serde-store",
+    "packages/legacy-adapter",
     "packages/store",
     "packages/json_store",
     "packages/http",
@@ -22,6 +23,9 @@ repository = "https://github.com/AdjectiveNoun/structfs"
 structfs-ll-store = { path = "packages/ll-store" }
 structfs-core-store = { path = "packages/core-store" }
 structfs-serde-store = { path = "packages/serde-store" }
+
+# Workspace crates - migration adapter
+structfs-legacy-adapter = { path = "packages/legacy-adapter" }
 
 # Workspace crates - legacy (to be migrated)
 structfs-store = { path = "packages/store" }
