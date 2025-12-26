@@ -362,17 +362,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "erased-serde"
-version = "0.4.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89e8918065695684b2b0702da20382d5ae6065cf3327bc2d6436bd49a71ce9f3"
-dependencies = [
- "serde",
- "serde_core",
- "typeid",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1392,15 +1381,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62049b2877bf12821e8f9ad256ee38fdc31db7387ec2d3b3f403024de2034aea"
 
 [[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1596,15 +1576,12 @@ dependencies = [
 name = "structfs-http"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "erased-serde",
  "http",
  "reqwest",
  "serde",
  "serde_json",
  "structfs-core-store",
  "structfs-serde-store",
- "structfs-store",
  "thiserror",
  "tokio",
  "url",
@@ -1615,33 +1592,11 @@ dependencies = [
 name = "structfs-json-store"
 version = "0.1.0"
 dependencies = [
- "erased-serde",
- "lazy_static",
- "log",
- "regex",
  "serde",
  "serde_json",
  "structfs-core-store",
  "structfs-serde-store",
- "structfs-store",
  "tempfile",
- "walkdir",
-]
-
-[[package]]
-name = "structfs-legacy-adapter"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bytes",
- "erased-serde",
- "serde",
- "serde_json",
- "structfs-core-store",
- "structfs-json-store",
- "structfs-serde-store",
- "structfs-store",
- "thiserror",
 ]
 
 [[package]]
@@ -1660,7 +1615,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dirs",
- "erased-serde",
  "nu-ansi-term",
  "reedline",
  "serde",
@@ -1668,9 +1622,7 @@ dependencies = [
  "structfs-core-store",
  "structfs-http",
  "structfs-json-store",
- "structfs-legacy-adapter",
  "structfs-serde-store",
- "structfs-store",
  "structfs-sys",
  "thiserror",
 ]
@@ -1691,31 +1643,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "structfs-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "erased-serde",
- "lazy_static",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "structfs-sys"
 version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
- "erased-serde",
  "lazy_static",
  "rand",
  "serde",
  "serde_json",
  "structfs-core-store",
- "structfs-store",
  "tempfile",
  "thiserror",
  "uuid",
@@ -1971,12 +1908,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "typeid"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
-
-[[package]]
 name = "unicase"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2054,16 +1985,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "231fdcd7ef3037e8330d8e17e61011a2c244126acc0a982f4040ac3f9f0bc077"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "walkdir"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
-dependencies = [
- "same-file",
- "winapi-util",
 ]
 
 [[package]]
@@ -2173,15 +2094,6 @@ name = "winapi-i686-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
-
-[[package]]
-name = "winapi-util"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
-dependencies = [
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "winapi-x86_64-pc-windows-gnu"

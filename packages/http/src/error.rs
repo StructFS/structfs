@@ -1,4 +1,4 @@
-use structfs_store::Error as StoreError;
+use structfs_core_store::Error as CoreError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -24,12 +24,12 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     #[error("Store error: {0}")]
-    Store(#[from] StoreError),
+    Store(#[from] CoreError),
 }
 
-impl From<Error> for StoreError {
+impl From<Error> for CoreError {
     fn from(error: Error) -> Self {
-        StoreError::ImplementationFailure {
+        CoreError::Other {
             message: error.to_string(),
         }
     }

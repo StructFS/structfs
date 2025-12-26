@@ -1,129 +1,207 @@
 //! Store context for the REPL.
 //!
-//! The REPL uses a MountStore as its root, which allows mounting other stores
-//! via writes to `/_mounts/*`. This provides uniform access - everything is
-//! managed through read/write operations.
+//! This module provides the store context that manages mounts and registers.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
 
-use serde_json::Value as JsonValue;
-
-use structfs_http::async_broker::AsyncHttpBrokerStore;
-use structfs_http::blocking::HttpClientStore;
-use structfs_http::broker::HttpBrokerStore;
-use structfs_http::RemoteStore;
-use structfs_json_store::in_memory::SerdeJSONInMemoryStore;
-use structfs_json_store::JSONLocalStore;
-use structfs_store::{
-    Error as StoreError, MountConfig, MountStore, Path, Reader, StoreBox, StoreFactory, Writer,
+use structfs_core_store::{
+    mount_store::{MountConfig, MountStore, StoreFactory},
+    overlay_store::StoreBox,
+    Error as CoreError, NoCodec, Path, Reader, Record, Value, Writer,
 };
-use structfs_sys::{DocsStore as SysDocsStore, SysStore};
 
+use structfs_serde_store::{json_to_value, value_to_json};
+
+// Import store implementations
 use crate::help_store::HelpStore;
-use crate::register_store::RegisterStore;
+use structfs_http::{AsyncHttpBrokerStore, HttpBrokerStore};
+use structfs_json_store::InMemoryStore;
+use structfs_sys::SysStore;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ContextError {
     #[error("Store error: {0}")]
-    Store(#[from] StoreError),
+    Store(#[from] CoreError),
 
     #[error("HTTP error: {0}")]
     Http(#[from] structfs_http::Error),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("Local store error: {0}")]
-    LocalStore(#[from] structfs_store::LocalStoreError),
 
     #[error("Invalid path: {0}")]
     InvalidPath(String),
 }
 
-/// Factory for creating stores from mount configurations
-struct ReplStoreFactory;
+/// Factory for creating stores from mount configurations (new architecture)
+struct CoreReplStoreFactory;
 
-impl StoreFactory for ReplStoreFactory {
-    fn create(&self, config: &MountConfig) -> Result<StoreBox<'static>, StoreError> {
+impl StoreFactory for CoreReplStoreFactory {
+    fn create(&self, config: &MountConfig) -> Result<StoreBox, CoreError> {
         match config {
-            MountConfig::Memory => {
-                let store = SerdeJSONInMemoryStore::new().map_err(|e| StoreError::Raw {
-                    message: format!("Failed to create memory store: {}", e),
-                })?;
-                Ok(StoreBox::new(store))
+            MountConfig::Memory => Ok(Box::new(InMemoryStore::new())),
+            MountConfig::Local { path: _ } => {
+                // Local disk store not yet migrated to new architecture
+                Err(CoreError::Other {
+                    message: "Local disk store not yet available in new architecture".to_string(),
+                })
             }
-            MountConfig::Local { path } => {
-                let store =
-                    JSONLocalStore::new(PathBuf::from(path)).map_err(|e| StoreError::Raw {
-                        message: format!("Failed to open local store at '{}': {}", path, e),
-                    })?;
-                Ok(StoreBox::new(store))
-            }
-            MountConfig::Http { url } => {
-                let store = HttpClientStore::new(url).map_err(|e| StoreError::Raw {
-                    message: format!("Failed to create HTTP client for '{}': {}", url, e),
-                })?;
-                Ok(StoreBox::new(store))
+            MountConfig::Http { url: _ } => {
+                // HTTP client not using direct mode in REPL context
+                Err(CoreError::Other {
+                    message: "HTTP client store not yet available in new architecture".to_string(),
+                })
             }
             MountConfig::HttpBroker => {
                 let store =
-                    HttpBrokerStore::with_default_timeout().map_err(|e| StoreError::Raw {
+                    HttpBrokerStore::with_default_timeout().map_err(|e| CoreError::Other {
                         message: format!("Failed to create HTTP broker: {}", e),
                     })?;
-                Ok(StoreBox::new(store))
+                Ok(Box::new(store))
             }
             MountConfig::AsyncHttpBroker => {
                 let store =
-                    AsyncHttpBrokerStore::with_default_timeout().map_err(|e| StoreError::Raw {
+                    AsyncHttpBrokerStore::with_default_timeout().map_err(|e| CoreError::Other {
                         message: format!("Failed to create async HTTP broker: {}", e),
                     })?;
-                Ok(StoreBox::new(store))
+                Ok(Box::new(store))
             }
-            MountConfig::Structfs { url } => {
-                let store = RemoteStore::new(url).map_err(|e| StoreError::Raw {
-                    message: format!("Failed to connect to remote StructFS at '{}': {}", url, e),
-                })?;
-                Ok(StoreBox::new(store))
-            }
-            MountConfig::Help => Ok(StoreBox::new(HelpStore::new())),
-            MountConfig::Sys => Ok(StoreBox::new(SysStore::new())),
+            MountConfig::Structfs { url: _ } => Err(CoreError::Other {
+                message: "Remote StructFS not yet available in new architecture".to_string(),
+            }),
+            MountConfig::Help => Ok(Box::new(HelpStore::new())),
+            MountConfig::Sys => Ok(Box::new(SysStore::new())),
         }
     }
 }
 
-/// Manages the REPL's root store and current path
+/// Register store using Value instead of JsonValue (new architecture)
+pub struct RegisterStore {
+    registers: BTreeMap<String, Value>,
+}
+
+impl RegisterStore {
+    pub fn new() -> Self {
+        Self {
+            registers: BTreeMap::new(),
+        }
+    }
+
+    /// Get a register value by name.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.registers.get(name)
+    }
+
+    /// Set a register value.
+    pub fn set(&mut self, name: &str, value: Value) {
+        self.registers.insert(name.to_string(), value);
+    }
+
+    /// List all register names.
+    pub fn list(&self) -> Vec<&String> {
+        self.registers.keys().collect()
+    }
+
+    /// Navigate into a Value by path.
+    fn navigate<'a>(value: &'a Value, path: &Path) -> Option<&'a Value> {
+        let mut current = value;
+        for component in path.iter() {
+            current = match current {
+                Value::Map(map) => map.get(component.as_str())?,
+                Value::Array(arr) => {
+                    let index: usize = component.parse().ok()?;
+                    arr.get(index)?
+                }
+                _ => return None,
+            };
+        }
+        Some(current)
+    }
+}
+
+impl Default for RegisterStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reader for RegisterStore {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, CoreError> {
+        if from.is_empty() {
+            // List all registers
+            let list: Vec<Value> = self
+                .registers
+                .keys()
+                .map(|k| Value::String(k.clone()))
+                .collect();
+            return Ok(Some(Record::parsed(Value::Array(list))));
+        }
+
+        let register_name = &from[0];
+        let sub_path = from.slice(1, from.len());
+
+        let register_value = match self.registers.get(register_name.as_str()) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let value = if sub_path.is_empty() {
+            register_value.clone()
+        } else {
+            match Self::navigate(register_value, &sub_path) {
+                Some(v) => v.clone(),
+                None => return Ok(None),
+            }
+        };
+
+        Ok(Some(Record::parsed(value)))
+    }
+}
+
+impl Writer for RegisterStore {
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, CoreError> {
+        if to.is_empty() {
+            return Err(CoreError::Other {
+                message: "Cannot write to register root. Use @name to specify a register."
+                    .to_string(),
+            });
+        }
+
+        let value = data.into_value(&NoCodec)?;
+        let register_name = &to[0];
+
+        // For simplicity, we only support writing to the register itself (not sub-paths)
+        // Full sub-path support could be added later
+        self.registers.insert(register_name.to_string(), value);
+        Ok(to.clone())
+    }
+}
+
+/// Store context using the new architecture
 pub struct StoreContext {
-    store: MountStore<ReplStoreFactory>,
+    store: MountStore<CoreReplStoreFactory>,
     registers: RegisterStore,
     current_path: Path,
 }
 
 impl StoreContext {
     pub fn new() -> Self {
-        let mut store = MountStore::new(ReplStoreFactory);
+        let mut store = MountStore::new(CoreReplStoreFactory);
 
-        // Set up default mounts under /ctx
-        // Async HTTP broker - requests execute in background, can have multiple outstanding
+        // Mount async HTTP broker (background execution)
         if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
             eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
         }
-        // Sync HTTP broker - blocks until request completes on read
+
+        // Mount sync HTTP broker (blocking execution)
         if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
-            eprintln!("Warning: Failed to mount sync HTTP broker: {}", e);
+            eprintln!("Warning: Failed to mount HTTP broker: {}", e);
         }
 
-        // System primitives (env, time, proc, fs, random)
+        // Mount sys store
         if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
             eprintln!("Warning: Failed to mount sys store: {}", e);
         }
 
-        // Create help store with mounted docs from other stores
-        let mut help_store = HelpStore::new();
-        // Mount sys docs into help store so `read /ctx/help/sys` returns sys documentation
-        help_store.mount_docs("sys", SysDocsStore::new());
-
-        // Mount the configured help store (bypasses factory since it has dependencies)
-        if let Err(e) = store.mount_store("ctx/help", StoreBox::new(help_store)) {
+        // Mount help store
+        if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
             eprintln!("Warning: Failed to mount help store: {}", e);
         }
 
@@ -140,7 +218,6 @@ impl StoreContext {
     }
 
     /// Parse a register path into (register_name, sub_path)
-    /// For example, "@foo/bar/baz" -> ("foo", Some(Path with ["bar", "baz"]))
     pub fn parse_register_path(path_str: &str) -> Option<(String, Path)> {
         if !path_str.starts_with('@') {
             return None;
@@ -148,11 +225,9 @@ impl StoreContext {
 
         let without_at = &path_str[1..];
         if without_at.is_empty() {
-            // Just "@" - return empty register name (list all registers)
             return Some(("".to_string(), Path::parse("").unwrap()));
         }
 
-        // Split by first '/'
         if let Some(slash_pos) = without_at.find('/') {
             let name = &without_at[..slash_pos];
             let sub_path_str = &without_at[slash_pos + 1..];
@@ -164,11 +239,10 @@ impl StoreContext {
     }
 
     /// Read from a register path
-    pub fn read_register(&mut self, path_str: &str) -> Result<Option<JsonValue>, ContextError> {
+    pub fn read_register(&mut self, path_str: &str) -> Result<Option<Value>, ContextError> {
         let (name, sub_path) = Self::parse_register_path(path_str)
             .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
 
-        // Build the full path for the register store (register name + sub path)
         let full_path = if name.is_empty() {
             sub_path
         } else {
@@ -177,15 +251,15 @@ impl StoreContext {
             name_path.join(&sub_path)
         };
 
-        Ok(self.registers.read_owned(&full_path)?)
+        let record = self.registers.read(&full_path)?;
+        match record {
+            Some(r) => Ok(Some(r.into_value(&NoCodec)?)),
+            None => Ok(None),
+        }
     }
 
     /// Write to a register path
-    pub fn write_register(
-        &mut self,
-        path_str: &str,
-        value: &JsonValue,
-    ) -> Result<Path, ContextError> {
+    pub fn write_register(&mut self, path_str: &str, value: Value) -> Result<Path, ContextError> {
         let (name, sub_path) = Self::parse_register_path(path_str)
             .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
 
@@ -195,20 +269,19 @@ impl StoreContext {
             ));
         }
 
-        // Build the full path for the register store
         let name_path = Path::parse(&name)
             .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
         let full_path = name_path.join(&sub_path);
-        Ok(self.registers.write(&full_path, value)?)
+        Ok(self.registers.write(&full_path, Record::parsed(value))?)
     }
 
     /// Store a value directly in a register by name
-    pub fn set_register(&mut self, name: &str, value: JsonValue) {
+    pub fn set_register(&mut self, name: &str, value: Value) {
         self.registers.set(name, value);
     }
 
     /// Get a value from a register by name
-    pub fn get_register(&self, name: &str) -> Option<&JsonValue> {
+    pub fn get_register(&self, name: &str) -> Option<&Value> {
         self.registers.get(name)
     }
 
@@ -227,11 +300,6 @@ impl StoreContext {
         self.current_path = path;
     }
 
-    /// Get list of current mounts for display
-    pub fn list_mounts(&self) -> Vec<structfs_store::MountInfo> {
-        self.store.list_mounts()
-    }
-
     /// Resolve a path relative to the current path
     pub fn resolve_path(&self, path_str: &str) -> Result<Path, ContextError> {
         if path_str.is_empty() || path_str == "." {
@@ -243,15 +311,12 @@ impl StoreContext {
         }
 
         if let Some(stripped) = path_str.strip_prefix('/') {
-            // Absolute path
             Path::parse(stripped).map_err(|e| ContextError::InvalidPath(format!("{}", e)))
         } else if path_str == ".." {
-            // Go up one level
             let mut components = self.current_path.components.clone();
             components.pop();
             Ok(Path { components })
         } else if path_str.starts_with("../") {
-            // Relative path going up
             let mut components = self.current_path.components.clone();
             let mut remaining = path_str;
             while remaining.starts_with("../") {
@@ -265,26 +330,110 @@ impl StoreContext {
             }
             Ok(Path { components })
         } else {
-            // Relative path
             let suffix =
                 Path::parse(path_str).map_err(|e| ContextError::InvalidPath(format!("{}", e)))?;
             Ok(self.current_path.join(&suffix))
         }
     }
 
-    /// Read JSON from a path
-    pub fn read(&mut self, path: &Path) -> Result<Option<JsonValue>, ContextError> {
-        Ok(self.store.read_owned(path)?)
+    /// Read Value from a path
+    pub fn read(&mut self, path: &Path) -> Result<Option<Value>, ContextError> {
+        let record = self.store.read(path)?;
+        match record {
+            Some(r) => Ok(Some(r.into_value(&NoCodec)?)),
+            None => Ok(None),
+        }
     }
 
-    /// Write JSON to a path
-    pub fn write(&mut self, path: &Path, value: &JsonValue) -> Result<Path, ContextError> {
-        Ok(self.store.write(path, value)?)
+    /// Write Value to a path
+    pub fn write(&mut self, path: &Path, value: Value) -> Result<Path, ContextError> {
+        Ok(self.store.write(path, Record::parsed(value))?)
+    }
+
+    /// Read and convert to JsonValue for display compatibility
+    pub fn read_as_json(&mut self, path: &Path) -> Result<Option<serde_json::Value>, ContextError> {
+        match self.read(path)? {
+            Some(value) => Ok(Some(value_to_json(value))),
+            None => Ok(None),
+        }
+    }
+
+    /// Write JsonValue (converts to Value internally)
+    pub fn write_json(
+        &mut self,
+        path: &Path,
+        json: &serde_json::Value,
+    ) -> Result<Path, ContextError> {
+        let value = json_to_value(json.clone());
+        self.write(path, value)
     }
 }
 
 impl Default for StoreContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use structfs_core_store::path;
+
+    #[test]
+    fn test_register_write_read() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("foo", Value::String("bar".to_string()));
+        let value = ctx.get_register("foo").unwrap();
+        assert_eq!(value, &Value::String("bar".to_string()));
+    }
+
+    #[test]
+    fn test_register_list() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("a", Value::Integer(1));
+        ctx.set_register("b", Value::Integer(2));
+        let list = ctx.list_registers();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_absolute_path() {
+        let ctx = StoreContext::new();
+        let path = ctx.resolve_path("/foo/bar").unwrap();
+        assert_eq!(path.to_string(), "foo/bar");
+    }
+
+    #[test]
+    fn test_resolve_relative_path() {
+        let mut ctx = StoreContext::new();
+        ctx.set_current_path(Path::parse("foo").unwrap());
+        let path = ctx.resolve_path("bar").unwrap();
+        assert_eq!(path.to_string(), "foo/bar");
+    }
+
+    #[test]
+    fn test_read_sys_time() {
+        let mut ctx = StoreContext::new();
+        let value = ctx.read(&path!("ctx/sys/time/now")).unwrap();
+        assert!(value.is_some());
+        match value.unwrap() {
+            Value::String(s) => assert!(s.contains("T")),
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_read_help() {
+        let mut ctx = StoreContext::new();
+        let value = ctx.read(&path!("ctx/help")).unwrap();
+        assert!(value.is_some());
+        match value.unwrap() {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("topics"));
+            }
+            _ => panic!("Expected map"),
+        }
     }
 }

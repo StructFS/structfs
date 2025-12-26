@@ -4,8 +4,6 @@ members = [
     "packages/ll-store",
     "packages/core-store",
     "packages/serde-store",
-    "packages/legacy-adapter",
-    "packages/store",
     "packages/json_store",
     "packages/http",
     "packages/repl",
@@ -19,16 +17,12 @@ license = "Apache-2.0"
 repository = "https://github.com/AdjectiveNoun/structfs"
 
 [workspace.dependencies]
-# Workspace crates - new layered architecture
+# Workspace crates - layered architecture
 structfs-ll-store = { path = "packages/ll-store" }
 structfs-core-store = { path = "packages/core-store" }
 structfs-serde-store = { path = "packages/serde-store" }
 
-# Workspace crates - migration adapter
-structfs-legacy-adapter = { path = "packages/legacy-adapter" }
-
-# Workspace crates - legacy (to be migrated)
-structfs-store = { path = "packages/store" }
+# Workspace crates - store implementations
 structfs-json-store = { path = "packages/json_store" }
 structfs-http = { path = "packages/http" }
 structfs-repl = { path = "packages/repl" }
@@ -37,11 +31,9 @@ structfs-sys = { path = "packages/sys" }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-erased-serde = "0.4"
 
 # Async
 async-trait = "0.1"
-tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "blocking"] }
@@ -53,13 +45,11 @@ thiserror = "2.0"
 
 # Utilities
 lazy_static = "1.5"
-regex = "1.11"
-log = "0.4"
-walkdir = "2.5"
 
 # Testing
 tempfile = "3.14"
 wiremock = "0.6"
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
 
 # CLI/REPL
 reedline = "0.44"

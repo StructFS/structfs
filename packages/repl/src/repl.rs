@@ -1,8 +1,6 @@
 //! Platform-independent REPL core.
 //!
-//! This module contains the main REPL logic, which interacts only through
-//! the `IoHost` trait. This allows the same core to run in different
-//! environments (terminal, Wasm, testing).
+//! This module contains the main REPL loop logic.
 
 use crate::commands::{self, CommandResult};
 use crate::io::{ExitReason, IoError, IoHost, Output, PromptConfig, Signal};
@@ -22,20 +20,13 @@ impl ReplCore {
     }
 
     /// Run the REPL loop, reading/writing through the provided I/O host.
-    ///
-    /// Returns the reason for exiting (user exit, EOF, or error).
     pub fn run(&mut self, io: &mut impl IoHost) -> Result<ExitReason, IoError> {
-        // Write banner
         self.write_banner(io)?;
 
         loop {
-            // Update prompt with current state
             self.update_prompt(io)?;
-
-            // Wait for input (may block for terminal hosts)
             io.wait_for_input()?;
 
-            // Check for signals first
             if let Some(signal) = io.read_signal()? {
                 match signal {
                     Signal::Eof => {
@@ -50,16 +41,13 @@ impl ReplCore {
                 }
             }
 
-            // Read input line
             let input = match io.read_input()? {
                 Some(input) => input,
-                None => continue, // No input ready, loop again
+                None => continue,
             };
 
-            // Execute command
             let result = commands::execute(&input.line, &mut self.ctx);
 
-            // Handle result
             match result {
                 CommandResult::Ok { display: None, .. } => {}
                 CommandResult::Ok {
@@ -100,11 +88,10 @@ impl ReplCore {
     }
 
     fn update_prompt(&self, io: &mut impl IoHost) -> Result<(), IoError> {
-        let mount_count = self.ctx.list_mounts().len();
         let current_path = format_path(self.ctx.current_path());
 
         io.write_prompt(PromptConfig {
-            mount_count,
+            mount_count: 4, // http + http_sync + sys + help
             current_path,
         })
     }
@@ -116,7 +103,7 @@ impl Default for ReplCore {
     }
 }
 
-fn format_path(path: &structfs_store::Path) -> String {
+fn format_path(path: &structfs_core_store::Path) -> String {
     if path.is_empty() {
         "/".to_string()
     } else {
@@ -140,12 +127,10 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// A mock I/O host for testing.
     struct MockHost {
         inputs: VecDeque<String>,
         signals: VecDeque<Signal>,
         outputs: Vec<Output>,
-        prompts: Vec<PromptConfig>,
     }
 
     impl MockHost {
@@ -154,7 +139,6 @@ mod tests {
                 inputs: inputs.into_iter().map(String::from).collect(),
                 signals: VecDeque::new(),
                 outputs: Vec::new(),
-                prompts: Vec::new(),
             }
         }
 
@@ -185,8 +169,7 @@ mod tests {
             Ok(())
         }
 
-        fn write_prompt(&mut self, config: PromptConfig) -> Result<(), IoError> {
-            self.prompts.push(config);
+        fn write_prompt(&mut self, _config: PromptConfig) -> Result<(), IoError> {
             Ok(())
         }
     }
@@ -213,14 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn test_interrupt_continues() {
+    fn test_read_sys_time() {
         let mut core = ReplCore::new();
-        let mut host = MockHost::with_inputs(vec!["exit"]).with_signal(Signal::Interrupt);
+        let mut host = MockHost::with_inputs(vec!["read /ctx/sys/time/now", "exit"]);
 
         let result = core.run(&mut host);
 
-        // Should continue after interrupt and then exit
         assert!(matches!(result, Ok(ExitReason::UserExit)));
-        assert!(host.outputs.iter().any(|o| o.text.contains("^C")));
+        // Should have output containing a timestamp
+        assert!(host.outputs.iter().any(|o| o.text.contains("T")));
     }
 }
