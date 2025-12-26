@@ -14,6 +14,7 @@ use structfs_core_store::{
 use structfs_serde_store::{json_to_value, value_to_json};
 
 // Import the new store implementations
+use crate::core_help_store::HelpStore;
 use structfs_http::core as http_core;
 use structfs_json_store::InMemoryStore;
 use structfs_sys::core as sys_core;
@@ -58,17 +59,18 @@ impl StoreFactory for CoreReplStoreFactory {
                 Ok(Box::new(store))
             }
             MountConfig::AsyncHttpBroker => {
-                // Async broker uses threads internally, not migrated yet
-                Err(CoreError::Other {
-                    message: "Async HTTP broker not yet available in new architecture".to_string(),
-                })
+                let store =
+                    http_core::AsyncHttpBrokerStore::with_default_timeout().map_err(|e| {
+                        CoreError::Other {
+                            message: format!("Failed to create async HTTP broker: {}", e),
+                        }
+                    })?;
+                Ok(Box::new(store))
             }
             MountConfig::Structfs { url: _ } => Err(CoreError::Other {
                 message: "Remote StructFS not yet available in new architecture".to_string(),
             }),
-            MountConfig::Help => Err(CoreError::Other {
-                message: "Help store not yet available in new architecture".to_string(),
-            }),
+            MountConfig::Help => Ok(Box::new(HelpStore::new())),
             MountConfig::Sys => Ok(Box::new(sys_core::SysStore::new())),
         }
     }
@@ -187,7 +189,12 @@ impl StoreContext {
     pub fn new() -> Self {
         let mut store = MountStore::new(CoreReplStoreFactory);
 
-        // Mount sync HTTP broker
+        // Mount async HTTP broker (background execution)
+        if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
+            eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
+        }
+
+        // Mount sync HTTP broker (blocking execution)
         if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
             eprintln!("Warning: Failed to mount HTTP broker: {}", e);
         }
@@ -195,6 +202,11 @@ impl StoreContext {
         // Mount sys store
         if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
             eprintln!("Warning: Failed to mount sys store: {}", e);
+        }
+
+        // Mount help store
+        if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
+            eprintln!("Warning: Failed to mount help store: {}", e);
         }
 
         Self {
@@ -412,6 +424,20 @@ mod tests {
         match value.unwrap() {
             Value::String(s) => assert!(s.contains("T")),
             _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn test_read_help() {
+        let mut ctx = StoreContext::new();
+        let value = ctx.read(&path!("ctx/help")).unwrap();
+        assert!(value.is_some());
+        match value.unwrap() {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("topics"));
+            }
+            _ => panic!("Expected map"),
         }
     }
 }
