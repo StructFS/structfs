@@ -8,19 +8,15 @@ use structfs_core_store::{Error, Value};
 pub fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, Error> {
     // Convert Value to serde_json::Value first, then deserialize
     let json = value_to_json(value);
-    serde_json::from_value(json).map_err(|e| Error::Decode {
-        format: structfs_core_store::Format::VALUE,
-        message: e.to_string(),
-    })
+    serde_json::from_value(json)
+        .map_err(|e| Error::decode(structfs_core_store::Format::VALUE, e.to_string()))
 }
 
 /// Convert a Rust type to a Value via serde.
 pub fn to_value<T: Serialize>(data: &T) -> Result<Value, Error> {
     // Serialize to serde_json::Value first, then convert to Value
-    let json = serde_json::to_value(data).map_err(|e| Error::Encode {
-        format: structfs_core_store::Format::VALUE,
-        message: e.to_string(),
-    })?;
+    let json = serde_json::to_value(data)
+        .map_err(|e| Error::encode(structfs_core_store::Format::VALUE, e.to_string()))?;
     Ok(json_to_value(json))
 }
 

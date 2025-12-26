@@ -172,9 +172,7 @@ impl Reader for OverlayStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         match self.match_store(from) {
             Some((store, suffix)) => store.read(&suffix),
-            None => Err(Error::Other {
-                message: format!("No route found for path: {}", from),
-            }),
+            None => Err(Error::NoRoute { path: from.clone() }),
         }
     }
 }
@@ -196,9 +194,7 @@ impl Writer for OverlayStore {
                 // Shouldn't happen, but return the result as-is
                 Ok(result)
             }
-            None => Err(Error::Other {
-                message: format!("No route found for path: {}", to),
-            }),
+            None => Err(Error::NoRoute { path: to.clone() }),
         }
     }
 }
@@ -409,7 +405,7 @@ mod tests {
         let mut overlay = OverlayStore::new();
         let result = overlay.write(&path!("nonexistent"), Record::parsed(Value::Null));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No route"));
+        assert!(result.unwrap_err().to_string().contains("no route"));
     }
 
     #[test]

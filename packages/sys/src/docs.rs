@@ -164,9 +164,7 @@ impl Reader for DocsStore {
 
 impl Writer for DocsStore {
     fn write(&mut self, _to: &Path, _data: Record) -> Result<Path, Error> {
-        Err(Error::Other {
-            message: "Documentation is read-only".to_string(),
-        })
+        Err(Error::store("docs", "write", "Documentation is read-only"))
     }
 }
 
@@ -289,10 +287,10 @@ mod tests {
         let result = store.write(&path!("test"), Record::parsed(Value::Null));
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::Other { message } => {
+            Error::Store { message, .. } => {
                 assert!(message.contains("read-only"));
             }
-            _ => panic!("Expected Other error"),
+            _ => panic!("Expected Store error"),
         }
     }
 

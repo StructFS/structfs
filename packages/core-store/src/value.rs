@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Error, Path};
+use crate::{Error, Path, PathError};
 
 /// A tree-shaped value that can be read from or written to a Store.
 ///
@@ -130,27 +130,29 @@ impl Value {
                         return Ok(());
                     }
                     Value::Array(arr) => {
-                        let index: usize = component.parse().map_err(|_| Error::InvalidPath {
-                            message: format!("invalid array index: {}", component),
+                        let index: usize = component.parse().map_err(|_| {
+                            Error::Path(PathError::InvalidPath {
+                                message: format!("invalid array index: {}", component),
+                            })
                         })?;
                         if index < arr.len() {
                             arr[index] = value;
                         } else if index == arr.len() {
                             arr.push(value);
                         } else {
-                            return Err(Error::InvalidPath {
+                            return Err(Error::Path(PathError::InvalidPath {
                                 message: format!("array index {} out of bounds", index),
-                            });
+                            }));
                         }
                         return Ok(());
                     }
                     _ => {
-                        return Err(Error::InvalidPath {
+                        return Err(Error::Path(PathError::InvalidPath {
                             message: format!(
                                 "cannot set child '{}' on non-container value",
                                 component
                             ),
-                        });
+                        }));
                     }
                 }
             } else {
@@ -162,20 +164,24 @@ impl Value {
                             .or_insert_with(|| Value::Map(BTreeMap::new()));
                     }
                     Value::Array(arr) => {
-                        let index: usize = component.parse().map_err(|_| Error::InvalidPath {
-                            message: format!("invalid array index: {}", component),
+                        let index: usize = component.parse().map_err(|_| {
+                            Error::Path(PathError::InvalidPath {
+                                message: format!("invalid array index: {}", component),
+                            })
                         })?;
-                        current = arr.get_mut(index).ok_or_else(|| Error::InvalidPath {
-                            message: format!("array index {} out of bounds", index),
+                        current = arr.get_mut(index).ok_or_else(|| {
+                            Error::Path(PathError::InvalidPath {
+                                message: format!("array index {} out of bounds", index),
+                            })
                         })?;
                     }
                     _ => {
-                        return Err(Error::InvalidPath {
+                        return Err(Error::Path(PathError::InvalidPath {
                             message: format!(
                                 "cannot navigate through non-container at '{}'",
                                 component
                             ),
-                        });
+                        }));
                     }
                 }
             }
@@ -205,8 +211,10 @@ impl Value {
         match parent {
             Value::Map(map) => Ok(map.remove(last_component)),
             Value::Array(arr) => {
-                let index: usize = last_component.parse().map_err(|_| Error::InvalidPath {
-                    message: format!("invalid array index: {}", last_component),
+                let index: usize = last_component.parse().map_err(|_| {
+                    Error::Path(PathError::InvalidPath {
+                        message: format!("invalid array index: {}", last_component),
+                    })
                 })?;
                 if index < arr.len() {
                     Ok(Some(arr.remove(index)))

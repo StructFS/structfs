@@ -319,10 +319,7 @@ mod tests {
             fn encode(&self, value: &Value, _format: &Format) -> Result<Bytes, Error> {
                 match value {
                     Value::String(s) => Ok(Bytes::from(s.clone())),
-                    _ => Err(Error::Encode {
-                        format: Format::OCTET_STREAM,
-                        message: "only strings".to_string(),
-                    }),
+                    _ => Err(Error::encode(Format::OCTET_STREAM, "only strings")),
                 }
             }
 

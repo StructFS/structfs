@@ -86,9 +86,7 @@ impl Reader for TimeStore {
 impl Writer for TimeStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         if to.len() != 1 {
-            return Err(Error::Other {
-                message: "Invalid time path".to_string(),
-            });
+            return Err(Error::store("time", "write", "Invalid time path"));
         }
 
         match to[0].as_str() {
@@ -102,24 +100,30 @@ impl Writer for TimeStore {
                         } else if let Some(Value::Integer(secs)) = map.get("secs") {
                             Duration::from_secs(*secs as u64)
                         } else {
-                            return Err(Error::Other {
-                                message: "Sleep requires 'ms' or 'secs' field".to_string(),
-                            });
+                            return Err(Error::store(
+                                "time",
+                                "sleep",
+                                "Sleep requires 'ms' or 'secs' field",
+                            ));
                         }
                     }
                     _ => {
-                        return Err(Error::Other {
-                            message: "Sleep requires a map with 'ms' or 'secs' field".to_string(),
-                        });
+                        return Err(Error::store(
+                            "time",
+                            "sleep",
+                            "Sleep requires a map with 'ms' or 'secs' field",
+                        ));
                     }
                 };
 
                 std::thread::sleep(duration);
                 Ok(to.clone())
             }
-            _ => Err(Error::Other {
-                message: format!("Cannot write to time/{}", to[0]),
-            }),
+            _ => Err(Error::store(
+                "time",
+                "write",
+                format!("Cannot write to time/{}", to[0]),
+            )),
         }
     }
 }

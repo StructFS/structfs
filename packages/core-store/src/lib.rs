@@ -35,7 +35,7 @@ mod traits;
 mod value;
 
 pub use bridge::{CoreToLL, LLToCore};
-pub use error::Error;
+pub use error::{CodecOperation, Error};
 pub use format::Format;
 pub use lazy_record::LazyRecord;
 pub use path::{Path, PathError};

@@ -110,9 +110,11 @@ impl<F: StoreFactory> MountStore<F> {
     /// Unmount a store at the given path
     pub fn unmount(&mut self, name: &str) -> Result<(), Error> {
         if !self.mounts.contains_key(name) {
-            return Err(Error::Other {
-                message: format!("No mount at '{}'", name),
-            });
+            return Err(Error::store(
+                "mount_store",
+                "unmount",
+                format!("No mount at '{}'", name),
+            ));
         }
 
         // Remove from tracking
@@ -222,9 +224,8 @@ fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
                     Value::String(s) => Some(s.as_str()),
                     _ => None,
                 })
-                .ok_or_else(|| Error::Decode {
-                    format: crate::Format::VALUE,
-                    message: "Missing 'type' field in mount config".to_string(),
+                .ok_or_else(|| {
+                    Error::decode(crate::Format::VALUE, "Missing 'type' field in mount config")
                 })?;
 
             match type_str {
@@ -236,9 +237,11 @@ fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
                             Value::String(s) => Some(s.clone()),
                             _ => None,
                         })
-                        .ok_or_else(|| Error::Decode {
-                            format: crate::Format::VALUE,
-                            message: "Missing 'path' field for local mount".to_string(),
+                        .ok_or_else(|| {
+                            Error::decode(
+                                crate::Format::VALUE,
+                                "Missing 'path' field for local mount",
+                            )
                         })?;
                     Ok(MountConfig::Local { path })
                 }
@@ -249,9 +252,11 @@ fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
                             Value::String(s) => Some(s.clone()),
                             _ => None,
                         })
-                        .ok_or_else(|| Error::Decode {
-                            format: crate::Format::VALUE,
-                            message: "Missing 'url' field for http mount".to_string(),
+                        .ok_or_else(|| {
+                            Error::decode(
+                                crate::Format::VALUE,
+                                "Missing 'url' field for http mount",
+                            )
                         })?;
                     Ok(MountConfig::Http { url })
                 }
@@ -264,24 +269,26 @@ fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
                             Value::String(s) => Some(s.clone()),
                             _ => None,
                         })
-                        .ok_or_else(|| Error::Decode {
-                            format: crate::Format::VALUE,
-                            message: "Missing 'url' field for structfs mount".to_string(),
+                        .ok_or_else(|| {
+                            Error::decode(
+                                crate::Format::VALUE,
+                                "Missing 'url' field for structfs mount",
+                            )
                         })?;
                     Ok(MountConfig::Structfs { url })
                 }
                 "help" => Ok(MountConfig::Help),
                 "sys" => Ok(MountConfig::Sys),
-                other => Err(Error::Decode {
-                    format: crate::Format::VALUE,
-                    message: format!("Unknown mount type: {}", other),
-                }),
+                other => Err(Error::decode(
+                    crate::Format::VALUE,
+                    format!("Unknown mount type: {}", other),
+                )),
             }
         }
-        _ => Err(Error::Decode {
-            format: crate::Format::VALUE,
-            message: "Mount config must be a map".to_string(),
-        }),
+        _ => Err(Error::decode(
+            crate::Format::VALUE,
+            "Mount config must be a map",
+        )),
     }
 }
 
@@ -327,9 +334,11 @@ impl<F: StoreFactory> Writer for MountStore<F> {
                 }
                 return Ok(destination.clone());
             } else {
-                return Err(Error::Other {
-                    message: "Cannot write directly to /ctx/mounts".to_string(),
-                });
+                return Err(Error::store(
+                    "mount_store",
+                    "write",
+                    "Cannot write directly to /ctx/mounts",
+                ));
             }
         }
 
@@ -628,9 +637,7 @@ mod tests {
 
     impl StoreFactory for FailingFactory {
         fn create(&self, _config: &MountConfig) -> Result<StoreBox, Error> {
-            Err(Error::Other {
-                message: "Factory failed".to_string(),
-            })
+            Err(Error::store("factory", "create", "Factory failed"))
         }
     }
 
@@ -697,7 +704,7 @@ mod tests {
         // Overlay returns an error when no route is found
         let result = store.read(&path!("unmounted/path"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No route"));
+        assert!(result.unwrap_err().to_string().contains("no route"));
     }
 
     #[test]

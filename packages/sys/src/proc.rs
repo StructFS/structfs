@@ -80,9 +80,7 @@ impl ProcStore {
             "pid" => Ok(Some(Value::Integer(std::process::id() as i64))),
             "cwd" => match std::env::current_dir() {
                 Ok(cwd) => Ok(Some(Value::String(cwd.to_string_lossy().to_string()))),
-                Err(e) => Err(Error::Other {
-                    message: format!("Failed to get cwd: {}", e),
-                }),
+                Err(e) => Err(Error::Io(e)),
             },
             "args" => {
                 let args: Vec<Value> = std::env::args().map(Value::String).collect();
@@ -90,9 +88,7 @@ impl ProcStore {
             }
             "exe" => match std::env::current_exe() {
                 Ok(exe) => Ok(Some(Value::String(exe.to_string_lossy().to_string()))),
-                Err(e) => Err(Error::Other {
-                    message: format!("Failed to get exe: {}", e),
-                }),
+                Err(e) => Err(Error::Io(e)),
             },
             "env" => {
                 let vars: BTreeMap<String, Value> = std::env::vars()
@@ -121,9 +117,7 @@ impl Writer for ProcStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         // Must be proc/self/...
         if to.len() != 2 || to[0].as_str() != "self" {
-            return Err(Error::Other {
-                message: "Invalid proc path".to_string(),
-            });
+            return Err(Error::store("proc", "write", "Invalid proc path"));
         }
 
         match to[1].as_str() {
@@ -133,21 +127,19 @@ impl Writer for ProcStore {
                 let new_cwd = match &value {
                     Value::String(s) => s.as_str(),
                     _ => {
-                        return Err(Error::Other {
-                            message: "cwd must be a string path".to_string(),
-                        });
+                        return Err(Error::store("proc", "cwd", "cwd must be a string path"));
                     }
                 };
 
-                std::env::set_current_dir(new_cwd).map_err(|e| Error::Other {
-                    message: format!("Failed to change directory: {}", e),
-                })?;
+                std::env::set_current_dir(new_cwd)?;
 
                 Ok(to.clone())
             }
-            _ => Err(Error::Other {
-                message: format!("Cannot write to proc/self/{}", to[1]),
-            }),
+            _ => Err(Error::store(
+                "proc",
+                "write",
+                format!("Cannot write to proc/self/{}", to[1]),
+            )),
         }
     }
 }

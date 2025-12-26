@@ -100,13 +100,14 @@ impl FsStore {
             return Ok(Some(Value::Array(handles)));
         }
 
-        let handle_id: u64 = path[1].parse().map_err(|_| Error::Other {
-            message: format!("Invalid handle ID: {}", path[1]),
-        })?;
+        let handle_id: u64 = path[1]
+            .parse()
+            .map_err(|_| Error::store("fs", "read", format!("Invalid handle ID: {}", path[1])))?;
 
-        let handle = self.handles.get(&handle_id).ok_or_else(|| Error::Other {
-            message: format!("Handle {} not found", handle_id),
-        })?;
+        let handle = self
+            .handles
+            .get(&handle_id)
+            .ok_or_else(|| Error::store("fs", "read", format!("Handle {} not found", handle_id)))?;
 
         if path.len() == 2 {
             let mut m = BTreeMap::new();
@@ -116,9 +117,7 @@ impl FsStore {
         }
 
         if path.len() == 3 && path[2] == "meta" {
-            let metadata = fs::metadata(&handle.path).map_err(|e| Error::Other {
-                message: format!("Failed to get metadata: {}", e),
-            })?;
+            let metadata = fs::metadata(&handle.path)?;
 
             let mut m = BTreeMap::new();
             m.insert("size".to_string(), Value::Integer(metadata.len() as i64));
@@ -156,66 +155,47 @@ impl FsStore {
 
     fn write_handle(&mut self, path: &Path, value: &Value) -> Result<Path, Error> {
         if path.len() < 2 {
-            return Err(Error::Other {
-                message: "Invalid handle path".to_string(),
-            });
+            return Err(Error::store("fs", "write", "Invalid handle path"));
         }
 
-        let handle_id: u64 = path[1].parse().map_err(|_| Error::Other {
-            message: format!("Invalid handle ID: {}", path[1]),
-        })?;
+        let handle_id: u64 = path[1]
+            .parse()
+            .map_err(|_| Error::store("fs", "write", format!("Invalid handle ID: {}", path[1])))?;
 
         // Handle close operation
         if path.len() == 3 && path[2] == "close" {
-            self.handles
-                .remove(&handle_id)
-                .ok_or_else(|| Error::Other {
-                    message: format!("Handle {} not found", handle_id),
-                })?;
+            self.handles.remove(&handle_id).ok_or_else(|| {
+                Error::store("fs", "write", format!("Handle {} not found", handle_id))
+            })?;
             return Ok(path.clone());
         }
 
         // Handle seek operation
         if path.len() == 3 && path[2] == "seek" {
-            let handle = self
-                .handles
-                .get_mut(&handle_id)
-                .ok_or_else(|| Error::Other {
-                    message: format!("Handle {} not found", handle_id),
-                })?;
+            let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
+                Error::store("fs", "write", format!("Handle {} not found", handle_id))
+            })?;
 
             let pos = if let Value::Map(map) = value {
                 if let Some(Value::Integer(p)) = map.get("pos") {
                     *p as u64
                 } else {
-                    return Err(Error::Other {
-                        message: "seek requires 'pos' field".to_string(),
-                    });
+                    return Err(Error::store("fs", "seek", "seek requires 'pos' field"));
                 }
             } else {
-                return Err(Error::Other {
-                    message: "seek requires a map with 'pos'".to_string(),
-                });
+                return Err(Error::store("fs", "seek", "seek requires a map with 'pos'"));
             };
 
-            handle
-                .file
-                .seek(SeekFrom::Start(pos))
-                .map_err(|e| Error::Other {
-                    message: format!("Seek failed: {}", e),
-                })?;
+            handle.file.seek(SeekFrom::Start(pos))?;
 
             return Ok(path.clone());
         }
 
         // Write content to file
         if path.len() == 2 {
-            let handle = self
-                .handles
-                .get_mut(&handle_id)
-                .ok_or_else(|| Error::Other {
-                    message: format!("Handle {} not found", handle_id),
-                })?;
+            let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
+                Error::store("fs", "write", format!("Handle {} not found", handle_id))
+            })?;
 
             let content = match value {
                 Value::String(s) => {
@@ -225,22 +205,24 @@ impl FsStore {
                 }
                 Value::Bytes(b) => b.to_vec(),
                 _ => {
-                    return Err(Error::Other {
-                        message: "File content must be a string or bytes".to_string(),
-                    });
+                    return Err(Error::store(
+                        "fs",
+                        "write",
+                        "File content must be a string or bytes",
+                    ));
                 }
             };
 
-            handle.file.write_all(&content).map_err(|e| Error::Other {
-                message: format!("Failed to write to file: {}", e),
-            })?;
+            handle.file.write_all(&content)?;
 
             return Ok(path.clone());
         }
 
-        Err(Error::Other {
-            message: format!("Unknown handle operation: {}", path),
-        })
+        Err(Error::store(
+            "fs",
+            "write",
+            format!("Unknown handle operation: {}", path),
+        ))
     }
 }
 
@@ -254,24 +236,16 @@ impl Reader for FsStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         // Handle reading file content from handles
         if from.len() == 2 && from[0] == "handles" {
-            let handle_id: u64 = from[1].parse().map_err(|_| Error::Other {
-                message: format!("Invalid handle ID: {}", from[1]),
+            let handle_id: u64 = from[1].parse().map_err(|_| {
+                Error::store("fs", "read", format!("Invalid handle ID: {}", from[1]))
             })?;
 
-            let handle = self
-                .handles
-                .get_mut(&handle_id)
-                .ok_or_else(|| Error::Other {
-                    message: format!("Handle {} not found", handle_id),
-                })?;
+            let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
+                Error::store("fs", "read", format!("Handle {} not found", handle_id))
+            })?;
 
             let mut buffer = Vec::new();
-            handle
-                .file
-                .read_to_end(&mut buffer)
-                .map_err(|e| Error::Other {
-                    message: format!("Failed to read file: {}", e),
-                })?;
+            handle.file.read_to_end(&mut buffer)?;
 
             // Return as base64-encoded bytes
             let encoded =
@@ -286,9 +260,7 @@ impl Reader for FsStore {
 impl Writer for FsStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         if to.is_empty() {
-            return Err(Error::Other {
-                message: "Cannot write to fs root".to_string(),
-            });
+            return Err(Error::store("fs", "write", "Cannot write to fs root"));
         }
 
         let value = data.into_value(&NoCodec)?;
@@ -299,16 +271,17 @@ impl Writer for FsStore {
         }
 
         if to.len() != 1 {
-            return Err(Error::Other {
-                message: format!("Invalid fs path: {}", to),
-            });
+            return Err(Error::store(
+                "fs",
+                "write",
+                format!("Invalid fs path: {}", to),
+            ));
         }
 
         match to[0].as_str() {
             "open" => {
-                let file_path = Self::get_path_from_value(&value).ok_or_else(|| Error::Other {
-                    message: "open requires 'path' field".to_string(),
-                })?;
+                let file_path = Self::get_path_from_value(&value)
+                    .ok_or_else(|| Error::store("fs", "open", "open requires 'path' field"))?;
 
                 let mode = Self::parse_open_mode(&value);
 
@@ -329,10 +302,7 @@ impl Writer for FsStore {
                         .write(true)
                         .create_new(true)
                         .open(&file_path),
-                }
-                .map_err(|e| Error::Other {
-                    message: format!("Failed to open '{}': {}", file_path, e),
-                })?;
+                }?;
 
                 let handle_id = Self::next_handle_id();
                 self.handles.insert(
@@ -347,20 +317,16 @@ impl Writer for FsStore {
                 Ok(Path::parse(&format!("handles/{}", handle_id)).unwrap())
             }
             "stat" => {
-                let file_path = Self::get_path_from_value(&value).ok_or_else(|| Error::Other {
-                    message: "stat requires 'path' field".to_string(),
-                })?;
+                let file_path = Self::get_path_from_value(&value)
+                    .ok_or_else(|| Error::store("fs", "stat", "stat requires 'path' field"))?;
 
-                let _metadata = fs::metadata(&file_path).map_err(|e| Error::Other {
-                    message: format!("stat failed: {}", e),
-                })?;
+                let _metadata = fs::metadata(&file_path)?;
 
                 Ok(to.clone())
             }
             "mkdir" => {
-                let file_path = Self::get_path_from_value(&value).ok_or_else(|| Error::Other {
-                    message: "mkdir requires 'path' field".to_string(),
-                })?;
+                let file_path = Self::get_path_from_value(&value)
+                    .ok_or_else(|| Error::store("fs", "mkdir", "mkdir requires 'path' field"))?;
 
                 let recursive = if let Value::Map(map) = &value {
                     matches!(map.get("recursive"), Some(Value::Bool(true)))
@@ -369,35 +335,26 @@ impl Writer for FsStore {
                 };
 
                 if recursive {
-                    fs::create_dir_all(&file_path)
+                    fs::create_dir_all(&file_path)?;
                 } else {
-                    fs::create_dir(&file_path)
+                    fs::create_dir(&file_path)?;
                 }
-                .map_err(|e| Error::Other {
-                    message: format!("mkdir failed: {}", e),
-                })?;
 
                 Ok(to.clone())
             }
             "rmdir" => {
-                let file_path = Self::get_path_from_value(&value).ok_or_else(|| Error::Other {
-                    message: "rmdir requires 'path' field".to_string(),
-                })?;
+                let file_path = Self::get_path_from_value(&value)
+                    .ok_or_else(|| Error::store("fs", "rmdir", "rmdir requires 'path' field"))?;
 
-                fs::remove_dir(&file_path).map_err(|e| Error::Other {
-                    message: format!("rmdir failed: {}", e),
-                })?;
+                fs::remove_dir(&file_path)?;
 
                 Ok(to.clone())
             }
             "unlink" => {
-                let file_path = Self::get_path_from_value(&value).ok_or_else(|| Error::Other {
-                    message: "unlink requires 'path' field".to_string(),
-                })?;
+                let file_path = Self::get_path_from_value(&value)
+                    .ok_or_else(|| Error::store("fs", "unlink", "unlink requires 'path' field"))?;
 
-                fs::remove_file(&file_path).map_err(|e| Error::Other {
-                    message: format!("unlink failed: {}", e),
-                })?;
+                fs::remove_file(&file_path)?;
 
                 Ok(to.clone())
             }
@@ -412,8 +369,8 @@ impl Writer for FsStore {
                                 None
                             }
                         })
-                        .ok_or_else(|| Error::Other {
-                            message: "rename requires 'from' field".to_string(),
+                        .ok_or_else(|| {
+                            Error::store("fs", "rename", "rename requires 'from' field")
                         })?;
                     let to_str = map
                         .get("to")
@@ -424,25 +381,27 @@ impl Writer for FsStore {
                                 None
                             }
                         })
-                        .ok_or_else(|| Error::Other {
-                            message: "rename requires 'to' field".to_string(),
+                        .ok_or_else(|| {
+                            Error::store("fs", "rename", "rename requires 'to' field")
                         })?;
                     (from, to_str)
                 } else {
-                    return Err(Error::Other {
-                        message: "rename requires a map with 'from' and 'to'".to_string(),
-                    });
+                    return Err(Error::store(
+                        "fs",
+                        "rename",
+                        "rename requires a map with 'from' and 'to'",
+                    ));
                 };
 
-                fs::rename(&from_path, &to_path).map_err(|e| Error::Other {
-                    message: format!("rename failed: {}", e),
-                })?;
+                fs::rename(&from_path, &to_path)?;
 
                 Ok(to.clone())
             }
-            _ => Err(Error::Other {
-                message: format!("Unknown fs operation: {}", to[0]),
-            }),
+            _ => Err(Error::store(
+                "fs",
+                "write",
+                format!("Unknown fs operation: {}", to[0]),
+            )),
         }
     }
 }

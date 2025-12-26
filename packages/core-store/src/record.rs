@@ -198,11 +198,8 @@ mod tests {
             if format != &Format::JSON {
                 return Err(Error::UnsupportedFormat(format.clone()));
             }
-            let json: serde_json::Value =
-                serde_json::from_slice(bytes).map_err(|e| Error::Decode {
-                    format: format.clone(),
-                    message: e.to_string(),
-                })?;
+            let json: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|e| Error::decode(format.clone(), e.to_string()))?;
             Ok(json_to_value(json))
         }
 
@@ -211,10 +208,8 @@ mod tests {
                 return Err(Error::UnsupportedFormat(format.clone()));
             }
             let json = value_to_json(value);
-            let bytes = serde_json::to_vec(&json).map_err(|e| Error::Encode {
-                format: format.clone(),
-                message: e.to_string(),
-            })?;
+            let bytes = serde_json::to_vec(&json)
+                .map_err(|e| Error::encode(format.clone(), e.to_string()))?;
             Ok(Bytes::from(bytes))
         }
 
@@ -425,11 +420,8 @@ mod tests {
     impl Codec for MultiFormatCodec {
         fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
             if format == &Format::JSON {
-                let json: serde_json::Value =
-                    serde_json::from_slice(bytes).map_err(|e| Error::Decode {
-                        format: format.clone(),
-                        message: e.to_string(),
-                    })?;
+                let json: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|e| Error::decode(format.clone(), e.to_string()))?;
                 Ok(json_to_value(json))
             } else if format.as_str() == "text/plain" {
                 let s = String::from_utf8_lossy(bytes);
@@ -442,10 +434,8 @@ mod tests {
         fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
             if format == &Format::JSON {
                 let json = value_to_json(value);
-                let bytes = serde_json::to_vec(&json).map_err(|e| Error::Encode {
-                    format: format.clone(),
-                    message: e.to_string(),
-                })?;
+                let bytes = serde_json::to_vec(&json)
+                    .map_err(|e| Error::encode(format.clone(), e.to_string()))?;
                 Ok(Bytes::from(bytes))
             } else if format.as_str() == "text/plain" {
                 match value {

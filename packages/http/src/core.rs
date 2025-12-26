@@ -84,29 +84,32 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
 
 impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let request_id = Self::parse_request_id(from).ok_or_else(|| Error::Other {
-            message: format!(
-                "Invalid handle path '{}'. Expected format: outstanding/{{id}}",
-                from
-            ),
+        let request_id = Self::parse_request_id(from).ok_or_else(|| {
+            Error::store(
+                "http_broker",
+                "read",
+                format!(
+                    "Invalid handle path '{}'. Expected format: outstanding/{{id}}",
+                    from
+                ),
+            )
         })?;
 
-        let request = self
-            .requests
-            .remove(&request_id)
-            .ok_or_else(|| Error::Other {
-                message: format!("Request with ID {} not found", request_id),
-            })?;
+        let request = self.requests.remove(&request_id).ok_or_else(|| {
+            Error::store(
+                "http_broker",
+                "read",
+                format!("Request with ID {} not found", request_id),
+            )
+        })?;
 
-        let response = self.executor.execute(&request).map_err(|e| Error::Other {
-            message: format!("HTTP request failed: {}", e),
+        let response = self.executor.execute(&request).map_err(|e| {
+            Error::store("http_broker", "read", format!("HTTP request failed: {}", e))
         })?;
 
         // Convert HttpResponse to Value using serde-store
-        let value = to_value(&response).map_err(|e| Error::Encode {
-            format: structfs_core_store::Format::JSON,
-            message: e.to_string(),
-        })?;
+        let value = to_value(&response)
+            .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
 
         Ok(Some(Record::parsed(value)))
     }
@@ -119,9 +122,11 @@ impl<E: HttpExecutor> Writer for HttpBrokerStore<E> {
 
         // Convert Record to HttpRequest using serde-store
         let value = data.into_value(&NoCodec)?;
-        let request: HttpRequest = from_value(value).map_err(|e| Error::Decode {
-            format: structfs_core_store::Format::JSON,
-            message: format!("Data must be an HttpRequest: {}", e),
+        let request: HttpRequest = from_value(value).map_err(|e| {
+            Error::decode(
+                structfs_core_store::Format::JSON,
+                format!("Data must be an HttpRequest: {}", e),
+            )
         })?;
 
         self.requests.insert(request_id, request);
@@ -208,36 +213,38 @@ impl<E: HttpExecutor> HttpClientStore<E> {
         let full_request = self.build_request(request);
         self.executor
             .execute(&full_request)
-            .map_err(|e| crate::Error::Other { message: e })
+            .map_err(|e| crate::Error::Other {
+                message: format!("HTTP request failed: {}", e),
+            })
     }
 }
 
 impl<E: HttpExecutor> Reader for HttpClientStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let response = self.get(from).map_err(|e| Error::Other {
-            message: e.to_string(),
-        })?;
+        let response = self
+            .get(from)
+            .map_err(|e| Error::store("http_client", "read", e.to_string()))?;
 
         if response.status == 404 {
             return Ok(None);
         }
 
         if !response.is_success() {
-            return Err(Error::Other {
-                message: format!(
+            return Err(Error::store(
+                "http_client",
+                "read",
+                format!(
                     "HTTP {} {}: {}",
                     response.status,
                     response.status_text,
                     response.body_text.unwrap_or_default()
                 ),
-            });
+            ));
         }
 
         // Convert response body to Value
-        let value = to_value(&response.body).map_err(|e| Error::Encode {
-            format: structfs_core_store::Format::JSON,
-            message: e.to_string(),
-        })?;
+        let value = to_value(&response.body)
+            .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
 
         Ok(Some(Record::parsed(value)))
     }
@@ -254,7 +261,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
                 let full_request = self.build_request(request);
                 self.executor
                     .execute(&full_request)
-                    .map_err(|e| Error::Other { message: e })?
+                    .map_err(|e| Error::store("http_client", "write", e))?
             } else {
                 // Not an HttpRequest, POST to root with the value as body
                 let json_value = structfs_serde_store::value_to_json(value);
@@ -267,7 +274,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
                 let full_request = self.build_request(request);
                 self.executor
                     .execute(&full_request)
-                    .map_err(|e| Error::Other { message: e })?
+                    .map_err(|e| Error::store("http_client", "write", e))?
             }
         } else {
             // POST to the path
@@ -281,18 +288,20 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
             let full_request = self.build_request(request);
             self.executor
                 .execute(&full_request)
-                .map_err(|e| Error::Other { message: e })?
+                .map_err(|e| Error::store("http_client", "write", e))?
         };
 
         if !response.is_success() {
-            return Err(Error::Other {
-                message: format!(
+            return Err(Error::store(
+                "http_client",
+                "write",
+                format!(
                     "HTTP {} {}: {}",
                     response.status,
                     response.status_text,
                     response.body_text.unwrap_or_default()
                 ),
-            });
+            ));
         }
 
         Ok(to.clone())
@@ -405,43 +414,51 @@ impl AsyncHttpBrokerStore {
 
 impl Reader for AsyncHttpBrokerStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| Error::Other {
-            message: format!(
-                "Invalid handle path '{}'. Expected format: outstanding/{{id}}[/response]",
-                from
-            ),
+        let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| {
+            Error::store(
+                "async_http_broker",
+                "read",
+                format!(
+                    "Invalid handle path '{}'. Expected format: outstanding/{{id}}[/response]",
+                    from
+                ),
+            )
         })?;
 
-        let handles = self.handles.lock().map_err(|e| Error::Other {
-            message: format!("Lock error: {}", e),
-        })?;
+        let handles = self
+            .handles
+            .lock()
+            .map_err(|e| Error::store("async_http_broker", "read", format!("Lock error: {}", e)))?;
 
-        let handle = handles.get(&request_id).ok_or_else(|| Error::Other {
-            message: format!("Request with ID {} not found", request_id),
+        let handle = handles.get(&request_id).ok_or_else(|| {
+            Error::store(
+                "async_http_broker",
+                "read",
+                format!("Request with ID {} not found", request_id),
+            )
         })?;
 
         let value = match sub_path.as_deref() {
             Some("response") => {
                 if let Some(ref response) = handle.response {
-                    to_value(response).map_err(|e| Error::Encode {
-                        format: structfs_core_store::Format::JSON,
-                        message: e.to_string(),
+                    to_value(response).map_err(|e| {
+                        Error::encode(structfs_core_store::Format::JSON, e.to_string())
                     })?
                 } else {
                     return Ok(None); // Response not ready yet
                 }
             }
-            None => to_value(&handle.status).map_err(|e| Error::Encode {
-                format: structfs_core_store::Format::JSON,
-                message: e.to_string(),
-            })?,
+            None => to_value(&handle.status)
+                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?,
             Some(other) => {
-                return Err(Error::Other {
-                    message: format!(
+                return Err(Error::store(
+                    "async_http_broker",
+                    "read",
+                    format!(
                         "Unknown sub-path '{}'. Use 'response' to get the response.",
                         other
                     ),
-                });
+                ));
             }
         };
 
@@ -456,9 +473,11 @@ impl Writer for AsyncHttpBrokerStore {
 
         // Convert Record to HttpRequest
         let value = data.into_value(&NoCodec)?;
-        let request: HttpRequest = from_value(value).map_err(|e| Error::Decode {
-            format: structfs_core_store::Format::JSON,
-            message: format!("Data must be an HttpRequest: {}", e),
+        let request: HttpRequest = from_value(value).map_err(|e| {
+            Error::decode(
+                structfs_core_store::Format::JSON,
+                format!("Data must be an HttpRequest: {}", e),
+            )
         })?;
 
         // Create initial pending status
@@ -468,8 +487,8 @@ impl Writer for AsyncHttpBrokerStore {
         };
 
         {
-            let mut handles = self.handles.lock().map_err(|e| Error::Other {
-                message: format!("Lock error: {}", e),
+            let mut handles = self.handles.lock().map_err(|e| {
+                Error::store("async_http_broker", "write", format!("Lock error: {}", e))
             })?;
             handles.insert(request_id, handle);
         }
