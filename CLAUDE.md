@@ -8,9 +8,11 @@ StructFS is a Rust workspace that provides a uniform interface for accessing dat
 
 ```
 packages/
-├── store/       # Core traits (Reader, Writer, Path) and MountStore
-├── json_store/  # JSON-based implementations (in-memory, local disk)
-├── http/        # HTTP client store, broker store, remote StructFS client
+├── ll-store/    # Low-level byte stream traits
+├── core-store/  # Core traits (Reader, Writer, Path, Value) and MountStore
+├── serde-store/ # Serde integration for typed access
+├── json_store/  # JSON-based in-memory store
+├── http/        # HTTP client store, broker store
 ├── sys/         # OS primitives (env, time, proc, fs, random)
 └── repl/        # Interactive REPL with syntax highlighting and completion
 ```
@@ -18,11 +20,12 @@ packages/
 ## Key Concepts
 
 - **Stores**: Implement `Reader` and `Writer` traits for path-based data access
+- **Value**: Core data type (Null, Bool, Integer, Float, String, Bytes, Array, Map)
+- **Record**: Wrapper for raw bytes or parsed Value
 - **MountStore**: Routes operations to different stores based on path prefixes
-- **Overlay pattern**: Stores can be mounted at paths, creating a unified tree
+- **OverlayStore**: Mounts stores at paths, creating a unified tree
 - **Broker pattern**: HTTP broker queues requests on write, executes on read
-- **Docs protocol**: Stores can provide documentation at a `docs` path; the help store mounts these for unified access
-- **Cross-store access via mounting**: When a store needs to read from other stores, mount the relevant paths into it (no special traits needed)
+- **Docs protocol**: Stores can provide documentation at a `docs` path
 
 ## Development Commands
 
@@ -43,33 +46,33 @@ cargo run -p structfs-repl
 
 - Keep solutions simple and focused - avoid over-engineering
 - Prefer editing existing files over creating new ones
-- Dead code in `packages/store` should be preserved with `#[allow(dead_code)]`
 - Use `thiserror` for error types
 - Use `serde` for serialization with JSON as the primary format
 
 ## Architecture Decisions
 
-1. **Synchronous interface**: All store operations are synchronous. The HTTP broker uses a deferred execution pattern (write queues, read executes).
+1. **Three-layer architecture**:
+   - `ll-store`: Pure bytes, no semantics
+   - `core-store`: Record/Value abstraction, path routing
+   - `serde-store`: Serde integration for typed access
 
-2. **Path-based routing**: Paths are the universal addressing mechanism. The `Path` type normalizes trailing slashes and validates components.
+2. **Synchronous interface**: All store operations are synchronous. The HTTP broker uses a deferred execution pattern (write queues, read executes).
 
-3. **Mount management through stores**: Mounts are managed by writing to `/_mounts/*` paths, not through special APIs.
+3. **Path-based routing**: Paths are the universal addressing mechanism. The `Path` type normalizes trailing slashes and validates components.
 
 4. **Default context mounts**: The REPL provides built-in stores at `/ctx/*`:
    - `/ctx/http` - Async HTTP broker (background execution)
    - `/ctx/http_sync` - Sync HTTP broker (blocks until complete)
-   - `/ctx/help` - Documentation system (with mounted store docs)
+   - `/ctx/help` - Documentation system
    - `/ctx/sys` - OS primitives (env, time, proc, fs, random)
-
-5. **Docs protocol**: Stores expose documentation at their `docs` path. The HelpStore mounts these internally, so `read /ctx/help/sys` reads from the sys store's docs.
 
 ## Common Patterns
 
 ### Adding a new store type
 
-1. Implement `Reader` and `Writer` traits from `structfs_store`
-2. Add a variant to `MountConfig` in `mount_store.rs`
-3. Handle the variant in `ReplStoreFactory` in `store_context.rs`
+1. Implement `Reader` and `Writer` traits from `structfs_core_store`
+2. Add a variant to `MountConfig` in `core-store/src/mount_store.rs`
+3. Handle the variant in `CoreReplStoreFactory` in `repl/src/store_context.rs`
 
 ### The HTTP broker pattern
 
@@ -105,32 +108,18 @@ write *@handle "Hello"           # Dereference to use as path
 read @handle                     # Read register contents
 ```
 
-### Adding store documentation (docs protocol)
-
-1. Create a `DocsStore` that returns documentation as JSON
-2. Mount it at `docs` in your store (via OverlayStore)
-3. The help store will mount it for unified access at `/ctx/help/<store-name>`
-
-Example from sys store:
-```rust
-overlay.add_layer(Path::parse("docs").unwrap(), DocsStore::new());
-```
-
 ## Testing
 
 - Unit tests live alongside code in `#[cfg(test)]` modules
-- Integration tests for `mount_store` are in `packages/json_store/tests/` to avoid circular dependencies
 - REPL tests are mostly ignored (require interactive testing)
 
 ## Files to Know
 
-- `packages/store/src/path.rs` - Path parsing and validation
-- `packages/store/src/mount_store.rs` - MountConfig enum and mount management
-- `packages/store/src/server.rs` - StoreRegistration for the docs protocol
-- `packages/http/src/broker.rs` - HTTP broker store implementation
-- `packages/sys/src/lib.rs` - SysStore composition via OverlayStore
-- `packages/sys/src/docs.rs` - DocsStore for sys documentation (example of docs protocol)
-- `packages/sys/src/fs/mod.rs` - File handle management with encoding support
+- `packages/core-store/src/path.rs` - Path parsing and validation
+- `packages/core-store/src/mount_store.rs` - MountConfig enum and mount management
+- `packages/core-store/src/overlay_store.rs` - OverlayStore for composing stores
+- `packages/http/src/core.rs` - HTTP broker store implementations
+- `packages/sys/src/lib.rs` - SysStore with all sub-stores
 - `packages/repl/src/store_context.rs` - REPL's store factory and default mounts
-- `packages/repl/src/help_store.rs` - Help system with mounted store docs
+- `packages/repl/src/help_store.rs` - Help system
 - `packages/repl/src/commands.rs` - Command parsing, register handling, dereference syntax
