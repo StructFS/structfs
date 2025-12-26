@@ -46,12 +46,12 @@ impl SysStore {
     pub fn new() -> Self {
         let mut overlay = OverlayStore::new();
 
-        overlay.add_layer(Path::parse("env").unwrap(), Box::new(EnvStore::new()));
-        overlay.add_layer(Path::parse("time").unwrap(), Box::new(TimeStore::new()));
-        overlay.add_layer(Path::parse("random").unwrap(), Box::new(RandomStore::new()));
-        overlay.add_layer(Path::parse("proc").unwrap(), Box::new(ProcStore::new()));
-        overlay.add_layer(Path::parse("fs").unwrap(), Box::new(FsStore::new()));
-        overlay.add_layer(Path::parse("docs").unwrap(), Box::new(DocsStore::new()));
+        overlay.mount(Path::parse("env").unwrap(), Box::new(EnvStore::new()));
+        overlay.mount(Path::parse("time").unwrap(), Box::new(TimeStore::new()));
+        overlay.mount(Path::parse("random").unwrap(), Box::new(RandomStore::new()));
+        overlay.mount(Path::parse("proc").unwrap(), Box::new(ProcStore::new()));
+        overlay.mount(Path::parse("fs").unwrap(), Box::new(FsStore::new()));
+        overlay.mount(Path::parse("docs").unwrap(), Box::new(DocsStore::new()));
 
         Self { inner: overlay }
     }

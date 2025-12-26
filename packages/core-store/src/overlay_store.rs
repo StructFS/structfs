@@ -1,8 +1,9 @@
 //! OverlayStore: Route reads/writes to different stores based on path prefixes.
 //!
-//! This is a simpler version than the legacy OverlayStore, working with Records
-//! instead of generic serde types and avoiding complex type erasure.
+//! This implementation uses a prefix trie for efficient routing with fallthrough
+//! semantics - the deepest matching prefix handles the request.
 
+use crate::path_trie::PathTrie;
 use crate::{Error, Path, PathError, Reader, Record, Writer};
 
 /// A boxed store that is Send + Sync.
@@ -99,7 +100,9 @@ impl<S: Writer> Writer for SubStoreView<S> {
 
 /// Route reads and writes to different stores based on path prefixes.
 ///
-/// Later layers take priority over earlier ones (last-added wins for overlapping paths).
+/// Uses a prefix trie internally for efficient routing. When a path is accessed,
+/// the store walks the trie to find the deepest mounted store that matches the
+/// path prefix, then delegates to that store with the remaining suffix.
 ///
 /// # Example
 ///
@@ -107,29 +110,89 @@ impl<S: Writer> Writer for SubStoreView<S> {
 /// use structfs_core_store::{Reader, Writer, Record, Value, path};
 /// use structfs_core_store::overlay_store::OverlayStore;
 ///
-/// // Create stores (in practice, these would be real store implementations)
-/// // ... setup ...
-///
+/// // Create an overlay
 /// let mut overlay = OverlayStore::new();
-/// // overlay.add_layer(path!("users"), user_store);
-/// // overlay.add_layer(path!("config"), config_store);
+///
+/// // Mount stores at different paths
+/// // overlay.mount(path!("users"), user_store);
+/// // overlay.mount(path!("config"), config_store);
+///
+/// // Reads to /users/alice go to user_store with path "alice"
+/// // Reads to /config/theme go to config_store with path "theme"
 /// ```
 #[derive(Default)]
 pub struct OverlayStore {
-    routes: Vec<(Path, StoreBox)>,
+    trie: PathTrie<StoreBox>,
 }
 
 impl OverlayStore {
     /// Create a new empty overlay store.
     pub fn new() -> Self {
-        Self { routes: Vec::new() }
+        Self {
+            trie: PathTrie::new(),
+        }
     }
+
+    /// Mount a store at the given path prefix.
+    ///
+    /// Returns the previous store at that exact path if any.
+    pub fn mount<S: Store + Send + Sync + 'static>(
+        &mut self,
+        path: Path,
+        store: S,
+    ) -> Option<StoreBox> {
+        self.trie.insert(&path, Box::new(store))
+    }
+
+    /// Mount a boxed store at the given path prefix.
+    ///
+    /// Returns the previous store at that exact path if any.
+    pub fn mount_boxed(&mut self, path: Path, store: StoreBox) -> Option<StoreBox> {
+        self.trie.insert(&path, store)
+    }
+
+    /// Unmount store at exact path, keeping any nested mounts.
+    ///
+    /// Returns the removed store if found.
+    pub fn unmount(&mut self, path: &Path) -> Option<StoreBox> {
+        self.trie.remove(path)
+    }
+
+    /// Unmount entire subtree at path, returning it as a new OverlayStore.
+    pub fn unmount_subtree(&mut self, path: &Path) -> Option<OverlayStore> {
+        self.trie
+            .remove_subtree(path)
+            .map(|trie| OverlayStore { trie })
+    }
+
+    /// Check if any store would handle this path (fallthrough).
+    pub fn has_route(&self, path: &Path) -> bool {
+        self.trie.find_ancestor(path).is_some()
+    }
+
+    /// Number of mounted stores.
+    pub fn store_count(&self) -> usize {
+        self.trie.len()
+    }
+
+    /// True if no stores mounted.
+    pub fn is_empty(&self) -> bool {
+        self.trie.is_empty()
+    }
+
+    /// Iterate over all mount points.
+    pub fn mounts(&self) -> impl Iterator<Item = (Path, &StoreBox)> {
+        self.trie.iter()
+    }
+
+    // === Deprecated methods for backwards compatibility ===
 
     /// Add a store layer at the given path prefix.
     ///
-    /// Later layers take priority for overlapping paths.
+    /// Deprecated: use `mount()` instead.
+    #[deprecated(note = "use mount() instead")]
     pub fn add_layer<S: Store + Send + Sync + 'static>(&mut self, mount_root: Path, store: S) {
-        self.routes.push((mount_root, Box::new(store)));
+        self.mount(mount_root, store);
     }
 
     /// Add a read-only layer.
@@ -138,7 +201,7 @@ impl OverlayStore {
         mount_root: Path,
         reader: R,
     ) {
-        self.add_layer(mount_root, OnlyReadable::new(reader));
+        self.mount(mount_root, OnlyReadable::new(reader));
     }
 
     /// Add a write-only layer.
@@ -147,30 +210,29 @@ impl OverlayStore {
         mount_root: Path,
         writer: W,
     ) {
-        self.add_layer(mount_root, OnlyWritable::new(writer));
-    }
-
-    /// Match a path to a store, returning the store and the path suffix.
-    fn match_store(&mut self, path: &Path) -> Option<(&mut StoreBox, Path)> {
-        // Iterate in reverse to get last-added first (priority)
-        for (prefix, store) in self.routes.iter_mut().rev() {
-            if path.has_prefix(prefix) {
-                let suffix = path.strip_prefix(prefix).unwrap();
-                return Some((store, suffix));
-            }
-        }
-        None
+        self.mount(mount_root, OnlyWritable::new(writer));
     }
 
     /// Get the number of layers.
+    ///
+    /// Deprecated: use `store_count()` instead.
+    #[deprecated(note = "use store_count() instead")]
     pub fn layer_count(&self) -> usize {
-        self.routes.len()
+        self.store_count()
+    }
+
+    /// Remove a layer by its exact prefix path.
+    ///
+    /// Deprecated: use `unmount()` instead.
+    #[deprecated(note = "use unmount() instead")]
+    pub fn remove_layer(&mut self, prefix: &Path) -> Option<StoreBox> {
+        self.unmount(prefix)
     }
 }
 
 impl Reader for OverlayStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        match self.match_store(from) {
+        match self.trie.find_ancestor_mut(from) {
             Some((store, suffix)) => store.read(&suffix),
             None => Err(Error::NoRoute { path: from.clone() }),
         }
@@ -179,20 +241,15 @@ impl Reader for OverlayStore {
 
 impl Writer for OverlayStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        match self.match_store(to) {
+        match self.trie.find_ancestor_mut(to) {
             Some((store, suffix)) => {
-                // Write to the store with the suffix path
-                let result = store.write(&suffix, data)?;
-                // If the result path is relative to the suffix, we need to
-                // reconstruct the full path by joining with the original prefix
-                // Find the matching prefix again (this is a bit inefficient but correct)
-                for (prefix, _) in self.routes.iter().rev() {
-                    if to.has_prefix(prefix) {
-                        return Ok(prefix.join(&result));
-                    }
-                }
-                // Shouldn't happen, but return the result as-is
-                Ok(result)
+                let result_suffix = store.write(&suffix, data)?;
+                // Reconstruct full path: prefix + result
+                let prefix_len = to.len() - suffix.len();
+                let prefix = Path {
+                    components: to.components[..prefix_len].to_vec(),
+                };
+                Ok(prefix.join(&result_suffix))
             }
             None => Err(Error::NoRoute { path: to.clone() }),
         }
@@ -245,8 +302,8 @@ mod tests {
             .write(&path!("theme"), Record::parsed(Value::from("dark")))
             .unwrap();
 
-        overlay.add_layer(path!("users"), users_store);
-        overlay.add_layer(path!("config"), config_store);
+        overlay.mount(path!("users"), users_store);
+        overlay.mount(path!("config"), config_store);
 
         // Read from users
         let record = overlay.read(&path!("users/alice")).unwrap().unwrap();
@@ -260,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_priority() {
+    fn mount_replaces_existing() {
         let mut overlay = OverlayStore::new();
 
         let mut store1 = TestStore::new("first");
@@ -273,13 +330,20 @@ mod tests {
             .write(&path!("key"), Record::parsed(Value::from("second")))
             .unwrap();
 
-        // Add store1 first, then store2 at the same path - store2 should win
-        overlay.add_layer(path!("data"), store1);
-        overlay.add_layer(path!("data"), store2);
+        // Mount store1, then replace with store2
+        let old = overlay.mount(path!("data"), store1);
+        assert!(old.is_none());
 
+        let old = overlay.mount(path!("data"), store2);
+        assert!(old.is_some());
+
+        // store2 should be active
         let record = overlay.read(&path!("data/key")).unwrap().unwrap();
         let value = record.into_value(&crate::NoCodec).unwrap();
         assert_eq!(value, Value::from("second"));
+
+        // Only one store mounted
+        assert_eq!(overlay.store_count(), 1);
     }
 
     #[test]
@@ -291,7 +355,7 @@ mod tests {
             .write(&path!("test"), Record::parsed(Value::from("value")))
             .unwrap();
 
-        overlay.add_layer(path!(""), store);
+        overlay.mount(path!(""), store);
 
         let record = overlay.read(&path!("test")).unwrap().unwrap();
         let value = record.into_value(&crate::NoCodec).unwrap();
@@ -309,7 +373,7 @@ mod tests {
     #[test]
     fn write_through_overlay() {
         let mut overlay = OverlayStore::new();
-        overlay.add_layer(path!("data"), TestStore::new("data"));
+        overlay.mount(path!("data"), TestStore::new("data"));
 
         let result = overlay.write(&path!("data/key"), Record::parsed(Value::from("value")));
         assert!(result.is_ok());
@@ -383,21 +447,21 @@ mod tests {
     }
 
     #[test]
-    fn layer_count() {
+    fn store_count() {
         let mut overlay = OverlayStore::new();
-        assert_eq!(overlay.layer_count(), 0);
+        assert_eq!(overlay.store_count(), 0);
 
-        overlay.add_layer(path!("a"), TestStore::new("a"));
-        assert_eq!(overlay.layer_count(), 1);
+        overlay.mount(path!("a"), TestStore::new("a"));
+        assert_eq!(overlay.store_count(), 1);
 
-        overlay.add_layer(path!("b"), TestStore::new("b"));
-        assert_eq!(overlay.layer_count(), 2);
+        overlay.mount(path!("b"), TestStore::new("b"));
+        assert_eq!(overlay.store_count(), 2);
     }
 
     #[test]
     fn overlay_store_default() {
         let overlay = OverlayStore::default();
-        assert_eq!(overlay.layer_count(), 0);
+        assert_eq!(overlay.store_count(), 0);
     }
 
     #[test]
@@ -448,7 +512,7 @@ mod tests {
     #[test]
     fn write_returns_full_path() {
         let mut overlay = OverlayStore::new();
-        overlay.add_layer(path!("prefix"), TestStore::new("test"));
+        overlay.mount(path!("prefix"), TestStore::new("test"));
 
         // Write returns the full path including the prefix
         let result = overlay.write(&path!("prefix/key"), Record::parsed(Value::from("data")));
@@ -464,10 +528,228 @@ mod tests {
             .write(&path!("deep/key"), Record::parsed(Value::from("value")))
             .unwrap();
 
-        overlay.add_layer(path!("a/b"), store);
+        overlay.mount(path!("a/b"), store);
 
         let result = overlay.read(&path!("a/b/deep/key")).unwrap().unwrap();
         let value = result.into_value(&crate::NoCodec).unwrap();
         assert_eq!(value, Value::from("value"));
+    }
+
+    #[test]
+    fn unmount_existing() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("a"), TestStore::new("a"));
+        overlay.mount(path!("b"), TestStore::new("b"));
+        assert_eq!(overlay.store_count(), 2);
+
+        // Unmount "a"
+        let removed = overlay.unmount(&path!("a"));
+        assert!(removed.is_some());
+        assert_eq!(overlay.store_count(), 1);
+
+        // Reading from "a" should now fail
+        let result = overlay.read(&path!("a/key"));
+        assert!(result.is_err());
+
+        // "b" should still work
+        overlay
+            .write(&path!("b/key"), Record::parsed(Value::from("test")))
+            .unwrap();
+        let result = overlay.read(&path!("b/key"));
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn unmount_nonexistent() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("a"), TestStore::new("a"));
+
+        // Try to unmount non-existent
+        let removed = overlay.unmount(&path!("nonexistent"));
+        assert!(removed.is_none());
+        assert_eq!(overlay.store_count(), 1);
+    }
+
+    #[test]
+    fn unmount_keeps_children() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+        overlay.mount(path!("data/nested"), TestStore::new("nested"));
+        assert_eq!(overlay.store_count(), 2);
+
+        // Write to nested
+        overlay
+            .write(
+                &path!("data/nested/key"),
+                Record::parsed(Value::from("nested_value")),
+            )
+            .unwrap();
+
+        // Unmount data (not nested)
+        overlay.unmount(&path!("data"));
+        assert_eq!(overlay.store_count(), 1);
+
+        // nested should still work
+        let result = overlay.read(&path!("data/nested/key")).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn unmount_subtree_removes_all() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+        overlay.mount(path!("data/cache"), TestStore::new("cache"));
+        assert_eq!(overlay.store_count(), 2);
+
+        let subtree = overlay.unmount_subtree(&path!("data")).unwrap();
+
+        assert_eq!(subtree.store_count(), 2);
+        assert!(overlay.is_empty());
+    }
+
+    #[test]
+    fn deeper_mount_wins() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+        overlay.mount(path!("data/special"), TestStore::new("special"));
+
+        // Write to data/special/key goes to the special store
+        overlay
+            .write(
+                &path!("data/special/key"),
+                Record::parsed(Value::from("special")),
+            )
+            .unwrap();
+
+        // Write to data/other/key goes to the data store
+        overlay
+            .write(
+                &path!("data/other/key"),
+                Record::parsed(Value::from("other")),
+            )
+            .unwrap();
+
+        // Unmount special
+        overlay.unmount(&path!("data/special"));
+
+        // data should still work
+        let result = overlay.read(&path!("data/other/key")).unwrap();
+        assert!(result.is_some());
+
+        // But data/special/key is now routed to data store (which doesn't have it)
+        let result = overlay.read(&path!("data/special/key")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn has_route() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+
+        assert!(overlay.has_route(&path!("data")));
+        assert!(overlay.has_route(&path!("data/anything")));
+        assert!(!overlay.has_route(&path!("other")));
+    }
+
+    #[test]
+    fn is_empty() {
+        let mut overlay = OverlayStore::new();
+        assert!(overlay.is_empty());
+
+        overlay.mount(path!("a"), TestStore::new("a"));
+        assert!(!overlay.is_empty());
+
+        overlay.unmount(&path!("a"));
+        assert!(overlay.is_empty());
+    }
+
+    #[test]
+    fn mounts_iteration() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("a"), TestStore::new("a"));
+        overlay.mount(path!("b"), TestStore::new("b"));
+        overlay.mount(path!("a/c"), TestStore::new("c"));
+
+        let mounts: Vec<_> = overlay.mounts().map(|(p, _)| p).collect();
+        assert_eq!(mounts.len(), 3);
+    }
+
+    #[test]
+    fn mount_boxed() {
+        let mut overlay = OverlayStore::new();
+        let store: StoreBox = Box::new(TestStore::new("boxed"));
+        overlay.mount_boxed(path!("boxed"), store);
+
+        overlay
+            .write(&path!("boxed/key"), Record::parsed(Value::from("value")))
+            .unwrap();
+        let result = overlay.read(&path!("boxed/key")).unwrap();
+        assert!(result.is_some());
+    }
+
+    // Tests for deprecated methods to ensure backwards compatibility
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_add_layer() {
+        let mut overlay = OverlayStore::new();
+        overlay.add_layer(path!("data"), TestStore::new("data"));
+
+        overlay
+            .write(&path!("data/key"), Record::parsed(Value::from("value")))
+            .unwrap();
+        let result = overlay.read(&path!("data/key")).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_layer_count() {
+        let mut overlay = OverlayStore::new();
+        assert_eq!(overlay.layer_count(), 0);
+
+        overlay.mount(path!("a"), TestStore::new("a"));
+        assert_eq!(overlay.layer_count(), 1);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_remove_layer() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("a"), TestStore::new("a"));
+
+        let removed = overlay.remove_layer(&path!("a"));
+        assert!(removed.is_some());
+        assert!(overlay.is_empty());
+    }
+
+    #[test]
+    fn fallthrough_routing() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+
+        // Write via fallthrough (path goes deep but store is at data)
+        overlay
+            .write(
+                &path!("data/deep/nested/key"),
+                Record::parsed(Value::from("value")),
+            )
+            .unwrap();
+
+        // Read via fallthrough
+        let result = overlay.read(&path!("data/deep/nested/key")).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn empty_path_mounts_at_root() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!(""), TestStore::new("root"));
+
+        // Everything routes to root store
+        overlay
+            .write(&path!("any/path"), Record::parsed(Value::from("v")))
+            .unwrap();
+        let result = overlay.read(&path!("any/path")).unwrap();
+        assert!(result.is_some());
     }
 }

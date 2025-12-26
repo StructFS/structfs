@@ -46,7 +46,7 @@ impl HelpStore {
     /// documentation available at `help/sys`.
     pub fn mount_docs(&mut self, topic: &str, docs_store: StoreBox) {
         let path = Path::parse(topic).expect("valid topic path");
-        self.mounted_docs.add_layer(path, docs_store);
+        self.mounted_docs.mount(path, docs_store);
         self.mounted_topics.push(topic.to_string());
     }
 

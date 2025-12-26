@@ -81,7 +81,7 @@ impl<F: StoreFactory> MountStore<F> {
         let mount_path = Path::parse(name).map_err(Error::Path)?;
 
         // Add to overlay
-        self.overlay.add_layer(mount_path, store);
+        self.overlay.mount(mount_path, store);
 
         // Track the mount
         self.mounts.insert(name.to_string(), config);
@@ -98,7 +98,7 @@ impl<F: StoreFactory> MountStore<F> {
         let mount_path = Path::parse(name).map_err(Error::Path)?;
 
         // Add to overlay
-        self.overlay.add_layer(mount_path, store);
+        self.overlay.mount(mount_path, store);
 
         // Don't track in mounts BTreeMap since we don't have a config
         // This mount won't show up in list_mounts or be serializable,
@@ -117,12 +117,14 @@ impl<F: StoreFactory> MountStore<F> {
             ));
         }
 
-        // Remove from tracking
-        self.mounts.remove(name);
+        // Parse the mount path
+        let mount_path = Path::parse(name)?;
 
-        // Note: For now we just remove from tracking.
-        // A full implementation would need to remove from overlay.
-        // This is a limitation carried over from the legacy implementation.
+        // Remove from overlay (the actual routing)
+        self.overlay.unmount(&mount_path);
+
+        // Remove from tracking (the metadata)
+        self.mounts.remove(name);
 
         Ok(())
     }
@@ -745,5 +747,67 @@ mod tests {
             MountStore::<TestFactory>::get_mount_name(&path!("ctx")),
             None
         );
+    }
+
+    #[test]
+    fn unmount_removes_from_overlay() {
+        let mut store = MountStore::new(TestFactory);
+        store.mount("data", MountConfig::Memory).unwrap();
+
+        // Write something
+        store
+            .write(&path!("data/key"), Record::parsed(Value::Integer(42)))
+            .unwrap();
+
+        // Verify it's readable
+        let result = store.read(&path!("data/key")).unwrap();
+        assert!(result.is_some());
+
+        // Unmount
+        store.unmount("data").unwrap();
+
+        // Verify it's no longer routable (should return NoRoute error)
+        let result = store.read(&path!("data/key"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unmount_allows_remount() {
+        let mut store = MountStore::new(TestFactory);
+        store.mount("data", MountConfig::Memory).unwrap();
+        store
+            .write(&path!("data/key"), Record::parsed(Value::Integer(1)))
+            .unwrap();
+
+        store.unmount("data").unwrap();
+        store.mount("data", MountConfig::Memory).unwrap();
+
+        // New mount should be empty
+        let result = store.read(&path!("data/key")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn unmount_priority_preserved() {
+        let mut store = MountStore::new(TestFactory);
+
+        // Mount two stores at overlapping paths
+        store.mount("data", MountConfig::Memory).unwrap();
+        store.mount("data/nested", MountConfig::Memory).unwrap();
+
+        // Write to nested
+        store
+            .write(&path!("data/nested/key"), Record::parsed(Value::Integer(1)))
+            .unwrap();
+
+        // Unmount nested
+        store.unmount("data/nested").unwrap();
+
+        // data should still work
+        store
+            .write(&path!("data/other"), Record::parsed(Value::Integer(2)))
+            .unwrap();
+        let result = store.read(&path!("data/other")).unwrap();
+        assert!(result.is_some());
     }
 }
