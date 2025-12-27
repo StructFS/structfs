@@ -55,20 +55,127 @@ impl HelpStore {
         let mut map = BTreeMap::new();
         map.insert(
             "title".to_string(),
-            Value::String("StructFS REPL Help".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String(
-                "StructFS provides a uniform interface for accessing data through read/write operations on paths."
-                    .to_string(),
-            ),
+            Value::String("StructFS REPL".to_string()),
         );
 
+        // Commands section - matches the static format_help layout
+        let mut commands = BTreeMap::new();
+        commands.insert(
+            "read".to_string(),
+            Value::Map(BTreeMap::from([
+                ("args".to_string(), Value::String("[path|@reg]".to_string())),
+                (
+                    "desc".to_string(),
+                    Value::String("Read value from path or register (alias: get, r)".to_string()),
+                ),
+            ])),
+        );
+        commands.insert(
+            "write".to_string(),
+            Value::Map(BTreeMap::from([
+                (
+                    "args".to_string(),
+                    Value::String("<path> <json|@reg>".to_string()),
+                ),
+                (
+                    "desc".to_string(),
+                    Value::String("Write value to path (alias: set, w)".to_string()),
+                ),
+            ])),
+        );
+        commands.insert(
+            "cd".to_string(),
+            Value::Map(BTreeMap::from([
+                ("args".to_string(), Value::String("<path>".to_string())),
+                (
+                    "desc".to_string(),
+                    Value::String("Change current path".to_string()),
+                ),
+            ])),
+        );
+        commands.insert(
+            "pwd".to_string(),
+            Value::Map(BTreeMap::from([
+                ("args".to_string(), Value::String("".to_string())),
+                (
+                    "desc".to_string(),
+                    Value::String("Print current path".to_string()),
+                ),
+            ])),
+        );
+        commands.insert(
+            "registers".to_string(),
+            Value::Map(BTreeMap::from([
+                ("args".to_string(), Value::String("".to_string())),
+                (
+                    "desc".to_string(),
+                    Value::String("List all registers (alias: regs)".to_string()),
+                ),
+            ])),
+        );
+        commands.insert(
+            "help".to_string(),
+            Value::Map(BTreeMap::from([
+                ("args".to_string(), Value::String("[topic]".to_string())),
+                (
+                    "desc".to_string(),
+                    Value::String("Show help (try: help ctx/http)".to_string()),
+                ),
+            ])),
+        );
+        commands.insert(
+            "exit".to_string(),
+            Value::Map(BTreeMap::from([
+                ("args".to_string(), Value::String("".to_string())),
+                (
+                    "desc".to_string(),
+                    Value::String("Exit the REPL (alias: quit, q)".to_string()),
+                ),
+            ])),
+        );
+        map.insert("commands".to_string(), Value::Map(commands));
+
+        // Default mounts
+        let mut default_mounts = BTreeMap::new();
+        default_mounts.insert(
+            "/ctx/sys".to_string(),
+            Value::String("System primitives (env, time, random, proc, fs)".to_string()),
+        );
+        default_mounts.insert(
+            "/ctx/http".to_string(),
+            Value::String("HTTP broker (async, background threads)".to_string()),
+        );
+        default_mounts.insert(
+            "/ctx/http_sync".to_string(),
+            Value::String("HTTP broker (sync, blocks on read)".to_string()),
+        );
+        default_mounts.insert(
+            "/ctx/help".to_string(),
+            Value::String("Documentation system".to_string()),
+        );
+        map.insert("default_mounts".to_string(), Value::Map(default_mounts));
+
+        // Registers syntax
+        let mut registers = BTreeMap::new();
+        registers.insert(
+            "@name <command>".to_string(),
+            Value::String("Capture output in register".to_string()),
+        );
+        registers.insert(
+            "read @name".to_string(),
+            Value::String("Read register contents".to_string()),
+        );
+        registers.insert(
+            "*@name".to_string(),
+            Value::String("Dereference register as path".to_string()),
+        );
+        map.insert("registers".to_string(), Value::Map(registers));
+
+        // Topics for further reading
         let mut topics = BTreeMap::new();
         topics.insert(
             "commands".to_string(),
-            Value::String("Available REPL commands".to_string()),
+            Value::String("Detailed command reference".to_string()),
         );
         topics.insert(
             "mounts".to_string(),
@@ -83,42 +190,14 @@ impl HelpStore {
             Value::String("Path syntax and navigation".to_string()),
         );
         topics.insert(
-            "registers".to_string(),
-            Value::String("Registers for storing command output".to_string()),
+            "stores".to_string(),
+            Value::String("Available store types".to_string()),
         );
         topics.insert(
             "examples".to_string(),
             Value::String("Usage examples".to_string()),
         );
-        topics.insert(
-            "stores".to_string(),
-            Value::String("Available store types".to_string()),
-        );
         map.insert("topics".to_string(), Value::Map(topics));
-
-        map.insert(
-            "store_docs".to_string(),
-            Value::String(
-                "Store-specific docs are accessed via redirects. Try: read /ctx/help/sys"
-                    .to_string(),
-            ),
-        );
-
-        let quick_start = vec![
-            "read /ctx/mounts          - List current mounts",
-            "write /ctx/mounts/data {\"type\": \"memory\"}  - Create a memory store at /data",
-            "write /data/hello {\"message\": \"world\"}  - Write data",
-            "read /data/hello       - Read data back",
-        ];
-        map.insert(
-            "quick_start".to_string(),
-            Value::Array(
-                quick_start
-                    .into_iter()
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
 
         Value::Map(map)
     }
@@ -519,8 +598,10 @@ mod tests {
         match value {
             Value::Map(map) => {
                 assert!(map.contains_key("title"));
+                assert!(map.contains_key("commands"));
+                assert!(map.contains_key("default_mounts"));
+                assert!(map.contains_key("registers"));
                 assert!(map.contains_key("topics"));
-                assert!(map.contains_key("quick_start"));
             }
             _ => panic!("Expected map"),
         }
