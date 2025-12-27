@@ -1,130 +1,37 @@
-# Plan 1: Fix Unmount
+# Plan 1: Fix Unmount - ✅ COMPLETED
 
-## Problem
+## Status: DONE (2025-12-27)
 
-`MountStore::unmount()` removes the mount from the tracking `BTreeMap` but does NOT remove the store from `OverlayStore.routes`. The mount is "forgotten" but still routes traffic.
+This plan has been fully implemented.
 
-```rust
-// Current broken implementation (mount_store.rs:111-126)
-pub fn unmount(&mut self, name: &str) -> Result<(), Error> {
-    self.mounts.remove(name);  // Removes from tracking
-    // But overlay.routes still has the store!
-    Ok(())
-}
-```
+## What Was Implemented
 
-## Solution
+### OverlayStore
 
-Add `remove_layer()` to `OverlayStore`, then call it from `unmount()`.
+- `PathTrie<RouteTarget>` replaces the old `Vec<(Path, Store)>` structure
+- `unmount(path)` calls `trie.remove_subtree(path)` for clean removal
+- O(k) operations where k is path depth
 
-## Implementation Steps
+### MountStore
 
-### Step 1: Add `remove_layer` to OverlayStore
+- `unmount(name)` delegates to `OverlayStore.unmount()`
+- Also calls `remove_redirects_for_mount(name)` for cascade cleanup
+- Tracks mounts in `BTreeMap<String, MountConfig>` for serialization
 
-**File:** `packages/core-store/src/overlay_store.rs`
+### Cascade Behavior
 
-```rust
-/// Remove a layer by its exact prefix path.
-/// Returns the removed store if found, None otherwise.
-pub fn remove_layer(&mut self, prefix: &Path) -> Option<StoreBox> {
-    // Use rposition to find the last (highest priority) matching prefix
-    if let Some(pos) = self.routes.iter().rposition(|(p, _)| p == prefix) {
-        Some(self.routes.remove(pos).1)
-    } else {
-        None
-    }
-}
-```
+When unmounting a store:
+1. Remove the store from the routing trie
+2. Remove any redirects that were created by that mount (e.g., docs redirects)
+3. Update the HelpStore index (handled by `StoreContext.refresh_help_state()`)
 
-### Step 2: Update `unmount()` in MountStore
+## Implementation Files
 
-**File:** `packages/core-store/src/mount_store.rs`
+- `packages/core-store/src/path_trie.rs` - PathTrie<T> with O(k) operations
+- `packages/core-store/src/overlay_store.rs` - OverlayStore using PathTrie
+- `packages/core-store/src/mount_store.rs` - MountStore with cascade unmount
+- `packages/repl/src/store_context.rs` - StoreContext with help state refresh
 
-```rust
-pub fn unmount(&mut self, name: &str) -> Result<(), Error> {
-    if !self.mounts.contains_key(name) {
-        return Err(Error::Other {
-            message: format!("No mount at '{}'", name),
-        });
-    }
+## Tests
 
-    // Parse the mount path
-    let mount_path = Path::parse(name).map_err(Error::Path)?;
-
-    // Remove from overlay (the actual routing)
-    self.overlay.remove_layer(&mount_path);
-
-    // Remove from tracking (the metadata)
-    self.mounts.remove(name);
-
-    Ok(())
-}
-```
-
-### Step 3: Add comprehensive tests
-
-```rust
-#[test]
-fn unmount_removes_from_overlay() {
-    let mut store = MountStore::new(TestFactory);
-    store.mount("data", MountConfig::Memory).unwrap();
-
-    // Write something
-    store.write(&path!("data/key"), Record::parsed(Value::Integer(42))).unwrap();
-
-    // Verify it's readable
-    let result = store.read(&path!("data/key")).unwrap();
-    assert!(result.is_some());
-
-    // Unmount
-    store.unmount("data").unwrap();
-
-    // Verify it's no longer routable (should return NoRoute error or None)
-    let result = store.read(&path!("data/key"));
-    assert!(result.is_err() || result.unwrap().is_none());
-}
-
-#[test]
-fn unmount_allows_remount() {
-    let mut store = MountStore::new(TestFactory);
-    store.mount("data", MountConfig::Memory).unwrap();
-    store.write(&path!("data/key"), Record::parsed(Value::Integer(1))).unwrap();
-
-    store.unmount("data").unwrap();
-    store.mount("data", MountConfig::Memory).unwrap();
-
-    // New mount should be empty
-    let result = store.read(&path!("data/key")).unwrap();
-    assert!(result.is_none());
-}
-
-#[test]
-fn unmount_priority_preserved() {
-    let mut store = MountStore::new(TestFactory);
-
-    // Mount two stores at overlapping paths
-    store.mount("data", MountConfig::Memory).unwrap();
-    store.mount("data/nested", MountConfig::Memory).unwrap();
-
-    // Write to nested
-    store.write(&path!("data/nested/key"), Record::parsed(Value::Integer(1))).unwrap();
-
-    // Unmount nested
-    store.unmount("data/nested").unwrap();
-
-    // data should still work
-    store.write(&path!("data/other"), Record::parsed(Value::Integer(2))).unwrap();
-    let result = store.read(&path!("data/other")).unwrap();
-    assert!(result.is_some());
-}
-```
-
-## Files Changed
-
-- `packages/core-store/src/overlay_store.rs` - Add `remove_layer()`
-- `packages/core-store/src/mount_store.rs` - Fix `unmount()`
-- `packages/core-store/src/mount_store.rs` - Add tests
-
-## Complexity
-
-Low - Two small changes, well-contained.
+All passing. See test modules in each file.

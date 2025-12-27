@@ -2,27 +2,57 @@
 
 Decision: **Everything is a store.** These plans fix the abstractions that currently break that principle.
 
-## Plans
+## Status (Updated 2025-12-27)
 
-1. [Fix Unmount](./01-fix-unmount.md) - Actually remove stores from overlay on unmount
-2. [Idempotent HTTP Broker](./02-idempotent-http-broker.md) - Reads don't destroy state
-3. [Filesystem Position](./03-filesystem-position.md) - Position as addressable state
-4. [Registers as Store](./04-registers-as-store.md) - Mount at `/ctx/registers/`
-5. [Error Type Cleanup](./05-error-cleanup.md) - Structured, contextual errors
-6. [Document Mutability](./06-document-mutability.md) - Explain `&mut self` decision
-7. [Docs Router](./07-docs-router.md) - Auto-discover and route to store docs
+### Completed
 
-## Implementation Order
+1. **[Fix Unmount](./01-fix-unmount.md)** - ✅ DONE
+   - `OverlayStore.unmount()` correctly removes from the PathTrie
+   - `MountStore.unmount()` also cascade-removes redirects
 
-Recommended sequence based on dependencies:
+2. **[Overlay Trie](./06-overlay-trie.md)** - ✅ DONE
+   - `PathTrie<T>` implemented in `packages/core-store/src/path_trie.rs`
+   - `OverlayStore` wraps `PathTrie<RouteTarget>` with fallthrough routing
 
-1. **Error types** (Plan 5) - Foundation for cleaner error handling
-2. **Unmount fix** (Plan 1) - Simple, self-contained, **required for Plan 7**
-3. **Docs router** (Plan 7) - Adds redirects to OverlayStore, enables auto-discovery
-4. **HTTP broker** (Plan 2) - Medium complexity, enables testing patterns
-5. **Filesystem position** (Plan 3) - Builds on error types, broker patterns
-6. **Registers as store** (Plan 4) - Larger refactor, can use docs router for help
-7. **Document mutability** (Plan 6) - Documentation, do alongside others
+3. **[Docs Router](./07-docs-router.md)** + **[Completion](./07b-docs-router-completion.md)** - ✅ DONE
+   - `RouteTarget` enum with `Store` and `Redirect` variants
+   - Cycle detection via visited set
+   - `HelpStore` as pure aggregator with search, meta, topic listing
+   - `ReplDocsStore` provides REPL documentation
+   - Mount-time discovery creates redirects from `/ctx/help/{name}` to `{mount}/docs`
+   - Cascade unmount removes redirects
+
+4. **[Idempotent HTTP Broker](./02-idempotent-http-broker.md)** - ✅ DONE
+   - `SyncRequestHandle` caches response after first read
+   - Subsequent reads return cached result (idempotent)
+   - Explicit deletion via `write null`
+
+5. **[Filesystem Position](./03-filesystem-position.md)** - ✅ DONE
+   - `FileHandle` explicitly tracks `position: u64`
+   - Position queryable at `/handles/{id}/position`
+   - Read/write at offset via `/handles/{id}/at/{offset}`
+
+### In Progress / Still Relevant
+
+6. **[Registers as Store](./04-registers-as-store.md)** - Partially done
+   - `RegisterStore` exists and implements `Reader`/`Writer`
+   - BUT it's still embedded in `StoreContext`, not mounted at `/ctx/registers/`
+   - `@` syntax still handled specially in commands, not as sugar
+
+7. **[Error Type Cleanup](./05-error-cleanup.md)** - ✅ DONE
+   - `structfs_core_store::Error` has no `Other` variant
+   - Replaced with structured `Error::Store { store, operation, message }`
+   - HTTP crate's `Error::Other` is intentional (HTTP-specific, converts to `CoreError::store()`)
+
+8. **[Document Mutability](./06-document-mutability.md)** - Still needed
+   - Documentation task explaining `&mut self` decision
+
+## Implementation Priority
+
+**7 of 8 plans are complete.** Remaining work:
+
+1. **Registers as Store** (Plan 4) - Mount at `/ctx/registers/`, make `@` syntax pure sugar
+2. **Document Mutability** (Plan 6) - Write the documentation
 
 ## Testing Strategy
 

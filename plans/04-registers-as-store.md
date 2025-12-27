@@ -1,6 +1,22 @@
 # Plan 4: Registers as a Mounted Store
 
-## Problem
+## Status: PARTIALLY DONE
+
+`RegisterStore` exists and implements `Reader`/`Writer`, but it's still embedded in `StoreContext` rather than mounted at `/ctx/registers/`. The `@` syntax is still handled specially in commands.
+
+## Current State (2025-12-27)
+
+What exists:
+- `RegisterStore` struct in `packages/repl/src/store_context.rs` (lines 94-200)
+- Implements `Reader` and `Writer` traits
+- Comprehensive tests for RegisterStore functionality
+
+What's still needed:
+- Mount RegisterStore at `/ctx/registers/` instead of embedding in StoreContext
+- Make `@name` syntax pure sugar that expands to `/ctx/registers/name`
+- Remove the `registers` field from `StoreContext` struct
+
+## Problem (Original)
 
 Registers use special `@name` syntax instead of being a mounted store. This breaks uniformity - registers aren't addressable by normal paths.
 

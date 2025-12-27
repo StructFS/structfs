@@ -1,5 +1,13 @@
 # Plan 6: Document &mut self Decision
 
+## Status: STILL RELEVANT
+
+This is a documentation task. The `&mut self` decision is correct, but it should be documented for future maintainers.
+
+## Current State (2025-12-27)
+
+The codebase uses `&mut self` for `Reader::read()` and `Writer::write()`. This is intentional but not documented. The documentation explaining the rationale should be added.
+
 ## The Decision
 
 **Keep `&mut self` in Reader/Writer traits.** This is intentional, not accidental.
