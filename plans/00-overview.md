@@ -10,17 +10,19 @@ Decision: **Everything is a store.** These plans fix the abstractions that curre
 4. [Registers as Store](./04-registers-as-store.md) - Mount at `/ctx/registers/`
 5. [Error Type Cleanup](./05-error-cleanup.md) - Structured, contextual errors
 6. [Document Mutability](./06-document-mutability.md) - Explain `&mut self` decision
+7. [Docs Router](./07-docs-router.md) - Auto-discover and route to store docs
 
 ## Implementation Order
 
 Recommended sequence based on dependencies:
 
 1. **Error types** (Plan 5) - Foundation for cleaner error handling
-2. **Unmount fix** (Plan 1) - Simple, self-contained
-3. **HTTP broker** (Plan 2) - Medium complexity, enables testing patterns
-4. **Filesystem position** (Plan 3) - Builds on error types, broker patterns
-5. **Registers as store** (Plan 4) - Larger refactor, touches multiple files
-6. **Document mutability** (Plan 6) - Documentation, do alongside others
+2. **Unmount fix** (Plan 1) - Simple, self-contained, **required for Plan 7**
+3. **Docs router** (Plan 7) - Adds redirects to OverlayStore, enables auto-discovery
+4. **HTTP broker** (Plan 2) - Medium complexity, enables testing patterns
+5. **Filesystem position** (Plan 3) - Builds on error types, broker patterns
+6. **Registers as store** (Plan 4) - Larger refactor, can use docs router for help
+7. **Document mutability** (Plan 6) - Documentation, do alongside others
 
 ## Testing Strategy
 
