@@ -43,7 +43,7 @@ impl RequestStatus {
     }
 
     pub fn complete(id: String) -> Self {
-        let response_path = format!("handles/{}/response", id);
+        let response_path = format!("outstanding/{}/response", id);
         Self {
             id,
             state: RequestState::Complete,
@@ -99,7 +99,7 @@ mod tests {
         assert!(status.error.is_none());
         assert_eq!(
             status.response_path,
-            Some("handles/456/response".to_string())
+            Some("outstanding/456/response".to_string())
         );
     }
 
