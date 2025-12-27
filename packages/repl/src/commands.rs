@@ -425,19 +425,14 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
 
     match ctx.write(&path, value) {
         Ok(result_path) => {
-            let full_path = if result_path.to_string().starts_with(&path.to_string()) {
-                result_path.clone()
-            } else {
-                path.join(&result_path)
-            };
+            // OverlayStore already returns the full path with mount prefix
+            let path_string = format_path(&result_path);
 
-            let path_string = format_path(&full_path);
-
-            let output = if full_path != path && !result_path.is_empty() {
+            let output = if result_path != path && !result_path.is_empty() {
                 format!(
                     "{}\n{} {}",
                     Color::Green.paint("ok"),
-                    Color::Cyan.paint("result path:"),
+                    Color::Cyan.paint("→"),
                     path_string
                 )
             } else {

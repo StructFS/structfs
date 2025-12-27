@@ -20,12 +20,77 @@ pub enum OpenMode {
     CreateNew,
 }
 
-/// An open file handle.
+/// Encoding for file content on read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentEncoding {
+    /// Return content as base64-encoded string (default)
+    #[default]
+    Base64,
+    /// Return content as UTF-8 string
+    Utf8,
+    /// Return content as raw bytes
+    Bytes,
+}
+
+/// An open file handle with explicit position tracking.
 struct FileHandle {
     file: File,
     path: String,
     #[allow(dead_code)]
     mode: OpenMode,
+    /// Explicit position tracking (mirrors file.stream_position())
+    position: u64,
+    /// Encoding for read content
+    encoding: ContentEncoding,
+}
+
+/// Operations that can be performed on a file handle via path.
+#[derive(Debug, PartialEq)]
+enum HandleOperation {
+    /// Read from current position to EOF: /handles/{id}
+    ReadToEnd,
+    /// Read/write at offset: /handles/{id}/at/{offset}
+    AtOffset { offset: u64 },
+    /// Read n bytes from offset: /handles/{id}/at/{offset}/len/{n}
+    ReadAtLen { offset: u64, length: u64 },
+    /// Get/set position: /handles/{id}/position
+    Position,
+    /// Get file metadata: /handles/{id}/meta
+    Meta,
+    /// Close handle: /handles/{id}/close
+    Close,
+}
+
+/// Parse a handle path into an operation.
+/// Returns (handle_id, operation) or None if invalid.
+fn parse_handle_operation(path: &Path) -> Option<(u64, HandleOperation)> {
+    if path.len() < 2 || path[0] != "handles" {
+        return None;
+    }
+
+    let id: u64 = path[1].parse().ok()?;
+
+    let op = match path.len() {
+        2 => HandleOperation::ReadToEnd,
+        3 => match path[2].as_str() {
+            "position" => HandleOperation::Position,
+            "meta" => HandleOperation::Meta,
+            "close" => HandleOperation::Close,
+            _ => return None,
+        },
+        4 if path[2] == "at" => {
+            let offset: u64 = path[3].parse().ok()?;
+            HandleOperation::AtOffset { offset }
+        }
+        6 if path[2] == "at" && path[4] == "len" => {
+            let offset: u64 = path[3].parse().ok()?;
+            let length: u64 = path[5].parse().ok()?;
+            HandleOperation::ReadAtLen { offset, length }
+        }
+        _ => return None,
+    };
+
+    Some((id, op))
 }
 
 /// Store for filesystem operations.
@@ -78,55 +143,108 @@ impl FsStore {
             return Ok(Some(Value::Map(map)));
         }
 
-        if path[0] == "handles" {
-            return self.read_handles(path);
-        }
-
+        // Handles are processed in Reader::read() directly
         Ok(None)
     }
 
-    fn read_handles(&self, path: &Path) -> Result<Option<Value>, Error> {
-        if path.len() == 1 {
-            let handles: Vec<Value> = self
-                .handles
-                .iter()
-                .map(|(id, h)| {
-                    let mut m = BTreeMap::new();
-                    m.insert("id".to_string(), Value::Integer(*id as i64));
-                    m.insert("path".to_string(), Value::String(h.path.clone()));
-                    Value::Map(m)
-                })
-                .collect();
-            return Ok(Some(Value::Array(handles)));
+    fn read_handles_listing(&self) -> Value {
+        // Return just the IDs as an array: [0, 1, 2, ...]
+        let ids: Vec<Value> = self
+            .handles
+            .keys()
+            .map(|id| Value::Integer(*id as i64))
+            .collect();
+        Value::Array(ids)
+    }
+
+    fn read_handle_meta(&self, handle: &FileHandle) -> Result<Value, Error> {
+        let metadata = fs::metadata(&handle.path)?;
+
+        let mut m = BTreeMap::new();
+        m.insert("size".to_string(), Value::Integer(metadata.len() as i64));
+        m.insert("is_file".to_string(), Value::Bool(metadata.is_file()));
+        m.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
+        m.insert("path".to_string(), Value::String(handle.path.clone()));
+        Ok(Value::Map(m))
+    }
+
+    fn read_handle_position(&self, handle: &FileHandle) -> Value {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "position".to_string(),
+            Value::Integer(handle.position as i64),
+        );
+        Value::Map(m)
+    }
+
+    fn encode_content(buffer: Vec<u8>, encoding: ContentEncoding) -> Result<Value, Error> {
+        match encoding {
+            ContentEncoding::Base64 => {
+                let encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buffer);
+                Ok(Value::String(encoded))
+            }
+            ContentEncoding::Utf8 => {
+                let text = String::from_utf8(buffer)
+                    .map_err(|e| Error::store("fs", "read", format!("Invalid UTF-8: {}", e)))?;
+                Ok(Value::String(text))
+            }
+            ContentEncoding::Bytes => Ok(Value::Bytes(buffer)),
         }
+    }
 
-        let handle_id: u64 = path[1]
-            .parse()
-            .map_err(|_| Error::store("fs", "read", format!("Invalid handle ID: {}", path[1])))?;
-
+    fn read_from_position(&mut self, handle_id: u64) -> Result<Value, Error> {
         let handle = self
             .handles
-            .get(&handle_id)
+            .get_mut(&handle_id)
             .ok_or_else(|| Error::store("fs", "read", format!("Handle {} not found", handle_id)))?;
 
-        if path.len() == 2 {
-            let mut m = BTreeMap::new();
-            m.insert("handle".to_string(), Value::Integer(handle_id as i64));
-            m.insert("path".to_string(), Value::String(handle.path.clone()));
-            return Ok(Some(Value::Map(m)));
-        }
+        let mut buffer = Vec::new();
+        handle.file.read_to_end(&mut buffer)?;
+        handle.position = handle.file.stream_position()?;
+        let encoding = handle.encoding;
 
-        if path.len() == 3 && path[2] == "meta" {
-            let metadata = fs::metadata(&handle.path)?;
+        Self::encode_content(buffer, encoding)
+    }
 
-            let mut m = BTreeMap::new();
-            m.insert("size".to_string(), Value::Integer(metadata.len() as i64));
-            m.insert("is_file".to_string(), Value::Bool(metadata.is_file()));
-            m.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
-            return Ok(Some(Value::Map(m)));
-        }
+    fn read_at_offset(&mut self, handle_id: u64, offset: u64) -> Result<Value, Error> {
+        let handle = self
+            .handles
+            .get_mut(&handle_id)
+            .ok_or_else(|| Error::store("fs", "read", format!("Handle {} not found", handle_id)))?;
 
-        Ok(None)
+        handle.file.seek(SeekFrom::Start(offset))?;
+        handle.position = offset;
+
+        let mut buffer = Vec::new();
+        handle.file.read_to_end(&mut buffer)?;
+        handle.position = handle.file.stream_position()?;
+        let encoding = handle.encoding;
+
+        Self::encode_content(buffer, encoding)
+    }
+
+    fn read_at_offset_len(
+        &mut self,
+        handle_id: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Value, Error> {
+        let handle = self
+            .handles
+            .get_mut(&handle_id)
+            .ok_or_else(|| Error::store("fs", "read", format!("Handle {} not found", handle_id)))?;
+
+        handle.file.seek(SeekFrom::Start(offset))?;
+        handle.position = offset;
+
+        let mut buffer = vec![0u8; length as usize];
+        let bytes_read = handle.file.read(&mut buffer)?;
+        buffer.truncate(bytes_read);
+        handle.position = handle.file.stream_position()?;
+        let encoding = handle.encoding;
+
+        Self::encode_content(buffer, encoding)
     }
 
     fn parse_open_mode(value: &Value) -> OpenMode {
@@ -144,6 +262,19 @@ impl FsStore {
         OpenMode::Read
     }
 
+    fn parse_encoding(value: &Value) -> ContentEncoding {
+        if let Value::Map(map) = value {
+            if let Some(Value::String(enc)) = map.get("encoding") {
+                return match enc.to_lowercase().as_str() {
+                    "utf8" | "utf-8" | "text" => ContentEncoding::Utf8,
+                    "bytes" | "raw" => ContentEncoding::Bytes,
+                    _ => ContentEncoding::Base64,
+                };
+            }
+        }
+        ContentEncoding::Base64
+    }
+
     fn get_path_from_value(value: &Value) -> Option<String> {
         if let Value::Map(map) = value {
             if let Some(Value::String(p)) = map.get("path") {
@@ -154,75 +285,116 @@ impl FsStore {
     }
 
     fn write_handle(&mut self, path: &Path, value: &Value) -> Result<Path, Error> {
-        if path.len() < 2 {
-            return Err(Error::store("fs", "write", "Invalid handle path"));
-        }
+        let (handle_id, op) = parse_handle_operation(path)
+            .ok_or_else(|| Error::store("fs", "write", format!("Invalid handle path: {}", path)))?;
 
-        let handle_id: u64 = path[1]
-            .parse()
-            .map_err(|_| Error::store("fs", "write", format!("Invalid handle ID: {}", path[1])))?;
+        match op {
+            HandleOperation::Close => {
+                self.handles.remove(&handle_id).ok_or_else(|| {
+                    Error::store("fs", "write", format!("Handle {} not found", handle_id))
+                })?;
+                Ok(path.clone())
+            }
 
-        // Handle close operation
-        if path.len() == 3 && path[2] == "close" {
-            self.handles.remove(&handle_id).ok_or_else(|| {
-                Error::store("fs", "write", format!("Handle {} not found", handle_id))
-            })?;
-            return Ok(path.clone());
-        }
-
-        // Handle seek operation
-        if path.len() == 3 && path[2] == "seek" {
-            let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
-                Error::store("fs", "write", format!("Handle {} not found", handle_id))
-            })?;
-
-            let pos = if let Value::Map(map) = value {
-                if let Some(Value::Integer(p)) = map.get("pos") {
-                    *p as u64
+            HandleOperation::Position => {
+                // Set position: write {"pos": n} to /handles/{id}/position
+                let pos = if let Value::Map(map) = value {
+                    if let Some(Value::Integer(p)) = map.get("pos") {
+                        *p as u64
+                    } else {
+                        return Err(Error::store("fs", "write", "position requires 'pos' field"));
+                    }
                 } else {
-                    return Err(Error::store("fs", "seek", "seek requires 'pos' field"));
-                }
-            } else {
-                return Err(Error::store("fs", "seek", "seek requires a map with 'pos'"));
-            };
-
-            handle.file.seek(SeekFrom::Start(pos))?;
-
-            return Ok(path.clone());
-        }
-
-        // Write content to file
-        if path.len() == 2 {
-            let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
-                Error::store("fs", "write", format!("Handle {} not found", handle_id))
-            })?;
-
-            let content = match value {
-                Value::String(s) => {
-                    // Try to decode as base64, fall back to UTF-8
-                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-                        .unwrap_or_else(|_| s.as_bytes().to_vec())
-                }
-                Value::Bytes(b) => b.to_vec(),
-                _ => {
                     return Err(Error::store(
                         "fs",
                         "write",
-                        "File content must be a string or bytes",
+                        "position requires a map with 'pos'",
                     ));
-                }
-            };
+                };
 
-            handle.file.write_all(&content)?;
+                let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
+                    Error::store("fs", "write", format!("Handle {} not found", handle_id))
+                })?;
 
-            return Ok(path.clone());
+                handle.file.seek(SeekFrom::Start(pos))?;
+                handle.position = pos;
+                Ok(path.clone())
+            }
+
+            HandleOperation::ReadToEnd => {
+                // Write at current position
+                self.write_content_at_current(handle_id, value)?;
+                Ok(path.clone())
+            }
+
+            HandleOperation::AtOffset { offset } => {
+                // Write at specific offset
+                self.write_content_at_offset(handle_id, offset, value)?;
+                Ok(path.clone())
+            }
+
+            HandleOperation::ReadAtLen { .. } | HandleOperation::Meta => Err(Error::store(
+                "fs",
+                "write",
+                format!("Cannot write to path: {}", path),
+            )),
         }
+    }
 
-        Err(Error::store(
-            "fs",
-            "write",
-            format!("Unknown handle operation: {}", path),
-        ))
+    fn decode_content(value: &Value, encoding: ContentEncoding) -> Result<Vec<u8>, Error> {
+        match value {
+            Value::String(s) => match encoding {
+                ContentEncoding::Base64 => {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                        .map_err(|e| Error::store("fs", "write", format!("Invalid base64: {}", e)))
+                }
+                ContentEncoding::Utf8 | ContentEncoding::Bytes => Ok(s.as_bytes().to_vec()),
+            },
+            Value::Bytes(b) => Ok(b.to_vec()),
+            _ => Err(Error::store(
+                "fs",
+                "write",
+                "File content must be a string or bytes",
+            )),
+        }
+    }
+
+    fn write_content_at_current(&mut self, handle_id: u64, value: &Value) -> Result<(), Error> {
+        let encoding = self
+            .handles
+            .get(&handle_id)
+            .ok_or_else(|| Error::store("fs", "write", format!("Handle {} not found", handle_id)))?
+            .encoding;
+
+        let content = Self::decode_content(value, encoding)?;
+
+        let handle = self.handles.get_mut(&handle_id).unwrap();
+        handle.file.write_all(&content)?;
+        handle.position = handle.file.stream_position()?;
+        Ok(())
+    }
+
+    fn write_content_at_offset(
+        &mut self,
+        handle_id: u64,
+        offset: u64,
+        value: &Value,
+    ) -> Result<(), Error> {
+        let encoding = self
+            .handles
+            .get(&handle_id)
+            .ok_or_else(|| Error::store("fs", "write", format!("Handle {} not found", handle_id)))?
+            .encoding;
+
+        let content = Self::decode_content(value, encoding)?;
+
+        let handle = self.handles.get_mut(&handle_id).unwrap();
+        handle.file.seek(SeekFrom::Start(offset))?;
+        handle.position = offset;
+
+        handle.file.write_all(&content)?;
+        handle.position = handle.file.stream_position()?;
+        Ok(())
     }
 }
 
@@ -234,23 +406,45 @@ impl Default for FsStore {
 
 impl Reader for FsStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        // Handle reading file content from handles
-        if from.len() == 2 && from[0] == "handles" {
-            let handle_id: u64 = from[1].parse().map_err(|_| {
-                Error::store("fs", "read", format!("Invalid handle ID: {}", from[1]))
+        // Handle /handles listing
+        if from.len() == 1 && from[0] == "handles" {
+            return Ok(Some(Record::parsed(self.read_handles_listing())));
+        }
+
+        // Handle operations on specific handles
+        if from.len() >= 2 && from[0] == "handles" {
+            let (handle_id, op) = parse_handle_operation(from).ok_or_else(|| {
+                Error::store("fs", "read", format!("Invalid handle path: {}", from))
             })?;
 
-            let handle = self.handles.get_mut(&handle_id).ok_or_else(|| {
-                Error::store("fs", "read", format!("Handle {} not found", handle_id))
-            })?;
+            let value = match op {
+                HandleOperation::ReadToEnd => self.read_from_position(handle_id)?,
+                HandleOperation::AtOffset { offset } => self.read_at_offset(handle_id, offset)?,
+                HandleOperation::ReadAtLen { offset, length } => {
+                    self.read_at_offset_len(handle_id, offset, length)?
+                }
+                HandleOperation::Position => {
+                    let handle = self.handles.get(&handle_id).ok_or_else(|| {
+                        Error::store("fs", "read", format!("Handle {} not found", handle_id))
+                    })?;
+                    self.read_handle_position(handle)
+                }
+                HandleOperation::Meta => {
+                    let handle = self.handles.get(&handle_id).ok_or_else(|| {
+                        Error::store("fs", "read", format!("Handle {} not found", handle_id))
+                    })?;
+                    self.read_handle_meta(handle)?
+                }
+                HandleOperation::Close => {
+                    return Err(Error::store(
+                        "fs",
+                        "read",
+                        format!("Cannot read from path: {}", from),
+                    ));
+                }
+            };
 
-            let mut buffer = Vec::new();
-            handle.file.read_to_end(&mut buffer)?;
-
-            // Return as base64-encoded bytes
-            let encoded =
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buffer);
-            return Ok(Some(Record::parsed(Value::String(encoded))));
+            return Ok(Some(Record::parsed(value)));
         }
 
         Ok(self.read_value(from)?.map(Record::parsed))
@@ -284,6 +478,7 @@ impl Writer for FsStore {
                     .ok_or_else(|| Error::store("fs", "open", "open requires 'path' field"))?;
 
                 let mode = Self::parse_open_mode(&value);
+                let encoding = Self::parse_encoding(&value);
 
                 let file = match mode {
                     OpenMode::Read => File::open(&file_path),
@@ -311,6 +506,8 @@ impl Writer for FsStore {
                         file,
                         path: file_path,
                         mode,
+                        position: 0,
+                        encoding,
                     },
                 );
 
@@ -486,10 +683,11 @@ mod tests {
 
         let mut store = FsStore::new();
 
-        // Open for write
+        // Open for write with UTF-8 encoding
         let mut open_map = BTreeMap::new();
         open_map.insert("path".to_string(), Value::String(path_str.clone()));
         open_map.insert("mode".to_string(), Value::String("write".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("utf8".to_string()));
 
         let handle_path = store
             .write(&path!("open"), Record::parsed(Value::Map(open_map)))
@@ -553,6 +751,7 @@ mod tests {
         let mut open_map = BTreeMap::new();
         open_map.insert("path".to_string(), Value::String(path_str.clone()));
         open_map.insert("mode".to_string(), Value::String("append".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("utf8".to_string()));
 
         let handle_path = store
             .write(&path!("open"), Record::parsed(Value::Map(open_map)))
@@ -655,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_seek() {
+    fn handle_position_set() {
         let mut temp = NamedTempFile::new().unwrap();
         writeln!(temp, "0123456789").unwrap();
         let temp_path = temp.path().to_string_lossy().to_string();
@@ -670,18 +869,28 @@ mod tests {
             .write(&path!("open"), Record::parsed(Value::Map(open_map)))
             .unwrap();
 
-        // Seek to position
-        let seek_path = handle_path.join(&path!("seek"));
-        let mut seek_map = BTreeMap::new();
-        seek_map.insert("pos".to_string(), Value::Integer(5));
+        // Set position via write to /position
+        let position_path = handle_path.join(&path!("position"));
+        let mut pos_map = BTreeMap::new();
+        pos_map.insert("pos".to_string(), Value::Integer(5));
 
         store
-            .write(&seek_path, Record::parsed(Value::Map(seek_map)))
+            .write(&position_path, Record::parsed(Value::Map(pos_map)))
             .unwrap();
+
+        // Read position to verify
+        let record = store.read(&position_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("position"), Some(&Value::Integer(5)));
+            }
+            _ => panic!("Expected map"),
+        }
     }
 
     #[test]
-    fn handle_seek_missing_pos_error() {
+    fn handle_position_missing_pos_error() {
         let mut temp = NamedTempFile::new().unwrap();
         writeln!(temp, "content").unwrap();
         let temp_path = temp.path().to_string_lossy().to_string();
@@ -696,15 +905,15 @@ mod tests {
             .write(&path!("open"), Record::parsed(Value::Map(open_map)))
             .unwrap();
 
-        let seek_path = handle_path.join(&path!("seek"));
-        let seek_map = BTreeMap::new();
+        let position_path = handle_path.join(&path!("position"));
+        let pos_map = BTreeMap::new();
 
-        let result = store.write(&seek_path, Record::parsed(Value::Map(seek_map)));
+        let result = store.write(&position_path, Record::parsed(Value::Map(pos_map)));
         assert!(result.is_err());
     }
 
     #[test]
-    fn handle_seek_invalid_type_error() {
+    fn handle_position_invalid_type_error() {
         let mut temp = NamedTempFile::new().unwrap();
         writeln!(temp, "content").unwrap();
         let temp_path = temp.path().to_string_lossy().to_string();
@@ -719,8 +928,11 @@ mod tests {
             .write(&path!("open"), Record::parsed(Value::Map(open_map)))
             .unwrap();
 
-        let seek_path = handle_path.join(&path!("seek"));
-        let result = store.write(&seek_path, Record::parsed(Value::String("5".to_string())));
+        let position_path = handle_path.join(&path!("position"));
+        let result = store.write(
+            &position_path,
+            Record::parsed(Value::String("5".to_string())),
+        );
         assert!(result.is_err());
     }
 
@@ -931,5 +1143,429 @@ mod tests {
     fn open_mode_default() {
         let mode = OpenMode::default();
         assert_eq!(mode, OpenMode::Read);
+    }
+
+    #[test]
+    fn read_at_offset() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "0123456789").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read from offset 5 to end
+        let at_path = handle_path.join(&path!("at/5"));
+        let record = store.read(&at_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => {
+                let decoded =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &s).unwrap();
+                assert_eq!(decoded, b"56789");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn read_at_offset_len() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "0123456789").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read 3 bytes starting at offset 2
+        let at_path = handle_path.join(&path!("at/2/len/3"));
+        let record = store.read(&at_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => {
+                let decoded =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &s).unwrap();
+                assert_eq!(decoded, b"234");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn position_persists_after_read() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "0123456789").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read 5 bytes from position 0
+        let at_path = handle_path.join(&path!("at/0/len/5"));
+        store.read(&at_path).unwrap();
+
+        // Position should now be 5
+        let position_path = handle_path.join(&path!("position"));
+        let record = store.read(&position_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("position"), Some(&Value::Integer(5)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn write_at_offset() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("write_at.txt");
+        std::fs::write(&file_path, "0123456789").unwrap();
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str.clone()));
+        open_map.insert("mode".to_string(), Value::String("readwrite".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("utf8".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Write "XXX" at position 3
+        let at_path = handle_path.join(&path!("at/3"));
+        store
+            .write(&at_path, Record::parsed(Value::String("XXX".to_string())))
+            .unwrap();
+
+        // Close and verify file content
+        let close_path = handle_path.join(&path!("close"));
+        store
+            .write(&close_path, Record::parsed(Value::Null))
+            .unwrap();
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "012XXX6789");
+    }
+
+    #[test]
+    fn position_query_initial() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Position should start at 0
+        let position_path = handle_path.join(&path!("position"));
+        let record = store.read(&position_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("position"), Some(&Value::Integer(0)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn read_from_close_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Reading from /close should error
+        let close_path = handle_path.join(&path!("close"));
+        let result = store.read(&close_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_to_meta_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Writing to /meta should error
+        let meta_path = handle_path.join(&path!("meta"));
+        let result = store.write(&meta_path, Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_to_at_len_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        std::fs::write(&file_path, "content").unwrap();
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str));
+        open_map.insert("mode".to_string(), Value::String("readwrite".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Writing to /at/{offset}/len/{n} should error (no fixed-length writes)
+        let at_len_path = handle_path.join(&path!("at/0/len/5"));
+        let result = store.write(&at_len_path, Record::parsed(Value::String("x".to_string())));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_handle_subpath_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Invalid sub-path should error
+        let invalid_path = handle_path.join(&path!("invalid"));
+        let result = store.read(&invalid_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_handle_operation_coverage() {
+        // Test the parser directly for coverage
+        assert!(parse_handle_operation(&path!("")).is_none());
+        assert!(parse_handle_operation(&path!("other")).is_none());
+        assert!(parse_handle_operation(&path!("handles/abc")).is_none());
+
+        // Valid paths
+        let (id, op) = parse_handle_operation(&path!("handles/42")).unwrap();
+        assert_eq!(id, 42);
+        assert_eq!(op, HandleOperation::ReadToEnd);
+
+        let (id, op) = parse_handle_operation(&path!("handles/5/meta")).unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(op, HandleOperation::Meta);
+
+        let (id, op) = parse_handle_operation(&path!("handles/5/close")).unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(op, HandleOperation::Close);
+
+        let (id, op) = parse_handle_operation(&path!("handles/5/position")).unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(op, HandleOperation::Position);
+
+        let (id, op) = parse_handle_operation(&path!("handles/5/at/100")).unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(op, HandleOperation::AtOffset { offset: 100 });
+
+        let (id, op) = parse_handle_operation(&path!("handles/5/at/100/len/50")).unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(
+            op,
+            HandleOperation::ReadAtLen {
+                offset: 100,
+                length: 50
+            }
+        );
+
+        // Invalid sub-paths
+        assert!(parse_handle_operation(&path!("handles/5/unknown")).is_none());
+        assert!(parse_handle_operation(&path!("handles/5/at/abc")).is_none());
+        assert!(parse_handle_operation(&path!("handles/5/at/10/len/abc")).is_none());
+        assert!(parse_handle_operation(&path!("handles/5/at")).is_none());
+    }
+
+    #[test]
+    fn open_with_utf8_encoding() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "Hello, UTF-8!").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("utf8".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read should return plain UTF-8 string, not base64
+        let record = store.read(&handle_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => {
+                assert_eq!(s, "Hello, UTF-8!");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn open_with_bytes_encoding() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "raw bytes").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("bytes".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read should return raw bytes
+        let record = store.read(&handle_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::Bytes(b) => {
+                assert_eq!(&b[..], b"raw bytes");
+            }
+            _ => panic!("Expected bytes, got {:?}", value),
+        }
+    }
+
+    #[test]
+    fn utf8_encoding_with_at_offset() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "Hello, World!").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("utf8".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Read from offset 7
+        let at_path = handle_path.join(&path!("at/7"));
+        let record = store.read(&at_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => {
+                assert_eq!(s, "World!");
+            }
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn content_encoding_default() {
+        let enc = ContentEncoding::default();
+        assert_eq!(enc, ContentEncoding::Base64);
+    }
+
+    #[test]
+    fn utf8_encoding_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("utf8_test.txt");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open with UTF-8 encoding
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(path_str));
+        open_map.insert("mode".to_string(), Value::String("readwrite".to_string()));
+        open_map.insert("encoding".to_string(), Value::String("utf8".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        // Write plain UTF-8 string (not base64 encoded)
+        store
+            .write(
+                &handle_path,
+                Record::parsed(Value::String("Hello, UTF-8 world!".to_string())),
+            )
+            .unwrap();
+
+        // Seek back to beginning
+        let position_path = handle_path.join(&path!("position"));
+        let mut pos_map = BTreeMap::new();
+        pos_map.insert("pos".to_string(), Value::Integer(0));
+        store
+            .write(&position_path, Record::parsed(Value::Map(pos_map)))
+            .unwrap();
+
+        // Read should return plain UTF-8
+        let record = store.read(&handle_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        match value {
+            Value::String(s) => {
+                assert_eq!(s, "Hello, UTF-8 world!");
+            }
+            _ => panic!("Expected string"),
+        }
     }
 }
