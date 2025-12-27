@@ -24,8 +24,6 @@ pub enum CommandResult {
     Error(String),
     /// User requested to exit
     Exit,
-    /// Show help
-    Help,
 }
 
 impl CommandResult {
@@ -218,7 +216,7 @@ fn execute_command(input: &str, ctx: &mut StoreContext) -> CommandResult {
     let args = parts.next().unwrap_or("").trim();
 
     match command.to_lowercase().as_str() {
-        "help" | "?" => CommandResult::Help,
+        "help" | "?" => cmd_help(args, ctx),
         "exit" | "quit" | "q" => CommandResult::Exit,
         "read" | "get" | "r" => cmd_read(args, ctx),
         "write" | "set" | "w" => cmd_write(args, ctx),
@@ -487,6 +485,380 @@ fn cmd_registers(ctx: &mut StoreContext) -> CommandResult {
             output.trim_end().to_string(),
             Value::Array(names.into_iter().map(Value::String).collect()),
         )
+    }
+}
+
+fn cmd_help(args: &str, ctx: &mut StoreContext) -> CommandResult {
+    // Build the help path: /ctx/help or /ctx/help/<topic>
+    let help_path = if args.is_empty() {
+        "ctx/help".to_string()
+    } else {
+        // Support both "help http" and "help /ctx/http" styles
+        let topic = args.trim_start_matches('/');
+        format!("ctx/help/{}", topic)
+    };
+
+    let path = match structfs_core_store::Path::parse(&help_path) {
+        Ok(p) => p,
+        Err(e) => return CommandResult::Error(format!("Invalid help path: {}", e)),
+    };
+
+    match ctx.read(&path) {
+        Ok(Some(value)) => {
+            let output = format_help_value(&value, 0);
+            CommandResult::ok_with_capture(output, value)
+        }
+        Ok(None) => {
+            let suggestion = if args.is_empty() {
+                "The help system is not available.".to_string()
+            } else {
+                format!(
+                    "No help found for '{}'. Try 'help' for available topics.",
+                    args
+                )
+            };
+            CommandResult::ok_display(format!("{}", Color::Yellow.paint(suggestion)))
+        }
+        Err(e) => CommandResult::Error(format!("Help error: {}", e)),
+    }
+}
+
+/// Pretty-print a help Value with proper formatting
+fn format_help_value(value: &Value, indent: usize) -> String {
+    let indent_str = "  ".repeat(indent);
+
+    match value {
+        Value::Map(map) => {
+            let mut output = String::new();
+
+            // Handle title first if present
+            if let Some(Value::String(title)) = map.get("title") {
+                output.push_str(&format!(
+                    "{}\n\n",
+                    Style::new().bold().fg(Color::Cyan).paint(title)
+                ));
+            }
+
+            // Handle description
+            if let Some(Value::String(desc)) = map.get("description") {
+                output.push_str(&format!("{}{}\n\n", indent_str, desc));
+            }
+
+            // Handle error (for "not found" responses)
+            if let Some(Value::String(err)) = map.get("error") {
+                output.push_str(&format!("{}{}\n", indent_str, Color::Yellow.paint(err)));
+            }
+
+            // Handle hint
+            if let Some(Value::String(hint)) = map.get("hint") {
+                output.push_str(&format!("{}{}\n\n", indent_str, hint));
+            }
+
+            // Handle topics (from root help)
+            if let Some(Value::Map(topics)) = map.get("topics") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Topics:")
+                ));
+                for (key, val) in topics {
+                    if let Value::String(desc) = val {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Cyan.paint(key),
+                            desc
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle available_topics (from "not found" responses)
+            if let Some(Value::Array(topics)) = map.get("available_topics") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Available topics:")
+                ));
+                for topic in topics {
+                    if let Value::String(t) = topic {
+                        output.push_str(&format!("{}  {}\n", indent_str, Color::Cyan.paint(t)));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle store_docs hint
+            if let Some(Value::String(hint)) = map.get("store_docs") {
+                output.push_str(&format!(
+                    "{}{}\n\n",
+                    indent_str,
+                    Color::DarkGray.paint(hint)
+                ));
+            }
+
+            // Handle quick_start
+            if let Some(Value::Array(steps)) = map.get("quick_start") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Quick Start:")
+                ));
+                for step in steps {
+                    if let Value::String(s) = step {
+                        output.push_str(&format!("{}  {}\n", indent_str, Color::Green.paint(s)));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle paths (from store docs)
+            if let Some(Value::Map(paths)) = map.get("paths") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Paths:")
+                ));
+                for (path, desc) in paths {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Yellow.paint(path),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle example
+            if let Some(Value::Array(steps)) = map.get("example") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Example:")
+                ));
+                for step in steps {
+                    if let Value::String(s) = step {
+                        if s.starts_with('#') {
+                            output.push_str(&format!(
+                                "{}  {}\n",
+                                indent_str,
+                                Color::DarkGray.paint(s)
+                            ));
+                        } else {
+                            output.push_str(&format!(
+                                "{}  {}\n",
+                                indent_str,
+                                Color::Green.paint(s)
+                            ));
+                        }
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle commands (from REPL help topics)
+            if let Some(Value::Map(commands)) = map.get("commands") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Commands:")
+                ));
+                for (cmd, desc) in commands {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Cyan.paint(cmd),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle operations
+            if let Some(Value::Map(ops)) = map.get("operations") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Operations:")
+                ));
+                for (op, desc) in ops {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Yellow.paint(op),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle brokers
+            if let Some(Value::Map(brokers)) = map.get("brokers") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Brokers:")
+                ));
+                for (broker, desc) in brokers {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Yellow.paint(broker),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle request_format
+            if let Some(Value::Map(fmt)) = map.get("request_format") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Request Format:")
+                ));
+                for (field, desc) in fmt {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Cyan.paint(field),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle syntax
+            if let Some(Value::Map(syntax)) = map.get("syntax") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Syntax:")
+                ));
+                for (syn, desc) in syntax {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Yellow.paint(syn),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle mount_configs
+            if let Some(Value::Map(configs)) = map.get("mount_configs") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Mount Configs:")
+                ));
+                for (cfg, desc) in configs {
+                    if let Value::String(d) = desc {
+                        output.push_str(&format!(
+                            "{}  {} - {}\n",
+                            indent_str,
+                            Color::Cyan.paint(cfg),
+                            d
+                        ));
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle stores
+            if let Some(Value::Map(stores)) = map.get("stores") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Stores:")
+                ));
+                for (name, store_info) in stores {
+                    output.push_str(&format!(
+                        "{}  {}\n",
+                        indent_str,
+                        Style::new().bold().fg(Color::Cyan).paint(name)
+                    ));
+                    if let Value::Map(info) = store_info {
+                        if let Some(Value::String(d)) = info.get("description") {
+                            output.push_str(&format!("{}    {}\n", indent_str, d));
+                        }
+                        if let Some(Value::String(c)) = info.get("config") {
+                            output.push_str(&format!(
+                                "{}    Config: {}\n",
+                                indent_str,
+                                Color::Green.paint(c)
+                            ));
+                        }
+                    }
+                }
+                output.push('\n');
+            }
+
+            // Handle examples array (from REPL topics)
+            if let Some(Value::Array(examples)) = map.get("examples") {
+                output.push_str(&format!(
+                    "{}{}\n",
+                    indent_str,
+                    Style::new().bold().paint("Examples:")
+                ));
+                for example in examples {
+                    if let Value::Map(ex) = example {
+                        if let Some(Value::String(title)) = ex.get("title") {
+                            output.push_str(&format!(
+                                "{}  {}\n",
+                                indent_str,
+                                Style::new().bold().paint(title)
+                            ));
+                        }
+                        if let Some(Value::Array(steps)) = ex.get("steps") {
+                            for step in steps {
+                                if let Value::String(s) = step {
+                                    output.push_str(&format!(
+                                        "{}    {}\n",
+                                        indent_str,
+                                        Color::Green.paint(s)
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                output.push('\n');
+            }
+
+            output.trim_end().to_string()
+        }
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => {
+            let mut output = String::new();
+            for item in arr {
+                output.push_str(&format!(
+                    "{}• {}\n",
+                    indent_str,
+                    format_help_value(item, indent)
+                ));
+            }
+            output
+        }
+        other => {
+            let json = value_to_json(other.clone());
+            format_json(&json)
+        }
     }
 }
 
@@ -767,8 +1139,24 @@ mod tests {
     #[test]
     fn execute_help_command() {
         let mut ctx = StoreContext::new();
-        assert!(matches!(execute("help", &mut ctx), CommandResult::Help));
-        assert!(matches!(execute("?", &mut ctx), CommandResult::Help));
+        // Help command now reads from /ctx/help and returns Ok with output
+        let result = execute("help", &mut ctx);
+        assert!(matches!(
+            result,
+            CommandResult::Ok {
+                display: Some(_),
+                ..
+            }
+        ));
+
+        let result = execute("?", &mut ctx);
+        assert!(matches!(
+            result,
+            CommandResult::Ok {
+                display: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -59,9 +59,6 @@ impl ReplCore {
                 CommandResult::Error(msg) => {
                     io.write_output(Output::error(msg))?;
                 }
-                CommandResult::Help => {
-                    io.write_output(Output::normal(commands::format_help()))?;
-                }
                 CommandResult::Exit => {
                     io.write_output(Output::info("Goodbye!"))?;
                     io.flush()?;
