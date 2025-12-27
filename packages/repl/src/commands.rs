@@ -527,8 +527,14 @@ fn cmd_help(args: &str, ctx: &mut StoreContext) -> CommandResult {
 
     match ctx.read(&path) {
         Ok(Some(value)) => {
-            let formatted = format_help_value_with_path(&value, &display_path);
-            CommandResult::ok_with_capture(formatted, value)
+            // When showing root help (topic list), also include the built-in help
+            if args.is_empty() {
+                let formatted = format_help_root(&value);
+                CommandResult::ok_with_capture(formatted, value)
+            } else {
+                let formatted = format_help_value_with_path(&value, &display_path);
+                CommandResult::ok_with_capture(formatted, value)
+            }
         }
         Ok(None) => {
             let suggestion = if args.is_empty() {
@@ -543,6 +549,35 @@ fn cmd_help(args: &str, ctx: &mut StoreContext) -> CommandResult {
         }
         Err(e) => CommandResult::Error(format!("Help error: {}", e)),
     }
+}
+
+/// Format root help: show built-in commands plus available help topics
+fn format_help_root(topics: &Value) -> String {
+    // Start with the built-in help
+    let mut output = format_help();
+
+    // Add topics from HelpStore
+    if let Value::Array(topic_list) = topics {
+        if !topic_list.is_empty() {
+            output.push_str(&format!(
+                "\n{}\n",
+                Style::new().bold().paint("Available Help Topics")
+            ));
+            for topic in topic_list {
+                if let Value::String(t) = topic {
+                    output.push_str(&format!(
+                        "  {} {}\n",
+                        Color::Cyan.paint(format!("help {}", t)),
+                        Color::White
+                            .dimmed()
+                            .paint(format!("(read /ctx/help/{})", t))
+                    ));
+                }
+            }
+        }
+    }
+
+    output
 }
 
 /// Pretty-print a help Value with path shown after title
@@ -1500,13 +1535,31 @@ mod tests {
         let mut ctx = StoreContext::new();
         // Help command now reads from /ctx/help and returns Ok with output
         let result = execute("help", &mut ctx);
-        assert!(matches!(
-            result,
+        match &result {
             CommandResult::Ok {
-                display: Some(_),
+                display: Some(output),
                 ..
+            } => {
+                // Should contain built-in help
+                assert!(
+                    output.contains("read"),
+                    "Expected built-in help with 'read'"
+                );
+                assert!(
+                    output.contains("write"),
+                    "Expected built-in help with 'write'"
+                );
+                // Should contain available help topics
+                assert!(
+                    output.contains("Available Help Topics"),
+                    "Expected help topics section"
+                );
+                // Should list topics from mounted stores
+                assert!(output.contains("ctx/sys"), "Expected ctx/sys topic");
+                assert!(output.contains("ctx/repl"), "Expected ctx/repl topic");
             }
-        ));
+            _ => panic!("Expected Ok with display"),
+        }
 
         let result = execute("?", &mut ctx);
         assert!(matches!(
@@ -1516,6 +1569,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn execute_help_topic_command() {
+        let mut ctx = StoreContext::new();
+        // Help for specific topic should redirect to store docs
+        let result = execute("help ctx/sys", &mut ctx);
+        match &result {
+            CommandResult::Ok {
+                display: Some(output),
+                ..
+            } => {
+                // Should show sys docs via redirect
+                assert!(
+                    output.contains("System Primitives"),
+                    "Expected sys docs title, got: {}",
+                    output
+                );
+            }
+            _ => panic!("Expected Ok with display"),
+        }
     }
 
     #[test]

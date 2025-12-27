@@ -1,10 +1,10 @@
-//! Help store that provides documentation index and REPL topics.
+//! Help store that provides documentation aggregation, search, and metadata.
 //!
-//! Mount at `/ctx/help` to provide in-REPL documentation:
-//! - `read /ctx/help` - Overview and topic list
-//! - `read /ctx/help/commands` - Available commands
-//! - `read /ctx/help/mounts` - Mount system documentation
-//! - `read /ctx/help/http` - HTTP broker usage
+//! Mount at `/ctx/help` to provide:
+//! - `read /ctx/help` - List all available topics
+//! - `read /ctx/help/meta` - All redirect mappings
+//! - `read /ctx/help/meta/{topic}` - Single redirect info
+//! - `read /ctx/help/search/{query}` - Search across all topics
 //!
 //! ## Docs Protocol
 //!
@@ -14,549 +14,336 @@
 //!
 //! For example, mounting SysStore at `/ctx/sys` with docs at `/ctx/sys/docs`
 //! creates a redirect: `/ctx/help/sys` -> `/ctx/sys/docs`.
+//!
+//! HelpStore holds NO content itself - it is purely an aggregator.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
+use structfs_core_store::overlay_store::RedirectMode;
 use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
 
-/// A store that provides help documentation index and REPL topics.
+/// Manifest for a docs topic (used for search indexing).
+#[derive(Debug, Clone)]
+pub struct DocsManifest {
+    pub title: String,
+    pub description: Option<String>,
+    pub children: Vec<String>,
+    pub keywords: Vec<String>,
+}
+
+impl DocsManifest {
+    /// Create a default manifest for a topic.
+    pub fn default_for(name: &str) -> Self {
+        Self {
+            title: name.to_string(),
+            description: None,
+            children: Vec::new(),
+            keywords: Vec::new(),
+        }
+    }
+
+    /// Parse a manifest from a Value.
+    pub fn from_value(value: Value) -> Self {
+        match value {
+            Value::Map(map) => {
+                let title = map
+                    .get("title")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let description = map.get("description").and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                });
+
+                let children = map
+                    .get("children")
+                    .and_then(|v| match v {
+                        Value::Array(arr) => Some(
+                            arr.iter()
+                                .filter_map(|v| match v {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let keywords = map
+                    .get("keywords")
+                    .and_then(|v| match v {
+                        Value::Array(arr) => Some(
+                            arr.iter()
+                                .filter_map(|v| match v {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                Self {
+                    title,
+                    description,
+                    children,
+                    keywords,
+                }
+            }
+            _ => Self::default_for("unknown"),
+        }
+    }
+}
+
+/// Index for topic listing and search.
+#[derive(Debug, Clone, Default)]
+pub struct DocsIndex {
+    /// topic_name -> DocsManifest
+    topics: BTreeMap<String, DocsManifest>,
+}
+
+impl DocsIndex {
+    pub fn new() -> Self {
+        Self {
+            topics: BTreeMap::new(),
+        }
+    }
+
+    /// Add a topic to the index.
+    pub fn add_topic(&mut self, name: &str, manifest: Option<Value>) {
+        let manifest = manifest
+            .map(DocsManifest::from_value)
+            .unwrap_or_else(|| DocsManifest::default_for(name));
+        self.topics.insert(name.to_string(), manifest);
+    }
+
+    /// Remove a topic from the index.
+    pub fn remove_topic(&mut self, name: &str) {
+        self.topics.remove(name);
+    }
+
+    /// List all topic names.
+    pub fn list_topics(&self) -> Value {
+        let topics: Vec<Value> = self
+            .topics
+            .keys()
+            .map(|k| Value::String(k.clone()))
+            .collect();
+        Value::Array(topics)
+    }
+
+    /// List topics with full metadata.
+    pub fn list_topics_full(&self) -> Value {
+        let topics: Vec<Value> = self
+            .topics
+            .iter()
+            .map(|(name, manifest)| {
+                let mut map = BTreeMap::new();
+                map.insert("name".into(), Value::String(name.clone()));
+                map.insert("title".into(), Value::String(manifest.title.clone()));
+                if let Some(ref desc) = manifest.description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
+                Value::Map(map)
+            })
+            .collect();
+        Value::Array(topics)
+    }
+
+    /// Search across all topics.
+    pub fn search(&self, query: &str) -> Value {
+        let query_lower = query.to_lowercase();
+        let matches: Vec<Value> = self
+            .topics
+            .iter()
+            .filter(|(name, manifest)| {
+                name.to_lowercase().contains(&query_lower)
+                    || manifest.title.to_lowercase().contains(&query_lower)
+                    || manifest
+                        .description
+                        .as_ref()
+                        .is_some_and(|d| d.to_lowercase().contains(&query_lower))
+                    || manifest
+                        .keywords
+                        .iter()
+                        .any(|k| k.to_lowercase().contains(&query_lower))
+            })
+            .map(|(name, manifest)| {
+                let mut map = BTreeMap::new();
+                map.insert("topic".into(), Value::String(name.clone()));
+                map.insert("title".into(), Value::String(manifest.title.clone()));
+                map.insert("path".into(), Value::String(format!("/ctx/help/{}", name)));
+                Value::Map(map)
+            })
+            .collect();
+
+        let mut result = BTreeMap::new();
+        result.insert("query".into(), Value::String(query.to_string()));
+        result.insert("count".into(), Value::Integer(matches.len() as i64));
+        result.insert("results".into(), Value::Array(matches));
+        Value::Map(result)
+    }
+}
+
+/// Redirect information stored for introspection.
+#[derive(Debug, Clone)]
+pub struct RedirectInfo {
+    pub from: String,
+    pub to: String,
+    pub mode: RedirectMode,
+}
+
+/// Shared state for HelpStore, allowing updates after mounting.
+#[derive(Debug, Default)]
+pub struct HelpStoreState {
+    /// Index for search functionality
+    pub index: DocsIndex,
+    /// Cached redirect info for introspection
+    pub redirects: BTreeMap<String, RedirectInfo>,
+}
+
+impl HelpStoreState {
+    pub fn new() -> Self {
+        Self {
+            index: DocsIndex::new(),
+            redirects: BTreeMap::new(),
+        }
+    }
+
+    /// Called when a docs redirect is created.
+    pub fn index_docs(&mut self, topic: &str, manifest: Option<Value>) {
+        self.index.add_topic(topic, manifest);
+    }
+
+    /// Called when a docs redirect is removed.
+    pub fn unindex_docs(&mut self, topic: &str) {
+        self.index.remove_topic(topic);
+        self.redirects.remove(topic);
+    }
+
+    /// Register a redirect for introspection.
+    pub fn register_redirect(&mut self, topic: &str, from: &str, to: &str, mode: RedirectMode) {
+        self.redirects.insert(
+            topic.to_string(),
+            RedirectInfo {
+                from: from.to_string(),
+                to: to.to_string(),
+                mode,
+            },
+        );
+    }
+}
+
+/// Handle to shared HelpStore state for external updates.
+pub type HelpStoreHandle = Arc<RwLock<HelpStoreState>>;
+
+/// A store that provides help documentation aggregation.
 ///
-/// The HelpStore provides:
-/// - General REPL usage documentation
-/// - Topic index (commands, mounts, http, etc.)
+/// The HelpStore provides three services:
+/// 1. Topic listing - Derived from indexed topics
+/// 2. Metadata - Expose redirect mappings
+/// 3. Search - Query across all indexed docs
 ///
 /// Store-specific docs are accessed via redirects (handled by OverlayStore).
-pub struct HelpStore;
+///
+/// The internal state is wrapped in `Arc<RwLock<>>` so it can be updated
+/// after mounting (e.g., when stores are dynamically mounted/unmounted).
+pub struct HelpStore {
+    state: HelpStoreHandle,
+}
 
 impl HelpStore {
     pub fn new() -> Self {
-        Self
+        Self {
+            state: Arc::new(RwLock::new(HelpStoreState::new())),
+        }
     }
 
-    fn get_help(&self, path: &Path) -> Value {
+    /// Create a HelpStore with shared state.
+    ///
+    /// Use this when you need to update the help index after mounting.
+    pub fn with_shared_state(state: HelpStoreHandle) -> Self {
+        Self { state }
+    }
+
+    /// Get a handle to the shared state for external updates.
+    pub fn handle(&self) -> HelpStoreHandle {
+        Arc::clone(&self.state)
+    }
+
+    fn read_meta(&self, path: &Path) -> Result<Option<Record>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::store("help", "read", "Failed to acquire read lock"))?;
+
         if path.is_empty() {
-            return self.root_help();
+            // GET /ctx/help/meta -> all redirects
+            return Ok(Some(Record::parsed(Self::list_all_redirects(&state))));
         }
 
-        let full_path = path.components.join("/");
-        match full_path.as_str() {
-            "commands" => self.commands_help(),
-            "mounts" => self.mounts_help(),
-            "http" => self.http_help(),
-            "paths" => self.paths_help(),
-            "examples" => self.examples_help(),
-            "stores" => self.stores_help(),
-            "registers" => self.registers_help(),
-            _ => self.suggest_help(&full_path),
+        // GET /ctx/help/meta/{topic} -> single redirect
+        let topic = &path[0];
+        Ok(Self::get_redirect_info(&state, topic).map(Record::parsed))
+    }
+
+    fn list_all_redirects(state: &HelpStoreState) -> Value {
+        let redirects: Vec<Value> = state
+            .redirects
+            .iter()
+            .map(|(topic, info)| {
+                let mut map = BTreeMap::new();
+                map.insert("topic".into(), Value::String(topic.clone()));
+                map.insert("from".into(), Value::String(info.from.clone()));
+                map.insert("to".into(), Value::String(info.to.clone()));
+                map.insert("mode".into(), Value::String(format!("{:?}", info.mode)));
+                Value::Map(map)
+            })
+            .collect();
+        Value::Array(redirects)
+    }
+
+    fn get_redirect_info(state: &HelpStoreState, topic: &str) -> Option<Value> {
+        state.redirects.get(topic).map(|info| {
+            let mut map = BTreeMap::new();
+            map.insert("topic".into(), Value::String(topic.to_string()));
+            map.insert("from".into(), Value::String(info.from.clone()));
+            map.insert("to".into(), Value::String(info.to.clone()));
+            map.insert("mode".into(), Value::String(format!("{:?}", info.mode)));
+            Value::Map(map)
+        })
+    }
+
+    fn read_search(&self, path: &Path) -> Result<Option<Record>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::store("help", "read", "Failed to acquire read lock"))?;
+
+        if path.is_empty() {
+            // No query provided
+            let mut result = BTreeMap::new();
+            result.insert(
+                "error".into(),
+                Value::String("No search query provided".into()),
+            );
+            result.insert(
+                "usage".into(),
+                Value::String("read /ctx/help/search/<query>".into()),
+            );
+            return Ok(Some(Record::parsed(Value::Map(result))));
         }
-    }
 
-    fn root_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("StructFS REPL".to_string()),
-        );
-
-        // Commands section - matches the static format_help layout
-        let mut commands = BTreeMap::new();
-        commands.insert(
-            "read".to_string(),
-            Value::Map(BTreeMap::from([
-                ("args".to_string(), Value::String("[path|@reg]".to_string())),
-                (
-                    "desc".to_string(),
-                    Value::String("Read value from path or register (alias: get, r)".to_string()),
-                ),
-            ])),
-        );
-        commands.insert(
-            "write".to_string(),
-            Value::Map(BTreeMap::from([
-                (
-                    "args".to_string(),
-                    Value::String("<path> <json|@reg>".to_string()),
-                ),
-                (
-                    "desc".to_string(),
-                    Value::String("Write value to path (alias: set, w)".to_string()),
-                ),
-            ])),
-        );
-        commands.insert(
-            "cd".to_string(),
-            Value::Map(BTreeMap::from([
-                ("args".to_string(), Value::String("<path>".to_string())),
-                (
-                    "desc".to_string(),
-                    Value::String("Change current path".to_string()),
-                ),
-            ])),
-        );
-        commands.insert(
-            "pwd".to_string(),
-            Value::Map(BTreeMap::from([
-                ("args".to_string(), Value::String("".to_string())),
-                (
-                    "desc".to_string(),
-                    Value::String("Print current path".to_string()),
-                ),
-            ])),
-        );
-        commands.insert(
-            "registers".to_string(),
-            Value::Map(BTreeMap::from([
-                ("args".to_string(), Value::String("".to_string())),
-                (
-                    "desc".to_string(),
-                    Value::String("List all registers (alias: regs)".to_string()),
-                ),
-            ])),
-        );
-        commands.insert(
-            "help".to_string(),
-            Value::Map(BTreeMap::from([
-                ("args".to_string(), Value::String("[topic]".to_string())),
-                (
-                    "desc".to_string(),
-                    Value::String("Show help (try: help ctx/http)".to_string()),
-                ),
-            ])),
-        );
-        commands.insert(
-            "exit".to_string(),
-            Value::Map(BTreeMap::from([
-                ("args".to_string(), Value::String("".to_string())),
-                (
-                    "desc".to_string(),
-                    Value::String("Exit the REPL (alias: quit, q)".to_string()),
-                ),
-            ])),
-        );
-        map.insert("commands".to_string(), Value::Map(commands));
-
-        // Default mounts
-        let mut default_mounts = BTreeMap::new();
-        default_mounts.insert(
-            "/ctx/sys".to_string(),
-            Value::String("System primitives (env, time, random, proc, fs)".to_string()),
-        );
-        default_mounts.insert(
-            "/ctx/http".to_string(),
-            Value::String("HTTP broker (async, background threads)".to_string()),
-        );
-        default_mounts.insert(
-            "/ctx/http_sync".to_string(),
-            Value::String("HTTP broker (sync, blocks on read)".to_string()),
-        );
-        default_mounts.insert(
-            "/ctx/help".to_string(),
-            Value::String("Documentation system".to_string()),
-        );
-        map.insert("default_mounts".to_string(), Value::Map(default_mounts));
-
-        // Registers syntax
-        let mut registers = BTreeMap::new();
-        registers.insert(
-            "@name <command>".to_string(),
-            Value::String("Capture output in register".to_string()),
-        );
-        registers.insert(
-            "read @name".to_string(),
-            Value::String("Read register contents".to_string()),
-        );
-        registers.insert(
-            "*@name".to_string(),
-            Value::String("Dereference register as path".to_string()),
-        );
-        map.insert("registers".to_string(), Value::Map(registers));
-
-        // Topics for further reading
-        let mut topics = BTreeMap::new();
-        topics.insert(
-            "commands".to_string(),
-            Value::String("Detailed command reference".to_string()),
-        );
-        topics.insert(
-            "mounts".to_string(),
-            Value::String("Mounting and managing stores".to_string()),
-        );
-        topics.insert(
-            "http".to_string(),
-            Value::String("Making HTTP requests".to_string()),
-        );
-        topics.insert(
-            "paths".to_string(),
-            Value::String("Path syntax and navigation".to_string()),
-        );
-        topics.insert(
-            "stores".to_string(),
-            Value::String("Available store types".to_string()),
-        );
-        topics.insert(
-            "examples".to_string(),
-            Value::String("Usage examples".to_string()),
-        );
-        map.insert("topics".to_string(), Value::Map(topics));
-
-        Value::Map(map)
-    }
-
-    fn commands_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("REPL Commands".to_string()),
-        );
-
-        let mut commands = BTreeMap::new();
-        commands.insert(
-            "read <path>".to_string(),
-            Value::String("Read data from a path (aliases: get, r)".to_string()),
-        );
-        commands.insert(
-            "write <path> <json>".to_string(),
-            Value::String("Write JSON data to a path (aliases: set, w)".to_string()),
-        );
-        commands.insert(
-            "cd <path>".to_string(),
-            Value::String("Change current directory".to_string()),
-        );
-        commands.insert(
-            "pwd".to_string(),
-            Value::String("Print current directory".to_string()),
-        );
-        commands.insert(
-            "mounts".to_string(),
-            Value::String("List all current mounts (shortcut for read /ctx/mounts)".to_string()),
-        );
-        commands.insert(
-            "help".to_string(),
-            Value::String("Show help message".to_string()),
-        );
-        commands.insert(
-            "exit".to_string(),
-            Value::String("Exit the REPL (aliases: quit)".to_string()),
-        );
-        map.insert("commands".to_string(), Value::Map(commands));
-
-        let examples = vec![
-            "read /ctx/help",
-            "write /ctx/mounts/test {\"type\": \"memory\"}",
-            "cd /test",
-            "write foo {\"bar\": 123}",
-            "read foo",
-        ];
-        map.insert(
-            "examples".to_string(),
-            Value::Array(
-                examples
-                    .into_iter()
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-
-        Value::Map(map)
-    }
-
-    fn mounts_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Mount System".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String(
-                "Mounts attach stores to paths in the filesystem tree. Manage mounts through /ctx/mounts."
-                    .to_string(),
-            ),
-        );
-
-        let mut operations = BTreeMap::new();
-        operations.insert(
-            "read /ctx/mounts".to_string(),
-            Value::String("List all mounts".to_string()),
-        );
-        operations.insert(
-            "read /ctx/mounts/<name>".to_string(),
-            Value::String("Get config for a specific mount".to_string()),
-        );
-        operations.insert(
-            "write /ctx/mounts/<name> <config>".to_string(),
-            Value::String("Create or update a mount".to_string()),
-        );
-        operations.insert(
-            "write /ctx/mounts/<name> null".to_string(),
-            Value::String("Unmount a store".to_string()),
-        );
-        map.insert("operations".to_string(), Value::Map(operations));
-
-        let mut configs = BTreeMap::new();
-        configs.insert(
-            "memory".to_string(),
-            Value::String("{\"type\": \"memory\"}".to_string()),
-        );
-        configs.insert(
-            "local".to_string(),
-            Value::String("{\"type\": \"local\", \"path\": \"/path/to/dir\"}".to_string()),
-        );
-        configs.insert(
-            "http".to_string(),
-            Value::String("{\"type\": \"http\", \"url\": \"https://api.example.com\"}".to_string()),
-        );
-        configs.insert(
-            "httpbroker".to_string(),
-            Value::String("{\"type\": \"httpbroker\"} (sync)".to_string()),
-        );
-        configs.insert(
-            "asynchttpbroker".to_string(),
-            Value::String(
-                "{\"type\": \"asynchttpbroker\"} (async, background threads)".to_string(),
-            ),
-        );
-        map.insert("mount_configs".to_string(), Value::Map(configs));
-
-        Value::Map(map)
-    }
-
-    fn http_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("HTTP Brokers".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("HTTP brokers allow making requests to any URL.".to_string()),
-        );
-
-        let mut brokers = BTreeMap::new();
-        brokers.insert(
-            "/ctx/http".to_string(),
-            Value::String("Async - requests execute in background threads".to_string()),
-        );
-        brokers.insert(
-            "/ctx/http_sync".to_string(),
-            Value::String("Sync - blocks until request completes on read".to_string()),
-        );
-        map.insert("brokers".to_string(), Value::Map(brokers));
-
-        let mut request_format = BTreeMap::new();
-        request_format.insert(
-            "method".to_string(),
-            Value::String("GET | POST | PUT | DELETE | PATCH | HEAD | OPTIONS".to_string()),
-        );
-        request_format.insert(
-            "path".to_string(),
-            Value::String("Full URL (e.g., https://api.example.com/users)".to_string()),
-        );
-        request_format.insert(
-            "headers".to_string(),
-            Value::String("Optional object of header name -> value".to_string()),
-        );
-        request_format.insert(
-            "query".to_string(),
-            Value::String("Optional object of query param name -> value".to_string()),
-        );
-        request_format.insert(
-            "body".to_string(),
-            Value::String("Optional JSON body for POST/PUT/PATCH".to_string()),
-        );
-        map.insert("request_format".to_string(), Value::Map(request_format));
-
-        Value::Map(map)
-    }
-
-    fn paths_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Path Syntax".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("Paths identify locations in the store tree.".to_string()),
-        );
-
-        let mut syntax = BTreeMap::new();
-        syntax.insert(
-            "absolute".to_string(),
-            Value::String("/foo/bar - starts from root".to_string()),
-        );
-        syntax.insert(
-            "relative".to_string(),
-            Value::String("foo/bar - relative to current directory".to_string()),
-        );
-        syntax.insert(
-            "parent".to_string(),
-            Value::String("../foo - go up one level".to_string()),
-        );
-        syntax.insert(
-            "root".to_string(),
-            Value::String("/ - the root path".to_string()),
-        );
-        map.insert("syntax".to_string(), Value::Map(syntax));
-
-        Value::Map(map)
-    }
-
-    fn examples_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Usage Examples".to_string()),
-        );
-
-        let mut example1 = BTreeMap::new();
-        example1.insert(
-            "title".to_string(),
-            Value::String("Create and use a memory store".to_string()),
-        );
-        example1.insert(
-            "steps".to_string(),
-            Value::Array(vec![
-                Value::String("write /ctx/mounts/data {\"type\": \"memory\"}".to_string()),
-                Value::String(
-                    "write /data/users/1 {\"name\": \"Alice\", \"email\": \"alice@example.com\"}"
-                        .to_string(),
-                ),
-                Value::String("read /data/users/1".to_string()),
-            ]),
-        );
-
-        let mut example2 = BTreeMap::new();
-        example2.insert(
-            "title".to_string(),
-            Value::String("Make an HTTP request".to_string()),
-        );
-        example2.insert(
-            "steps".to_string(),
-            Value::Array(vec![
-                Value::String(
-                    "write /ctx/http {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}"
-                        .to_string(),
-                ),
-                Value::String("read /ctx/http/outstanding/0".to_string()),
-            ]),
-        );
-
-        map.insert(
-            "examples".to_string(),
-            Value::Array(vec![Value::Map(example1), Value::Map(example2)]),
-        );
-
-        Value::Map(map)
-    }
-
-    fn stores_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Store Types".to_string()),
-        );
-
-        let mut stores = BTreeMap::new();
-
-        let mut memory = BTreeMap::new();
-        memory.insert(
-            "description".to_string(),
-            Value::String("In-memory JSON store, data is lost on exit".to_string()),
-        );
-        memory.insert(
-            "config".to_string(),
-            Value::String("{\"type\": \"memory\"}".to_string()),
-        );
-        stores.insert("memory".to_string(), Value::Map(memory));
-
-        let mut local = BTreeMap::new();
-        local.insert(
-            "description".to_string(),
-            Value::String("JSON files stored on local filesystem".to_string()),
-        );
-        local.insert(
-            "config".to_string(),
-            Value::String("{\"type\": \"local\", \"path\": \"/path/to/dir\"}".to_string()),
-        );
-        stores.insert("local".to_string(), Value::Map(local));
-
-        let mut http = BTreeMap::new();
-        http.insert(
-            "description".to_string(),
-            Value::String("HTTP client with a base URL".to_string()),
-        );
-        http.insert(
-            "config".to_string(),
-            Value::String("{\"type\": \"http\", \"url\": \"https://api.example.com\"}".to_string()),
-        );
-        stores.insert("http".to_string(), Value::Map(http));
-
-        map.insert("stores".to_string(), Value::Map(stores));
-
-        Value::Map(map)
-    }
-
-    fn registers_help(&self) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".to_string(), Value::String("Registers".to_string()));
-        map.insert(
-            "description".to_string(),
-            Value::String(
-                "Registers are named storage locations that can hold JSON values from command output."
-                    .to_string(),
-            ),
-        );
-
-        let mut syntax = BTreeMap::new();
-        syntax.insert(
-            "@name".to_string(),
-            Value::String("Access register named 'name'".to_string()),
-        );
-        syntax.insert(
-            "@name command".to_string(),
-            Value::String("Capture command output in register".to_string()),
-        );
-        syntax.insert(
-            "*@name".to_string(),
-            Value::String("Dereference register as path".to_string()),
-        );
-        map.insert("syntax".to_string(), Value::Map(syntax));
-
-        Value::Map(map)
-    }
-
-    fn suggest_help(&self, query: &str) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "error".to_string(),
-            Value::String(format!("No help found for: '{}'", query)),
-        );
-        map.insert(
-            "hint".to_string(),
-            Value::String("Try one of the available topics below".to_string()),
-        );
-
-        let topics = vec![
-            "commands",
-            "mounts",
-            "http",
-            "paths",
-            "registers",
-            "examples",
-            "stores",
-        ];
-        map.insert(
-            "available_topics".to_string(),
-            Value::Array(
-                topics
-                    .into_iter()
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-
-        Value::Map(map)
+        // The query is the full remaining path (allows multi-word queries)
+        let query = path.components.join("/");
+        Ok(Some(Record::parsed(state.index.search(&query))))
     }
 }
 
@@ -568,8 +355,20 @@ impl Default for HelpStore {
 
 impl Reader for HelpStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let help = self.get_help(from);
-        Ok(Some(Record::parsed(help)))
+        if from.is_empty() {
+            // GET /ctx/help -> list all topics
+            let state = self
+                .state
+                .read()
+                .map_err(|_| Error::store("help", "read", "Failed to acquire read lock"))?;
+            return Ok(Some(Record::parsed(state.index.list_topics())));
+        }
+
+        match from[0].as_str() {
+            "meta" => self.read_meta(&from.slice(1, from.len())),
+            "search" => self.read_search(&from.slice(1, from.len())),
+            _ => Ok(None), // Everything else handled by redirects
+        }
     }
 }
 
@@ -582,144 +381,390 @@ impl Writer for HelpStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use structfs_core_store::{path, NoCodec};
 
     fn read_help(help: &mut HelpStore, path: &str) -> Value {
         let result = help.read(&Path::parse(path).unwrap()).unwrap();
-        result
-            .unwrap()
-            .into_value(&structfs_core_store::NoCodec)
-            .unwrap()
+        result.unwrap().into_value(&NoCodec).unwrap()
     }
 
     #[test]
-    fn test_help_root() {
+    fn test_help_root_empty() {
         let mut help = HelpStore::new();
         let value = read_help(&mut help, "");
         match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("commands"));
-                assert!(map.contains_key("default_mounts"));
-                assert!(map.contains_key("registers"));
-                assert!(map.contains_key("topics"));
+            Value::Array(arr) => {
+                assert!(arr.is_empty());
             }
-            _ => panic!("Expected map"),
+            _ => panic!("Expected array"),
         }
     }
 
     #[test]
-    fn test_help_commands() {
+    fn test_help_root_with_topics() {
+        let state = Arc::new(RwLock::new(HelpStoreState::new()));
+        state.write().unwrap().index_docs("sys", None);
+        state.write().unwrap().index_docs("repl", None);
+
+        let mut help = HelpStore::with_shared_state(state);
+        let value = read_help(&mut help, "");
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert!(arr.contains(&Value::String("sys".into())));
+                assert!(arr.contains(&Value::String("repl".into())));
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_help_meta_empty() {
         let mut help = HelpStore::new();
-        let value = read_help(&mut help, "commands");
+        let value = read_help(&mut help, "meta");
+        match value {
+            Value::Array(arr) => {
+                assert!(arr.is_empty());
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_help_meta_with_redirects() {
+        let state = Arc::new(RwLock::new(HelpStoreState::new()));
+        state.write().unwrap().register_redirect(
+            "sys",
+            "/ctx/help/sys",
+            "/ctx/sys/docs",
+            RedirectMode::ReadOnly,
+        );
+
+        let mut help = HelpStore::with_shared_state(state);
+        let value = read_help(&mut help, "meta");
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 1);
+                if let Value::Map(map) = &arr[0] {
+                    assert_eq!(map.get("topic"), Some(&Value::String("sys".into())));
+                    assert_eq!(map.get("to"), Some(&Value::String("/ctx/sys/docs".into())));
+                }
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_help_meta_single() {
+        let state = Arc::new(RwLock::new(HelpStoreState::new()));
+        state.write().unwrap().register_redirect(
+            "sys",
+            "/ctx/help/sys",
+            "/ctx/sys/docs",
+            RedirectMode::ReadOnly,
+        );
+
+        let mut help = HelpStore::with_shared_state(state);
+        let value = read_help(&mut help, "meta/sys");
         match value {
             Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("commands"));
+                assert_eq!(map.get("topic"), Some(&Value::String("sys".into())));
             }
             _ => panic!("Expected map"),
         }
     }
 
     #[test]
-    fn test_help_mounts() {
+    fn test_help_meta_single_not_found() {
         let mut help = HelpStore::new();
-        let value = read_help(&mut help, "mounts");
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("operations"));
-            }
-            _ => panic!("Expected map"),
-        }
+        let result = help.read(&path!("meta/nonexistent")).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_help_http() {
+    fn test_help_search_no_query() {
         let mut help = HelpStore::new();
-        let value = read_help(&mut help, "http");
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("brokers"));
-            }
-            _ => panic!("Expected map"),
-        }
-    }
-
-    #[test]
-    fn test_help_paths() {
-        let mut help = HelpStore::new();
-        let value = read_help(&mut help, "paths");
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("syntax"));
-            }
-            _ => panic!("Expected map"),
-        }
-    }
-
-    #[test]
-    fn test_help_unknown_topic() {
-        let mut help = HelpStore::new();
-        let value = read_help(&mut help, "nonexistent");
+        let value = read_help(&mut help, "search");
         match value {
             Value::Map(map) => {
                 assert!(map.contains_key("error"));
-                assert!(map.contains_key("available_topics"));
+                assert!(map.contains_key("usage"));
             }
             _ => panic!("Expected map"),
         }
+    }
+
+    #[test]
+    fn test_help_search_finds_topics() {
+        let state = Arc::new(RwLock::new(HelpStoreState::new()));
+        state.write().unwrap().index_docs(
+            "sys",
+            Some(Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("title".into(), Value::String("System Primitives".into()));
+                m.insert(
+                    "keywords".into(),
+                    Value::Array(vec![Value::String("time".into())]),
+                );
+                m
+            })),
+        );
+
+        let mut help = HelpStore::with_shared_state(state);
+        let value = read_help(&mut help, "search/time");
+        match value {
+            Value::Map(result) => {
+                assert_eq!(result.get("query"), Some(&Value::String("time".into())));
+                assert_eq!(result.get("count"), Some(&Value::Integer(1)));
+                if let Some(Value::Array(results)) = result.get("results") {
+                    assert_eq!(results.len(), 1);
+                }
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_search_no_results() {
+        let state = Arc::new(RwLock::new(HelpStoreState::new()));
+        state.write().unwrap().index_docs("sys", None);
+
+        let mut help = HelpStore::with_shared_state(state);
+        let value = read_help(&mut help, "search/nonexistent");
+        match value {
+            Value::Map(result) => {
+                assert_eq!(result.get("count"), Some(&Value::Integer(0)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_help_unknown_topic_returns_none() {
+        let mut help = HelpStore::new();
+        let result = help.read(&path!("unknown")).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
     fn test_help_read_only() {
         let mut help = HelpStore::new();
-        let result = help.write(&Path::parse("test").unwrap(), Record::parsed(Value::Null));
+        let result = help.write(&path!("test"), Record::parsed(Value::Null));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_default_impl() {
-        let _help = HelpStore;
+        let _help: HelpStore = Default::default();
     }
 
     #[test]
-    fn test_help_examples() {
-        let mut help = HelpStore::new();
-        let value = read_help(&mut help, "examples");
+    fn test_index_and_unindex() {
+        let state = Arc::new(RwLock::new(HelpStoreState::new()));
+        state.write().unwrap().index_docs("test", None);
+        state.write().unwrap().register_redirect(
+            "test",
+            "/ctx/help/test",
+            "/test/docs",
+            RedirectMode::ReadOnly,
+        );
+
+        let mut help = HelpStore::with_shared_state(Arc::clone(&state));
+
+        // Should have topic and redirect
+        let topics = read_help(&mut help, "");
+        match topics {
+            Value::Array(arr) => assert_eq!(arr.len(), 1),
+            _ => panic!("Expected array"),
+        }
+
+        let meta = read_help(&mut help, "meta");
+        match meta {
+            Value::Array(arr) => assert_eq!(arr.len(), 1),
+            _ => panic!("Expected array"),
+        }
+
+        // Unindex via shared state
+        state.write().unwrap().unindex_docs("test");
+
+        let topics = read_help(&mut help, "");
+        match topics {
+            Value::Array(arr) => assert!(arr.is_empty()),
+            _ => panic!("Expected array"),
+        }
+
+        let meta = read_help(&mut help, "meta");
+        match meta {
+            Value::Array(arr) => assert!(arr.is_empty()),
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_docs_manifest_from_value() {
+        let mut m = BTreeMap::new();
+        m.insert("title".into(), Value::String("Test Title".into()));
+        m.insert(
+            "description".into(),
+            Value::String("Test Description".into()),
+        );
+        m.insert(
+            "children".into(),
+            Value::Array(vec![Value::String("a".into()), Value::String("b".into())]),
+        );
+        m.insert(
+            "keywords".into(),
+            Value::Array(vec![Value::String("k1".into())]),
+        );
+
+        let manifest = DocsManifest::from_value(Value::Map(m));
+        assert_eq!(manifest.title, "Test Title");
+        assert_eq!(manifest.description, Some("Test Description".to_string()));
+        assert_eq!(manifest.children, vec!["a", "b"]);
+        assert_eq!(manifest.keywords, vec!["k1"]);
+    }
+
+    #[test]
+    fn test_docs_manifest_default_for() {
+        let manifest = DocsManifest::default_for("test");
+        assert_eq!(manifest.title, "test");
+        assert!(manifest.description.is_none());
+        assert!(manifest.children.is_empty());
+        assert!(manifest.keywords.is_empty());
+    }
+
+    #[test]
+    fn test_docs_manifest_from_non_map() {
+        let manifest = DocsManifest::from_value(Value::String("not a map".into()));
+        assert_eq!(manifest.title, "unknown");
+    }
+
+    #[test]
+    fn test_docs_index_list_topics_full() {
+        let mut index = DocsIndex::new();
+        index.add_topic(
+            "test",
+            Some(Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("title".into(), Value::String("Test Title".into()));
+                m.insert("description".into(), Value::String("Test Desc".into()));
+                m
+            })),
+        );
+
+        let value = index.list_topics_full();
         match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("examples"));
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 1);
+                if let Value::Map(map) = &arr[0] {
+                    assert_eq!(map.get("name"), Some(&Value::String("test".into())));
+                    assert_eq!(map.get("title"), Some(&Value::String("Test Title".into())));
+                    assert_eq!(
+                        map.get("description"),
+                        Some(&Value::String("Test Desc".into()))
+                    );
+                }
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_search_by_name() {
+        let mut index = DocsIndex::new();
+        index.add_topic("system", None);
+
+        let result = index.search("sys");
+        match result {
+            Value::Map(m) => {
+                assert_eq!(m.get("count"), Some(&Value::Integer(1)));
             }
             _ => panic!("Expected map"),
         }
     }
 
     #[test]
-    fn test_help_stores() {
-        let mut help = HelpStore::new();
-        let value = read_help(&mut help, "stores");
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("stores"));
+    fn test_search_by_title() {
+        let mut index = DocsIndex::new();
+        index.add_topic(
+            "sys",
+            Some(Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("title".into(), Value::String("System Primitives".into()));
+                m
+            })),
+        );
+
+        let result = index.search("primitives");
+        match result {
+            Value::Map(m) => {
+                assert_eq!(m.get("count"), Some(&Value::Integer(1)));
             }
             _ => panic!("Expected map"),
         }
     }
 
     #[test]
-    fn test_help_registers() {
-        let mut help = HelpStore::new();
-        let value = read_help(&mut help, "registers");
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("title"));
-                assert!(map.contains_key("syntax"));
+    fn test_search_by_description() {
+        let mut index = DocsIndex::new();
+        index.add_topic(
+            "sys",
+            Some(Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "description".into(),
+                    Value::String("OS primitives for time and env".into()),
+                );
+                m
+            })),
+        );
+
+        let result = index.search("primitives");
+        match result {
+            Value::Map(m) => {
+                assert_eq!(m.get("count"), Some(&Value::Integer(1)));
             }
             _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let mut index = DocsIndex::new();
+        index.add_topic(
+            "SYS",
+            Some(Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("title".into(), Value::String("SYSTEM".into()));
+                m
+            })),
+        );
+
+        let result = index.search("sys");
+        match result {
+            Value::Map(m) => {
+                assert_eq!(m.get("count"), Some(&Value::Integer(1)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_handle_returns_shared_state() {
+        let help = HelpStore::new();
+        let handle = help.handle();
+
+        // Modify via handle
+        handle.write().unwrap().index_docs("test", None);
+
+        // Should be visible through HelpStore
+        let mut help = HelpStore::with_shared_state(handle);
+        let value = read_help(&mut help, "");
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 1);
+            }
+            _ => panic!("Expected array"),
         }
     }
 }

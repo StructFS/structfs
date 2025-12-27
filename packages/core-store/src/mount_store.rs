@@ -40,6 +40,8 @@ pub enum MountConfig {
     Help,
     /// System primitives store (env, time, proc, fs, random)
     Sys,
+    /// REPL documentation store
+    Repl,
 }
 
 /// Information about a mount point
@@ -248,6 +250,9 @@ fn config_to_value(config: &MountConfig) -> Value {
         MountConfig::Sys => {
             map.insert("type".to_string(), Value::String("sys".to_string()));
         }
+        MountConfig::Repl => {
+            map.insert("type".to_string(), Value::String("repl".to_string()));
+        }
     }
     Value::Map(map)
 }
@@ -317,6 +322,7 @@ fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
                 }
                 "help" => Ok(MountConfig::Help),
                 "sys" => Ok(MountConfig::Sys),
+                "repl" => Ok(MountConfig::Repl),
                 other => Err(Error::decode(
                     crate::Format::VALUE,
                     format!("Unknown mount type: {}", other),
@@ -519,6 +525,7 @@ mod tests {
             },
             MountConfig::Help,
             MountConfig::Sys,
+            MountConfig::Repl,
         ];
 
         for config in configs {

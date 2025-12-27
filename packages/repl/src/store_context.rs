@@ -3,6 +3,7 @@
 //! This module provides the store context that manages mounts and registers.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use structfs_core_store::{
     mount_store::{MountConfig, MountStore, StoreFactory},
@@ -13,7 +14,8 @@ use structfs_core_store::{
 use structfs_serde_store::{json_to_value, value_to_json};
 
 // Import store implementations
-use crate::help_store::HelpStore;
+use crate::help_store::{HelpStore, HelpStoreHandle, HelpStoreState};
+use crate::repl_docs_store::ReplDocsStore;
 use structfs_http::{AsyncHttpBrokerStore, HttpBrokerStore};
 use structfs_json_store::InMemoryStore;
 use structfs_sys::SysStore;
@@ -83,6 +85,7 @@ impl StoreFactory for CoreReplStoreFactory {
             )),
             MountConfig::Help => Ok(Box::new(HelpStore::new())),
             MountConfig::Sys => Ok(Box::new(SysStore::new())),
+            MountConfig::Repl => Ok(Box::new(ReplDocsStore::new())),
         }
     }
 }
@@ -199,6 +202,8 @@ pub struct StoreContext<F: StoreFactory = CoreReplStoreFactory> {
     store: MountStore<F>,
     registers: RegisterStore,
     current_path: Path,
+    /// Handle to HelpStore state for dynamic updates on mount/unmount
+    help_state: Option<HelpStoreHandle>,
 }
 
 impl StoreContext<CoreReplStoreFactory> {
@@ -243,12 +248,19 @@ pub fn parse_register_path(path_str: &str) -> Option<(String, Path)> {
 impl<F: StoreFactory> StoreContext<F> {
     /// Create a context with a custom factory and optionally mount defaults.
     ///
-    /// If `mount_defaults` is true, the standard mounts (http, sys, help) are added.
+    /// If `mount_defaults` is true, the standard mounts (http, sys, help, repl) are added.
     /// If false, the context starts with no mounts.
     pub fn with_factory_and_mounts(factory: F, mount_defaults: bool) -> Self {
         let mut store = MountStore::new(factory);
+        let mut help_state: Option<HelpStoreHandle> = None;
 
         if mount_defaults {
+            // Mount stores with docs FIRST (they create redirects)
+            // Mount REPL docs store (REPL's own documentation)
+            if let Err(e) = store.mount("ctx/repl", MountConfig::Repl) {
+                eprintln!("Warning: Failed to mount REPL docs store: {}", e);
+            }
+
             // Mount async HTTP broker (background execution)
             if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
                 eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
@@ -264,8 +276,16 @@ impl<F: StoreFactory> StoreContext<F> {
                 eprintln!("Warning: Failed to mount sys store: {}", e);
             }
 
-            // Mount help store
-            if let Err(e) = store.mount("ctx/help", MountConfig::Help) {
+            // Create shared state for HelpStore
+            let state = Arc::new(RwLock::new(HelpStoreState::new()));
+            help_state = Some(Arc::clone(&state));
+
+            // Populate from existing redirects
+            Self::populate_help_state(&mut store, &state);
+
+            // Create HelpStore with shared state and mount it
+            let help_store = HelpStore::with_shared_state(state);
+            if let Err(e) = store.mount_store("ctx/help", Box::new(help_store)) {
                 eprintln!("Warning: Failed to mount help store: {}", e);
             }
         }
@@ -274,6 +294,75 @@ impl<F: StoreFactory> StoreContext<F> {
             store,
             registers: RegisterStore::new(),
             current_path: Path::parse("").unwrap(),
+            help_state,
+        }
+    }
+
+    /// Populate HelpStore state from existing redirects.
+    fn populate_help_state(store: &mut MountStore<F>, state: &HelpStoreHandle) {
+        use structfs_core_store::path;
+
+        let help_prefix = path!("ctx/help");
+        let mut state_guard = state.write().unwrap();
+
+        for (from, to, mode) in store.list_redirects() {
+            // Only process redirects under /ctx/help
+            if !from.has_prefix(&help_prefix) || from.len() <= 2 {
+                continue;
+            }
+
+            // Extract topic name: /ctx/help/ctx/sys -> "ctx/sys"
+            let topic = from.components[2..].join("/");
+
+            // Try to read the docs manifest to get metadata for search
+            let manifest = store
+                .read(&to)
+                .ok()
+                .flatten()
+                .and_then(|record| record.into_value(&structfs_core_store::NoCodec).ok());
+
+            // Index the topic
+            state_guard.index_docs(&topic, manifest);
+
+            // Register redirect info for /ctx/help/meta
+            state_guard.register_redirect(&topic, &format!("/{}", from), &format!("/{}", to), mode);
+        }
+    }
+
+    /// Update HelpStore state after a mount/unmount operation.
+    fn refresh_help_state(&mut self) {
+        if let Some(ref state) = self.help_state {
+            use structfs_core_store::path;
+
+            let help_prefix = path!("ctx/help");
+            let mut state_guard = state.write().unwrap();
+
+            // Clear existing state
+            state_guard.index = crate::help_store::DocsIndex::new();
+            state_guard.redirects.clear();
+
+            // Repopulate from current redirects
+            for (from, to, mode) in self.store.list_redirects() {
+                if !from.has_prefix(&help_prefix) || from.len() <= 2 {
+                    continue;
+                }
+
+                let topic = from.components[2..].join("/");
+                let manifest = self
+                    .store
+                    .read(&to)
+                    .ok()
+                    .flatten()
+                    .and_then(|record| record.into_value(&structfs_core_store::NoCodec).ok());
+
+                state_guard.index_docs(&topic, manifest);
+                state_guard.register_redirect(
+                    &topic,
+                    &format!("/{}", from),
+                    &format!("/{}", to),
+                    mode,
+                );
+            }
         }
     }
 
@@ -288,8 +377,19 @@ impl<F: StoreFactory> StoreContext<F> {
     /// Mount a store at a path.
     ///
     /// This allows tests to add specific stores as needed.
+    /// After mounting, the help index is refreshed to include any new docs.
     pub fn mount(&mut self, path: &str, config: MountConfig) -> Result<(), ContextError> {
         self.store.mount(path, config)?;
+        self.refresh_help_state();
+        Ok(())
+    }
+
+    /// Unmount a store at a path.
+    ///
+    /// After unmounting, the help index is refreshed to remove the store's docs.
+    pub fn unmount(&mut self, path: &str) -> Result<(), ContextError> {
+        self.store.unmount(path)?;
+        self.refresh_help_state();
         Ok(())
     }
 
@@ -754,10 +854,178 @@ mod tests {
         let mut ctx = StoreContext::new();
         let value = ctx.read(&path!("ctx/help")).unwrap();
         assert!(value.is_some());
+        // HelpStore returns an array of indexed topic names
+        match value.unwrap() {
+            Value::Array(topics) => {
+                // Should include topics from mounted stores with docs
+                assert!(!topics.is_empty(), "Expected at least one help topic");
+                // Should include sys (has docs)
+                assert!(
+                    topics.contains(&Value::String("ctx/sys".into())),
+                    "Expected ctx/sys topic, got: {:?}",
+                    topics
+                );
+                // Should include repl (has docs)
+                assert!(
+                    topics.contains(&Value::String("ctx/repl".into())),
+                    "Expected ctx/repl topic"
+                );
+            }
+            _ => panic!("Expected array of topics"),
+        }
+    }
+
+    #[test]
+    fn test_read_help_via_redirect() {
+        let mut ctx = StoreContext::new();
+        // Reading through the redirect should work
+        let value = ctx.read(&path!("ctx/help/ctx/sys")).unwrap();
+        assert!(value.is_some());
+        // Should get sys docs via redirect
         match value.unwrap() {
             Value::Map(map) => {
                 assert!(map.contains_key("title"));
-                assert!(map.contains_key("topics"));
+            }
+            _ => panic!("Expected sys docs map"),
+        }
+    }
+
+    #[test]
+    fn test_read_repl_docs() {
+        let mut ctx = StoreContext::new();
+        // Read REPL docs directly
+        let value = ctx.read(&path!("ctx/repl/docs")).unwrap();
+        assert!(value.is_some());
+        match value.unwrap() {
+            Value::Map(map) => {
+                assert_eq!(
+                    map.get("title"),
+                    Some(&Value::String("REPL Documentation".into()))
+                );
+            }
+            _ => panic!("Expected REPL docs manifest"),
+        }
+    }
+
+    #[test]
+    fn test_read_help_meta() {
+        let mut ctx = StoreContext::new();
+        let value = ctx.read(&path!("ctx/help/meta")).unwrap();
+        assert!(value.is_some());
+        match value.unwrap() {
+            Value::Array(redirects) => {
+                // Should have redirects for stores with docs
+                assert!(!redirects.is_empty());
+                // Each redirect should have topic, from, to, mode
+                if let Value::Map(first) = &redirects[0] {
+                    assert!(first.contains_key("topic"));
+                    assert!(first.contains_key("from"));
+                    assert!(first.contains_key("to"));
+                    assert!(first.contains_key("mode"));
+                }
+            }
+            _ => panic!("Expected array of redirects"),
+        }
+    }
+
+    #[test]
+    fn test_read_help_search() {
+        let mut ctx = StoreContext::new();
+        // Search for "time" should find sys (which has time operations)
+        let value = ctx.read(&path!("ctx/help/search/System")).unwrap();
+        assert!(value.is_some());
+        match value.unwrap() {
+            Value::Map(result) => {
+                assert_eq!(result.get("query"), Some(&Value::String("System".into())));
+                // Should find at least sys (title is "System Primitives")
+                if let Some(Value::Integer(count)) = result.get("count") {
+                    assert!(*count > 0, "Expected search to find results");
+                }
+            }
+            _ => panic!("Expected search result map"),
+        }
+    }
+
+    #[test]
+    fn test_dynamic_unmount_removes_help_topic() {
+        let mut ctx = StoreContext::new();
+
+        // Get initial topic count
+        let initial_topics = match ctx.read(&path!("ctx/help")).unwrap().unwrap() {
+            Value::Array(arr) => arr.len(),
+            _ => panic!("Expected array"),
+        };
+
+        // Unmount the sys store (has docs)
+        ctx.unmount("ctx/sys").unwrap();
+        let after_unmount = match ctx.read(&path!("ctx/help")).unwrap().unwrap() {
+            Value::Array(arr) => arr.len(),
+            _ => panic!("Expected array"),
+        };
+        assert!(
+            after_unmount < initial_topics,
+            "Unmounting sys should remove its help topic"
+        );
+
+        // Verify ctx/sys is no longer in the topic list
+        let topics = ctx.read(&path!("ctx/help")).unwrap().unwrap();
+        match topics {
+            Value::Array(arr) => {
+                assert!(
+                    !arr.contains(&Value::String("ctx/sys".into())),
+                    "ctx/sys should not be in topics after unmount"
+                );
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_dynamic_mount_adds_help_topic() {
+        let mut ctx = StoreContext::new();
+
+        // First unmount sys so we can remount it
+        ctx.unmount("ctx/sys").unwrap();
+
+        // Verify ctx/sys is NOT in topics
+        let topics_before = ctx.read(&path!("ctx/help")).unwrap().unwrap();
+        let count_before = match &topics_before {
+            Value::Array(arr) => {
+                assert!(
+                    !arr.contains(&Value::String("ctx/sys".into())),
+                    "ctx/sys should not be in topics after unmount"
+                );
+                arr.len()
+            }
+            _ => panic!("Expected array"),
+        };
+
+        // Remount sys (which has docs)
+        ctx.mount("ctx/sys", MountConfig::Sys).unwrap();
+
+        // Verify ctx/sys IS now in topics
+        let topics_after = ctx.read(&path!("ctx/help")).unwrap().unwrap();
+        match topics_after {
+            Value::Array(arr) => {
+                assert!(
+                    arr.contains(&Value::String("ctx/sys".into())),
+                    "ctx/sys should be in topics after mount"
+                );
+                assert_eq!(
+                    arr.len(),
+                    count_before + 1,
+                    "Topic count should increase by 1"
+                );
+            }
+            _ => panic!("Expected array"),
+        }
+
+        // Verify we can read the docs via help redirect
+        let docs = ctx.read(&path!("ctx/help/ctx/sys")).unwrap();
+        assert!(docs.is_some(), "Should be able to read sys docs via help");
+        match docs.unwrap() {
+            Value::Map(map) => {
+                assert!(map.contains_key("title"), "Sys docs should have title");
             }
             _ => panic!("Expected map"),
         }

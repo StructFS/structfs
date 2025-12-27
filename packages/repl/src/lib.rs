@@ -42,6 +42,7 @@ pub mod highlighter;
 pub mod host;
 pub mod io;
 pub mod repl;
+pub mod repl_docs_store;
 pub mod store_context;
 
 // Re-exports
