@@ -86,6 +86,7 @@ impl StoreFactory for CoreReplStoreFactory {
             MountConfig::Help => Ok(Box::new(HelpStore::new())),
             MountConfig::Sys => Ok(Box::new(SysStore::new())),
             MountConfig::Repl => Ok(Box::new(ReplDocsStore::new())),
+            MountConfig::Registers => Ok(Box::new(RegisterStore::new())),
         }
     }
 }
@@ -198,9 +199,11 @@ impl Writer for RegisterStore {
 /// The context is generic over a `StoreFactory` implementation, allowing
 /// different factories to be used for testing or alternative configurations.
 /// By default, it uses `CoreReplStoreFactory` which creates all standard stores.
+///
+/// Registers are now mounted at `/ctx/registers/` rather than embedded.
+/// Use `@name` syntax as sugar for `/ctx/registers/name`.
 pub struct StoreContext<F: StoreFactory = CoreReplStoreFactory> {
     store: MountStore<F>,
-    registers: RegisterStore,
     current_path: Path,
     /// Handle to HelpStore state for dynamic updates on mount/unmount
     help_state: Option<HelpStoreHandle>,
@@ -276,6 +279,11 @@ impl<F: StoreFactory> StoreContext<F> {
                 eprintln!("Warning: Failed to mount sys store: {}", e);
             }
 
+            // Mount register store (session-local named values)
+            if let Err(e) = store.mount("ctx/registers", MountConfig::Registers) {
+                eprintln!("Warning: Failed to mount register store: {}", e);
+            }
+
             // Create shared state for HelpStore
             let state = Arc::new(RwLock::new(HelpStoreState::new()));
             help_state = Some(Arc::clone(&state));
@@ -292,7 +300,6 @@ impl<F: StoreFactory> StoreContext<F> {
 
         Self {
             store,
-            registers: RegisterStore::new(),
             current_path: Path::parse("").unwrap(),
             help_state,
         }
@@ -393,27 +400,31 @@ impl<F: StoreFactory> StoreContext<F> {
         Ok(())
     }
 
-    /// Read from a register path
+    /// Read from a register path.
+    ///
+    /// Reads from the mounted RegisterStore at `/ctx/registers/`.
     pub fn read_register(&mut self, path_str: &str) -> Result<Option<Value>, ContextError> {
         let (name, sub_path) = parse_register_path(path_str)
             .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
 
-        let full_path = if name.is_empty() {
-            sub_path
+        // Build path under /ctx/registers/
+        let register_path = if name.is_empty() {
+            Path::parse("ctx/registers").unwrap()
         } else {
             let name_path = Path::parse(&name)
                 .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
-            name_path.join(&sub_path)
+            Path::parse("ctx/registers")
+                .unwrap()
+                .join(&name_path)
+                .join(&sub_path)
         };
 
-        let record = self.registers.read(&full_path)?;
-        match record {
-            Some(r) => Ok(Some(r.into_value(&NoCodec)?)),
-            None => Ok(None),
-        }
+        self.read(&register_path)
     }
 
-    /// Write to a register path
+    /// Write to a register path.
+    ///
+    /// Writes to the mounted RegisterStore at `/ctx/registers/`.
     pub fn write_register(&mut self, path_str: &str, value: Value) -> Result<Path, ContextError> {
         let (name, sub_path) = parse_register_path(path_str)
             .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
@@ -426,23 +437,51 @@ impl<F: StoreFactory> StoreContext<F> {
 
         let name_path = Path::parse(&name)
             .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
-        let full_path = name_path.join(&sub_path);
-        Ok(self.registers.write(&full_path, Record::parsed(value))?)
+        let register_path = Path::parse("ctx/registers")
+            .unwrap()
+            .join(&name_path)
+            .join(&sub_path);
+        self.write(&register_path, value)
     }
 
-    /// Store a value directly in a register by name
+    /// Store a value directly in a register by name.
+    ///
+    /// Convenience method that writes to `/ctx/registers/{name}`.
     pub fn set_register(&mut self, name: &str, value: Value) {
-        self.registers.set(name, value);
+        let path = Path::parse(&format!("ctx/registers/{}", name)).unwrap();
+        let _ = self.store.write(&path, Record::parsed(value));
     }
 
-    /// Get a value from a register by name
-    pub fn get_register(&self, name: &str) -> Option<&Value> {
-        self.registers.get(name)
+    /// Get a value from a register by name.
+    ///
+    /// Convenience method that reads from `/ctx/registers/{name}`.
+    pub fn get_register(&mut self, name: &str) -> Option<Value> {
+        let path = Path::parse(&format!("ctx/registers/{}", name)).unwrap();
+        self.store
+            .read(&path)
+            .ok()
+            .flatten()
+            .and_then(|r| r.into_value(&NoCodec).ok())
     }
 
-    /// List all register names
-    pub fn list_registers(&self) -> Vec<&String> {
-        self.registers.list()
+    /// List all register names.
+    ///
+    /// Reads from `/ctx/registers/` which returns an array of names.
+    pub fn list_registers(&mut self) -> Vec<String> {
+        let path = Path::parse("ctx/registers").unwrap();
+        match self.store.read(&path) {
+            Ok(Some(record)) => match record.into_value(&NoCodec) {
+                Ok(Value::Array(arr)) => arr
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => vec![],
+            },
+            _ => vec![],
+        }
     }
 
     /// Get the current path
@@ -674,7 +713,7 @@ mod tests {
         let mut ctx = StoreContext::new();
         ctx.set_register("foo", Value::String("bar".to_string()));
         let value = ctx.get_register("foo").unwrap();
-        assert_eq!(value, &Value::String("bar".to_string()));
+        assert_eq!(value, Value::String("bar".to_string()));
     }
 
     #[test]
@@ -684,6 +723,34 @@ mod tests {
         ctx.set_register("b", Value::Integer(2));
         let list = ctx.list_registers();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_register_via_path() {
+        // Test that registers are accessible via /ctx/registers/ path
+        let mut ctx = StoreContext::new();
+        ctx.write(&path!("ctx/registers/test"), Value::Integer(42))
+            .unwrap();
+        let value = ctx.read(&path!("ctx/registers/test")).unwrap().unwrap();
+        assert_eq!(value, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_list_via_path() {
+        let mut ctx = StoreContext::new();
+        ctx.write(&path!("ctx/registers/x"), Value::Integer(1))
+            .unwrap();
+        ctx.write(&path!("ctx/registers/y"), Value::Integer(2))
+            .unwrap();
+        let value = ctx.read(&path!("ctx/registers")).unwrap().unwrap();
+        match value {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert!(arr.contains(&Value::String("x".into())));
+                assert!(arr.contains(&Value::String("y".into())));
+            }
+            _ => panic!("Expected array"),
+        }
     }
 
     #[test]
@@ -824,10 +891,11 @@ mod tests {
         let path = ctx
             .write_register("@myvar", Value::String("value".to_string()))
             .unwrap();
-        assert_eq!(path.to_string(), "myvar");
+        // Path returned includes ctx/registers/ prefix now
+        assert!(path.to_string().contains("myvar"));
         assert_eq!(
             ctx.get_register("myvar"),
-            Some(&Value::String("value".to_string()))
+            Some(Value::String("value".to_string()))
         );
     }
 

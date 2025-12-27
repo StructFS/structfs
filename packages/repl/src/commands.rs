@@ -1811,7 +1811,7 @@ mod tests {
         let mut ctx = StoreContext::new();
         let result = execute("write @myreg 42", &mut ctx);
         assert!(matches!(result, CommandResult::Ok { .. }));
-        assert_eq!(ctx.get_register("myreg"), Some(&Value::Integer(42)));
+        assert_eq!(ctx.get_register("myreg"), Some(Value::Integer(42)));
     }
 
     #[test]
