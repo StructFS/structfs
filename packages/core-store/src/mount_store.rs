@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::overlay_store::{OverlayStore, StoreBox};
-use crate::{Error, Path, Reader, Record, Value, Writer};
+use crate::overlay_store::{OverlayStore, RedirectMode, StoreBox};
+use crate::{path, Error, Path, Reader, Record, Value, Writer};
 
 /// Configuration for a mount point
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,12 +81,37 @@ impl<F: StoreFactory> MountStore<F> {
         let mount_path = Path::parse(name).map_err(Error::Path)?;
 
         // Add to overlay
-        self.overlay.mount(mount_path, store);
+        self.overlay.mount(mount_path.clone(), store);
 
         // Track the mount
         self.mounts.insert(name.to_string(), config);
 
+        // Discover and redirect docs
+        self.discover_and_redirect_docs(name, &mount_path);
+
         Ok(())
+    }
+
+    /// Probe for docs at mount path and create redirect if found.
+    fn discover_and_redirect_docs(&mut self, name: &str, mount_path: &Path) {
+        let docs_path = mount_path.join(&path!("docs"));
+
+        // Probe for docs - if readable, create redirect
+        if self.overlay.read(&docs_path).ok().flatten().is_some() {
+            // Use the full mount path for the help path
+            // e.g., "ctx/sys" -> help path is "ctx/help/ctx/sys"
+            // This allows `read /ctx/help/ctx/sys` to get docs for the store at `/ctx/sys`
+            if let Ok(help_suffix) = Path::parse(name) {
+                let help_path = path!("ctx/help").join(&help_suffix);
+
+                self.overlay.add_redirect(
+                    help_path,
+                    docs_path,
+                    RedirectMode::ReadOnly,
+                    Some(name.to_string()),
+                );
+            }
+        }
     }
 
     /// Mount a pre-created store at the given path.
@@ -98,7 +123,10 @@ impl<F: StoreFactory> MountStore<F> {
         let mount_path = Path::parse(name).map_err(Error::Path)?;
 
         // Add to overlay
-        self.overlay.mount(mount_path, store);
+        self.overlay.mount(mount_path.clone(), store);
+
+        // Discover and redirect docs
+        self.discover_and_redirect_docs(name, &mount_path);
 
         // Don't track in mounts BTreeMap since we don't have a config
         // This mount won't show up in list_mounts or be serializable,
@@ -123,10 +151,18 @@ impl<F: StoreFactory> MountStore<F> {
         // Remove from overlay (the actual routing)
         self.overlay.unmount(&mount_path);
 
+        // Cascade: remove any redirects this mount created
+        self.overlay.remove_redirects_for_mount(name);
+
         // Remove from tracking (the metadata)
         self.mounts.remove(name);
 
         Ok(())
+    }
+
+    /// List all redirects in the overlay.
+    pub fn list_redirects(&self) -> Vec<(Path, Path, RedirectMode)> {
+        self.overlay.list_redirects()
     }
 
     /// List all mounts

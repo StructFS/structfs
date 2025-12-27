@@ -2,6 +2,10 @@
 //!
 //! This implementation uses a prefix trie for efficient routing with fallthrough
 //! semantics - the deepest matching prefix handles the request.
+//!
+//! Supports both direct store mounts and redirects (path aliases) with cycle detection.
+
+use std::collections::HashSet;
 
 use crate::path_trie::PathTrie;
 use crate::{Error, Path, PathError, Reader, Record, Writer};
@@ -12,6 +16,32 @@ pub type StoreBox = Box<dyn Store + Send + Sync>;
 /// Combined read/write trait for stores.
 pub trait Store: Reader + Writer {}
 impl<T: Reader + Writer> Store for T {}
+
+/// Access control for redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectMode {
+    /// Allow reads through this redirect.
+    ReadOnly,
+    /// Allow writes through this redirect.
+    WriteOnly,
+    /// Allow both reads and writes.
+    ReadWrite,
+}
+
+/// What a route points to.
+pub enum RouteTarget {
+    /// Direct store mount.
+    Store(StoreBox),
+    /// Redirect to another path in the overlay.
+    Redirect {
+        /// Target path to redirect to.
+        target: Path,
+        /// Access mode for this redirect.
+        mode: RedirectMode,
+        /// Which mount created this redirect (for cascade unmount).
+        source_mount: Option<String>,
+    },
+}
 
 /// Wraps a Reader to reject all writes.
 pub struct OnlyReadable<R> {
@@ -104,6 +134,9 @@ impl<S: Writer> Writer for SubStoreView<S> {
 /// the store walks the trie to find the deepest mounted store that matches the
 /// path prefix, then delegates to that store with the remaining suffix.
 ///
+/// Supports redirects (path aliases) that forward requests to other paths,
+/// with cycle detection to prevent infinite loops.
+///
 /// # Example
 ///
 /// ```rust
@@ -120,9 +153,14 @@ impl<S: Writer> Writer for SubStoreView<S> {
 /// // Reads to /users/alice go to user_store with path "alice"
 /// // Reads to /config/theme go to config_store with path "theme"
 /// ```
-#[derive(Default)]
 pub struct OverlayStore {
-    trie: PathTrie<StoreBox>,
+    trie: PathTrie<RouteTarget>,
+}
+
+impl Default for OverlayStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OverlayStore {
@@ -141,21 +179,30 @@ impl OverlayStore {
         path: Path,
         store: S,
     ) -> Option<StoreBox> {
-        self.trie.insert(&path, Box::new(store))
+        match self.trie.insert(&path, RouteTarget::Store(Box::new(store))) {
+            Some(RouteTarget::Store(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// Mount a boxed store at the given path prefix.
     ///
     /// Returns the previous store at that exact path if any.
     pub fn mount_boxed(&mut self, path: Path, store: StoreBox) -> Option<StoreBox> {
-        self.trie.insert(&path, store)
+        match self.trie.insert(&path, RouteTarget::Store(store)) {
+            Some(RouteTarget::Store(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// Unmount store at exact path, keeping any nested mounts.
     ///
     /// Returns the removed store if found.
     pub fn unmount(&mut self, path: &Path) -> Option<StoreBox> {
-        self.trie.remove(path)
+        match self.trie.remove(path) {
+            Some(RouteTarget::Store(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// Unmount entire subtree at path, returning it as a new OverlayStore.
@@ -165,24 +212,87 @@ impl OverlayStore {
             .map(|trie| OverlayStore { trie })
     }
 
+    /// Add a redirect from one path to another.
+    ///
+    /// When a path under `from` is accessed, it will be redirected to
+    /// the corresponding path under `to`.
+    pub fn add_redirect(
+        &mut self,
+        from: Path,
+        to: Path,
+        mode: RedirectMode,
+        source_mount: Option<String>,
+    ) {
+        self.trie.insert(
+            &from,
+            RouteTarget::Redirect {
+                target: to,
+                mode,
+                source_mount,
+            },
+        );
+    }
+
+    /// Remove all redirects created by a specific mount.
+    pub fn remove_redirects_for_mount(&mut self, mount_name: &str) {
+        // Collect paths to remove (can't mutate while iterating)
+        let to_remove: Vec<Path> = self
+            .trie
+            .iter()
+            .filter_map(|(path, target)| match target {
+                RouteTarget::Redirect {
+                    source_mount: Some(src),
+                    ..
+                } if src == mount_name => Some(path),
+                _ => None,
+            })
+            .collect();
+
+        for path in to_remove {
+            self.trie.remove(&path);
+        }
+    }
+
+    /// List all redirects.
+    pub fn list_redirects(&self) -> Vec<(Path, Path, RedirectMode)> {
+        self.trie
+            .iter()
+            .filter_map(|(from, target)| match target {
+                RouteTarget::Redirect { target, mode, .. } => Some((from, target.clone(), *mode)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Check if any store would handle this path (fallthrough).
     pub fn has_route(&self, path: &Path) -> bool {
         self.trie.find_ancestor(path).is_some()
     }
 
-    /// Number of mounted stores.
-    pub fn store_count(&self) -> usize {
+    /// Number of mounted routes (stores + redirects).
+    pub fn route_count(&self) -> usize {
         self.trie.len()
     }
 
-    /// True if no stores mounted.
+    /// Number of mounted stores (excluding redirects).
+    pub fn store_count(&self) -> usize {
+        self.trie
+            .iter()
+            .filter(|(_, t)| matches!(t, RouteTarget::Store(_)))
+            .count()
+    }
+
+    /// True if no routes mounted.
     pub fn is_empty(&self) -> bool {
         self.trie.is_empty()
     }
 
-    /// Iterate over all mount points.
+    /// Iterate over all store mount points (excluding redirects).
     pub fn mounts(&self) -> impl Iterator<Item = (Path, &StoreBox)> {
-        self.trie.iter()
+        self.trie.iter().filter_map(|(path, target)| match target {
+            RouteTarget::Store(s) => Some((path, s)),
+            _ => None,
+        })
     }
 
     // === Deprecated methods for backwards compatibility ===
@@ -230,10 +340,94 @@ impl OverlayStore {
     }
 }
 
+/// Result of resolving a path through redirects.
+struct ResolvedRoute<'a> {
+    store: &'a mut StoreBox,
+    suffix: Path,
+    /// The prefix that led to this store (for reconstructing full paths).
+    prefix: Path,
+}
+
+impl OverlayStore {
+    /// Resolve a path for reading, following redirects with cycle detection.
+    fn resolve_for_read(&mut self, path: &Path) -> Result<Option<ResolvedRoute<'_>>, Error> {
+        let mut visited = HashSet::new();
+        self.resolve_with_tracking(path, &mut visited, false)
+    }
+
+    /// Resolve a path for writing, following redirects with cycle detection.
+    fn resolve_for_write(&mut self, path: &Path) -> Result<Option<ResolvedRoute<'_>>, Error> {
+        let mut visited = HashSet::new();
+        self.resolve_with_tracking(path, &mut visited, true)
+    }
+
+    fn resolve_with_tracking(
+        &mut self,
+        path: &Path,
+        visited: &mut HashSet<Path>,
+        is_write: bool,
+    ) -> Result<Option<ResolvedRoute<'_>>, Error> {
+        // Cycle detection - use the path prefix that matched, not the full path
+        if !visited.insert(path.clone()) {
+            return Err(Error::store(
+                "overlay",
+                if is_write { "write" } else { "read" },
+                "redirect cycle detected",
+            ));
+        }
+
+        // Find the ancestor route
+        let ancestor = self.trie.find_ancestor(path);
+        let (prefix_len, suffix, is_redirect, redirect_info) = match ancestor {
+            Some((target, suffix)) => {
+                let prefix_len = path.len() - suffix.len();
+                match target {
+                    RouteTarget::Store(_) => (prefix_len, suffix, false, None),
+                    RouteTarget::Redirect { target, mode, .. } => {
+                        // Check access mode
+                        let allowed = !matches!(
+                            (is_write, mode),
+                            (false, RedirectMode::WriteOnly) | (true, RedirectMode::ReadOnly)
+                        );
+                        if !allowed {
+                            return Ok(None);
+                        }
+                        (prefix_len, suffix, true, Some(target.clone()))
+                    }
+                }
+            }
+            None => return Ok(None),
+        };
+
+        // If it's a redirect, follow it recursively
+        if is_redirect {
+            if let Some(redirect_target) = redirect_info {
+                let new_path = redirect_target.join(&suffix);
+                return self.resolve_with_tracking(&new_path, visited, is_write);
+            }
+        }
+
+        // It's a store - get mutable reference
+        match self.trie.find_ancestor_mut(path) {
+            Some((RouteTarget::Store(store), suffix)) => {
+                let prefix = Path {
+                    components: path.components[..prefix_len].to_vec(),
+                };
+                Ok(Some(ResolvedRoute {
+                    store,
+                    suffix,
+                    prefix,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
 impl Reader for OverlayStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        match self.trie.find_ancestor_mut(from) {
-            Some((store, suffix)) => store.read(&suffix),
+        match self.resolve_for_read(from)? {
+            Some(resolved) => resolved.store.read(&resolved.suffix),
             None => Err(Error::NoRoute { path: from.clone() }),
         }
     }
@@ -241,15 +435,10 @@ impl Reader for OverlayStore {
 
 impl Writer for OverlayStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        match self.trie.find_ancestor_mut(to) {
-            Some((store, suffix)) => {
-                let result_suffix = store.write(&suffix, data)?;
-                // Reconstruct full path: prefix + result
-                let prefix_len = to.len() - suffix.len();
-                let prefix = Path {
-                    components: to.components[..prefix_len].to_vec(),
-                };
-                Ok(prefix.join(&result_suffix))
+        match self.resolve_for_write(to)? {
+            Some(resolved) => {
+                let result_suffix = resolved.store.write(&resolved.suffix, data)?;
+                Ok(resolved.prefix.join(&result_suffix))
             }
             None => Err(Error::NoRoute { path: to.clone() }),
         }
@@ -751,5 +940,199 @@ mod tests {
             .unwrap();
         let result = overlay.read(&path!("any/path")).unwrap();
         assert!(result.is_some());
+    }
+
+    // === Redirect tests ===
+
+    #[test]
+    fn redirect_basic() {
+        let mut overlay = OverlayStore::new();
+
+        // Mount a store at /data
+        let mut store = TestStore::new("data");
+        store
+            .write(&path!("key"), Record::parsed(Value::from("value")))
+            .unwrap();
+        overlay.mount(path!("data"), store);
+
+        // Add redirect: /alias -> /data
+        overlay.add_redirect(path!("alias"), path!("data"), RedirectMode::ReadWrite, None);
+
+        // Reading /alias/key should follow redirect to /data/key
+        let result = overlay.read(&path!("alias/key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("value"));
+    }
+
+    #[test]
+    fn redirect_write() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+
+        // Add redirect: /alias -> /data
+        overlay.add_redirect(path!("alias"), path!("data"), RedirectMode::ReadWrite, None);
+
+        // Write via redirect
+        overlay
+            .write(&path!("alias/key"), Record::parsed(Value::from("written")))
+            .unwrap();
+
+        // Read via original path
+        let result = overlay.read(&path!("data/key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("written"));
+    }
+
+    #[test]
+    fn redirect_read_only() {
+        let mut overlay = OverlayStore::new();
+
+        let mut store = TestStore::new("data");
+        store
+            .write(&path!("key"), Record::parsed(Value::from("value")))
+            .unwrap();
+        overlay.mount(path!("data"), store);
+
+        // Add read-only redirect
+        overlay.add_redirect(
+            path!("readonly"),
+            path!("data"),
+            RedirectMode::ReadOnly,
+            None,
+        );
+
+        // Reading works
+        let result = overlay.read(&path!("readonly/key")).unwrap();
+        assert!(result.is_some());
+
+        // Writing fails (returns no route)
+        let result = overlay.write(&path!("readonly/key"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redirect_write_only() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+
+        // Add write-only redirect
+        overlay.add_redirect(
+            path!("writeonly"),
+            path!("data"),
+            RedirectMode::WriteOnly,
+            None,
+        );
+
+        // Writing works
+        overlay
+            .write(
+                &path!("writeonly/key"),
+                Record::parsed(Value::from("value")),
+            )
+            .unwrap();
+
+        // Reading fails (returns no route)
+        let result = overlay.read(&path!("writeonly/key"));
+        assert!(result.is_err());
+
+        // But original path still works
+        let result = overlay.read(&path!("data/key")).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn redirect_cycle_detection() {
+        let mut overlay = OverlayStore::new();
+
+        // Create a cycle: /a -> /b -> /a
+        overlay.add_redirect(path!("a"), path!("b"), RedirectMode::ReadWrite, None);
+        overlay.add_redirect(path!("b"), path!("a"), RedirectMode::ReadWrite, None);
+
+        // Attempting to resolve should detect the cycle
+        let result = overlay.read(&path!("a/key"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn redirect_chain() {
+        let mut overlay = OverlayStore::new();
+
+        let mut store = TestStore::new("data");
+        store
+            .write(&path!("key"), Record::parsed(Value::from("chained")))
+            .unwrap();
+        overlay.mount(path!("data"), store);
+
+        // Create a chain: /a -> /b -> /data
+        overlay.add_redirect(path!("b"), path!("data"), RedirectMode::ReadWrite, None);
+        overlay.add_redirect(path!("a"), path!("b"), RedirectMode::ReadWrite, None);
+
+        // Reading through the chain works
+        let result = overlay.read(&path!("a/key")).unwrap().unwrap();
+        let value = result.into_value(&crate::NoCodec).unwrap();
+        assert_eq!(value, Value::from("chained"));
+    }
+
+    #[test]
+    fn redirect_remove_for_mount() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+
+        // Add redirects with source_mount
+        overlay.add_redirect(
+            path!("alias1"),
+            path!("data"),
+            RedirectMode::ReadWrite,
+            Some("mymount".to_string()),
+        );
+        overlay.add_redirect(
+            path!("alias2"),
+            path!("data"),
+            RedirectMode::ReadWrite,
+            Some("mymount".to_string()),
+        );
+        overlay.add_redirect(
+            path!("other"),
+            path!("data"),
+            RedirectMode::ReadWrite,
+            Some("othermount".to_string()),
+        );
+
+        assert_eq!(overlay.list_redirects().len(), 3);
+
+        // Remove redirects for "mymount"
+        overlay.remove_redirects_for_mount("mymount");
+
+        // Only "other" redirect remains
+        let redirects = overlay.list_redirects();
+        assert_eq!(redirects.len(), 1);
+        assert_eq!(redirects[0].0, path!("other"));
+    }
+
+    #[test]
+    fn redirect_list() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+
+        overlay.add_redirect(path!("alias"), path!("data"), RedirectMode::ReadOnly, None);
+
+        let redirects = overlay.list_redirects();
+        assert_eq!(redirects.len(), 1);
+        assert_eq!(redirects[0].0, path!("alias"));
+        assert_eq!(redirects[0].1, path!("data"));
+        assert_eq!(redirects[0].2, RedirectMode::ReadOnly);
+    }
+
+    #[test]
+    fn route_count_vs_store_count() {
+        let mut overlay = OverlayStore::new();
+        overlay.mount(path!("data"), TestStore::new("data"));
+        overlay.add_redirect(path!("alias"), path!("data"), RedirectMode::ReadWrite, None);
+
+        // route_count includes both stores and redirects
+        assert_eq!(overlay.route_count(), 2);
+        // store_count only counts stores
+        assert_eq!(overlay.store_count(), 1);
     }
 }

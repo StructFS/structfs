@@ -20,8 +20,187 @@ use crate::handle::RequestStatus;
 use crate::types::{HttpRequest, HttpResponse};
 
 const OUTSTANDING_PREFIX: &str = "outstanding";
+const DOCS_PATH: &str = "docs";
 
 type RequestId = u64;
+
+/// Generate documentation for the sync HTTP broker store.
+fn sync_broker_docs() -> structfs_core_store::Value {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(
+        "title".to_string(),
+        structfs_core_store::Value::String("Sync HTTP Broker".to_string()),
+    );
+    map.insert(
+        "description".to_string(),
+        structfs_core_store::Value::String(
+            "Queue HTTP requests by writing, execute on read (blocks until complete).".to_string(),
+        ),
+    );
+
+    let mut paths = std::collections::BTreeMap::new();
+    paths.insert(
+        "write /".to_string(),
+        structfs_core_store::Value::String("Queue request, returns outstanding/{id}".to_string()),
+    );
+    paths.insert(
+        "read /outstanding".to_string(),
+        structfs_core_store::Value::String("List queued request IDs".to_string()),
+    );
+    paths.insert(
+        "read /outstanding/{id}".to_string(),
+        structfs_core_store::Value::String(
+            "Execute request (blocks) and return response".to_string(),
+        ),
+    );
+    paths.insert(
+        "read /outstanding/{id}/request".to_string(),
+        structfs_core_store::Value::String("View the queued request".to_string()),
+    );
+    paths.insert(
+        "read /outstanding/{id}/response/body".to_string(),
+        structfs_core_store::Value::String("Navigate into response fields".to_string()),
+    );
+    paths.insert(
+        "write /outstanding/{id} null".to_string(),
+        structfs_core_store::Value::String("Delete the handle".to_string()),
+    );
+    map.insert("paths".to_string(), structfs_core_store::Value::Map(paths));
+
+    let example = vec![
+        "write / {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}",
+        "# Returns: outstanding/0",
+        "read /outstanding/0",
+        "# Blocks until complete, returns response",
+    ];
+    map.insert(
+        "example".to_string(),
+        structfs_core_store::Value::Array(
+            example
+                .into_iter()
+                .map(|s| structfs_core_store::Value::String(s.to_string()))
+                .collect(),
+        ),
+    );
+
+    structfs_core_store::Value::Map(map)
+}
+
+/// Generate documentation for the HTTP client store.
+fn http_client_docs() -> structfs_core_store::Value {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(
+        "title".to_string(),
+        structfs_core_store::Value::String("HTTP Client Store".to_string()),
+    );
+    map.insert(
+        "description".to_string(),
+        structfs_core_store::Value::String(
+            "Direct HTTP client with a base URL. Read = GET, Write = POST.".to_string(),
+        ),
+    );
+
+    let mut paths = std::collections::BTreeMap::new();
+    paths.insert(
+        "read /<path>".to_string(),
+        structfs_core_store::Value::String("GET request to base_url/<path>".to_string()),
+    );
+    paths.insert(
+        "write /<path> <json>".to_string(),
+        structfs_core_store::Value::String("POST request to base_url/<path>".to_string()),
+    );
+    paths.insert(
+        "write / <HttpRequest>".to_string(),
+        structfs_core_store::Value::String("Execute arbitrary request".to_string()),
+    );
+    map.insert("paths".to_string(), structfs_core_store::Value::Map(paths));
+
+    let example = vec![
+        "# Mount at /api with base URL",
+        "write /ctx/mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}",
+        "read /api/users  # GET https://api.example.com/users",
+        "write /api/users {\"name\": \"Alice\"}  # POST with body",
+    ];
+    map.insert(
+        "example".to_string(),
+        structfs_core_store::Value::Array(
+            example
+                .into_iter()
+                .map(|s| structfs_core_store::Value::String(s.to_string()))
+                .collect(),
+        ),
+    );
+
+    structfs_core_store::Value::Map(map)
+}
+
+/// Generate documentation for the async HTTP broker store.
+fn async_broker_docs() -> structfs_core_store::Value {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(
+        "title".to_string(),
+        structfs_core_store::Value::String("Async HTTP Broker".to_string()),
+    );
+    map.insert(
+        "description".to_string(),
+        structfs_core_store::Value::String(
+            "Queue HTTP requests by writing, requests execute in background threads.".to_string(),
+        ),
+    );
+
+    let mut paths = std::collections::BTreeMap::new();
+    paths.insert(
+        "write /".to_string(),
+        structfs_core_store::Value::String("Queue request, returns outstanding/{id}".to_string()),
+    );
+    paths.insert(
+        "read /outstanding".to_string(),
+        structfs_core_store::Value::String("List queued request IDs".to_string()),
+    );
+    paths.insert(
+        "read /outstanding/{id}".to_string(),
+        structfs_core_store::Value::String(
+            "Get request status (pending/complete/failed)".to_string(),
+        ),
+    );
+    paths.insert(
+        "read /outstanding/{id}/request".to_string(),
+        structfs_core_store::Value::String("View the queued request".to_string()),
+    );
+    paths.insert(
+        "read /outstanding/{id}/response".to_string(),
+        structfs_core_store::Value::String("Get response (None if still pending)".to_string()),
+    );
+    paths.insert(
+        "read /outstanding/{id}/response/wait".to_string(),
+        structfs_core_store::Value::String("Block until response ready".to_string()),
+    );
+    paths.insert(
+        "write /outstanding/{id} null".to_string(),
+        structfs_core_store::Value::String("Delete the handle".to_string()),
+    );
+    map.insert("paths".to_string(), structfs_core_store::Value::Map(paths));
+
+    let example = vec![
+        "write / {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}",
+        "# Returns: outstanding/0 (request starts executing)",
+        "read /outstanding/0",
+        "# Returns status: {\"status\": \"pending\"} or {\"status\": \"complete\"}",
+        "read /outstanding/0/response/wait",
+        "# Blocks until complete, returns response",
+    ];
+    map.insert(
+        "example".to_string(),
+        structfs_core_store::Value::Array(
+            example
+                .into_iter()
+                .map(|s| structfs_core_store::Value::String(s.to_string()))
+                .collect(),
+        ),
+    );
+
+    structfs_core_store::Value::Map(map)
+}
 
 /// Navigate into a Value structure using path components.
 ///
@@ -169,6 +348,11 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
 
 impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Handle docs: read /docs or /docs/... -> documentation
+        if !from.is_empty() && from[0] == DOCS_PATH {
+            return Ok(Some(Record::parsed(sync_broker_docs())));
+        }
+
         // Handle listing: read /outstanding -> [0, 1, 2, ...]
         if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
             let ids: Vec<structfs_core_store::Value> = self
@@ -409,6 +593,11 @@ impl<E: HttpExecutor> HttpClientStore<E> {
 
 impl<E: HttpExecutor> Reader for HttpClientStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Handle docs: read /docs or /docs/... -> documentation
+        if !from.is_empty() && from[0] == DOCS_PATH {
+            return Ok(Some(Record::parsed(http_client_docs())));
+        }
+
         let response = self
             .get(from)
             .map_err(|e| Error::store("http_client", "read", e.to_string()))?;
@@ -671,6 +860,11 @@ impl AsyncHttpBrokerStore {
 
 impl Reader for AsyncHttpBrokerStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Handle docs: read /docs or /docs/... -> documentation
+        if !from.is_empty() && from[0] == DOCS_PATH {
+            return Ok(Some(Record::parsed(async_broker_docs())));
+        }
+
         // Handle listing: read /outstanding -> [0, 1, 2, ...]
         if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
             let handles = self.handles.lock().map_err(|e| {
@@ -1839,5 +2033,63 @@ mod tests {
     fn test_client_store_invalid_url() {
         let client = HttpClientStore::new("not a url");
         assert!(client.is_err());
+    }
+
+    // ==================== Docs tests ====================
+
+    #[test]
+    fn test_sync_broker_docs() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("docs")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            structfs_core_store::Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+                assert!(map.contains_key("paths"));
+                assert!(map.contains_key("example"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_async_broker_docs() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("docs")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            structfs_core_store::Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+                assert!(map.contains_key("paths"));
+                assert!(map.contains_key("example"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn test_http_client_docs() {
+        let mock = MockExecutor::new();
+        let mut client = HttpClientStore::with_executor("https://example.com", mock).unwrap();
+
+        let result = client.read(&path!("docs")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            structfs_core_store::Value::Map(map) => {
+                assert!(map.contains_key("title"));
+                assert!(map.contains_key("description"));
+                assert!(map.contains_key("paths"));
+                assert!(map.contains_key("example"));
+            }
+            _ => panic!("Expected map"),
+        }
     }
 }
