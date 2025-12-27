@@ -23,6 +23,34 @@ const OUTSTANDING_PREFIX: &str = "outstanding";
 
 type RequestId = u64;
 
+/// Navigate into a Value structure using path components.
+///
+/// Given a Value and a path like ["headers", "content-type"], returns the nested value.
+/// Returns `Err(index)` if navigation fails at path component `index`.
+fn navigate_value(
+    value: structfs_core_store::Value,
+    path: &[&str],
+) -> Result<structfs_core_store::Value, usize> {
+    let mut current = value;
+
+    for (i, key) in path.iter().enumerate() {
+        current = match current {
+            structfs_core_store::Value::Map(map) => map
+                .into_iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v)
+                .ok_or(i)?,
+            structfs_core_store::Value::Array(arr) => {
+                let index: usize = key.parse().map_err(|_| i)?;
+                arr.into_iter().nth(index).ok_or(i)?
+            }
+            _ => return Err(i), // Can't navigate into scalars
+        };
+    }
+
+    Ok(current)
+}
+
 /// State of a request handle in the sync broker.
 ///
 /// Requests transition through states: Queued -> Executed (with cached response or error).
@@ -61,7 +89,8 @@ impl SyncRequestHandle {
 /// |------|-----------|--------|
 /// | `write /` | Queue request | Returns `outstanding/{id}` |
 /// | `read /outstanding` | List handles | Returns `[0, 1, 2, ...]` |
-/// | `read /outstanding/{id}` | Execute & return response | Returns cached response |
+/// | `read /outstanding/{id}` | Execute (blocks) & return response | Returns cached response |
+/// | `read /outstanding/{id}/response` | Same as above | Returns cached response |
 /// | `read /outstanding/{id}/request` | View queued request | Returns original request |
 /// | `write /outstanding/{id} null` | Delete handle | Removes handle |
 ///
@@ -107,7 +136,8 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
     /// - "outstanding" -> None (listing)
     /// - "outstanding/123" -> Some((123, None))
     /// - "outstanding/123/request" -> Some((123, Some("request")))
-    fn parse_handle_path(path: &Path) -> Option<(RequestId, Option<&str>)> {
+    /// - "outstanding/123/response/status" -> Some((123, Some("response/status")))
+    fn parse_handle_path(path: &Path) -> Option<(RequestId, Option<String>)> {
         if path.is_empty() || path[0] != OUTSTANDING_PREFIX {
             return None;
         }
@@ -117,7 +147,7 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
         }
         let id: RequestId = path[1].parse().ok()?;
         let sub_path = if path.len() > 2 {
-            Some(path[2].as_str())
+            Some(path.components[2..].join("/"))
         } else {
             None
         };
@@ -169,47 +199,81 @@ impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
             )
         })?;
 
-        // Return queued request at /outstanding/{id}/request
-        if sub_path == Some("request") {
+        // Parse sub-path components for deep navigation
+        let sub_components: Vec<&str> = sub_path
+            .as_deref()
+            .map(|s| s.split('/').collect())
+            .unwrap_or_default();
+
+        // Handle /outstanding/{id}/request[/...] - view queued request
+        if sub_components.first() == Some(&"request") {
             let value = to_value(&handle.request)
                 .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+
+            // Navigate into request if there's a deeper path
+            if sub_components.len() > 1 {
+                let nav_path = &sub_components[1..];
+                return match navigate_value(value, nav_path) {
+                    Ok(v) => Ok(Some(Record::parsed(v))),
+                    Err(i) => Err(Error::store(
+                        "http_broker",
+                        "read",
+                        format!("Path not found at index {}: '{}'", i, nav_path[i]),
+                    )),
+                };
+            }
             return Ok(Some(Record::parsed(value)));
         }
 
-        // Reject unknown sub-paths
-        if let Some(unknown) = sub_path {
-            return Err(Error::store(
-                "http_broker",
-                "read",
-                format!(
-                    "Unknown sub-path '{}'. Use 'request' to view the queued request.",
-                    unknown
-                ),
-            ));
-        }
+        // Handle /outstanding/{id}[/response[/...]] - execute and return response
+        // Both paths have the same blocking behavior for symmetry with async broker
+        if sub_components.is_empty() || sub_components.first() == Some(&"response") {
+            // Execute on first read if not yet executed (idempotent)
+            if !handle.is_executed() {
+                match self.executor.execute(&handle.request) {
+                    Ok(response) => handle.response = Some(response),
+                    Err(e) => handle.error = Some(e),
+                }
+            }
 
-        // Execute on first read if not yet executed (idempotent)
-        if !handle.is_executed() {
-            match self.executor.execute(&handle.request) {
-                Ok(response) => handle.response = Some(response),
-                Err(e) => handle.error = Some(e),
+            // Return cached response or error
+            if let Some(ref response) = handle.response {
+                let value = to_value(response)
+                    .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+
+                // Navigate into response if there's a deeper path
+                if sub_components.len() > 1 {
+                    let nav_path = &sub_components[1..];
+                    return match navigate_value(value, nav_path) {
+                        Ok(v) => Ok(Some(Record::parsed(v))),
+                        Err(i) => Err(Error::store(
+                            "http_broker",
+                            "read",
+                            format!("Path not found at index {}: '{}'", i, nav_path[i]),
+                        )),
+                    };
+                }
+                return Ok(Some(Record::parsed(value)));
+            } else if let Some(ref error) = handle.error {
+                return Err(Error::store(
+                    "http_broker",
+                    "read",
+                    format!("HTTP request failed: {}", error),
+                ));
+            } else {
+                unreachable!("handle.is_executed() was true but neither response nor error is set")
             }
         }
 
-        // Return cached response or error
-        if let Some(ref response) = handle.response {
-            let value = to_value(response)
-                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-            Ok(Some(Record::parsed(value)))
-        } else if let Some(ref error) = handle.error {
-            Err(Error::store(
-                "http_broker",
-                "read",
-                format!("HTTP request failed: {}", error),
-            ))
-        } else {
-            unreachable!("handle.is_executed() was true but neither response nor error is set")
-        }
+        // Reject unknown sub-paths
+        Err(Error::store(
+            "http_broker",
+            "read",
+            format!(
+                "Unknown sub-path '{}'. Use 'request' or 'response'.",
+                sub_components.first().unwrap_or(&""),
+            ),
+        ))
     }
 }
 
@@ -434,6 +498,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
 
 /// Internal state for an async request
 struct AsyncRequestHandle {
+    request: HttpRequest,
     status: RequestStatus,
     response: Option<HttpResponse>,
 }
@@ -442,6 +507,18 @@ struct AsyncRequestHandle {
 ///
 /// Requests are executed in background threads. Write to queue a request,
 /// read from the handle to check status or get the response.
+///
+/// ## Path Structure
+///
+/// | Path | Operation | Result |
+/// |------|-----------|--------|
+/// | `write /` | Queue request | Returns `outstanding/{id}` |
+/// | `read /outstanding` | List handles | Returns `[0, 1, 2, ...]` |
+/// | `read /outstanding/{id}` | Check status | Returns `RequestStatus` |
+/// | `read /outstanding/{id}/request` | View queued request | Returns original request |
+/// | `read /outstanding/{id}/response` | Get response (non-blocking) | Returns response or `None` if pending |
+/// | `read /outstanding/{id}/response/wait` | Get response (blocking) | Blocks until response ready |
+/// | `write /outstanding/{id} null` | Delete handle | Removes handle |
 pub struct AsyncHttpBrokerStore {
     handles: Arc<Mutex<HashMap<RequestId, AsyncRequestHandle>>>,
     next_request_id: RequestId,
@@ -534,20 +611,102 @@ impl AsyncHttpBrokerStore {
         };
         Some((id, sub_path))
     }
+
+    /// Blocking read of response - polls until complete or failed.
+    /// Optionally navigates into the response using the provided path.
+    fn blocking_read_response_with_path(
+        &self,
+        request_id: RequestId,
+        nav_path: &[&str],
+    ) -> Result<Option<Record>, Error> {
+        const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+        loop {
+            let handles = self.handles.lock().map_err(|e| {
+                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
+            })?;
+
+            let handle = handles.get(&request_id).ok_or_else(|| {
+                Error::store(
+                    "async_http_broker",
+                    "read",
+                    format!("Request with ID {} not found", request_id),
+                )
+            })?;
+
+            if let Some(ref response) = handle.response {
+                let value = to_value(response)
+                    .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+
+                if !nav_path.is_empty() {
+                    return match navigate_value(value, nav_path) {
+                        Ok(v) => Ok(Some(Record::parsed(v))),
+                        Err(i) => Err(Error::store(
+                            "async_http_broker",
+                            "read",
+                            format!("Path not found at index {}: '{}'", i, nav_path[i]),
+                        )),
+                    };
+                }
+                return Ok(Some(Record::parsed(value)));
+            }
+
+            if handle.status.is_failed() {
+                return Err(Error::store(
+                    "async_http_broker",
+                    "read",
+                    format!(
+                        "HTTP request failed: {}",
+                        handle.status.error.as_deref().unwrap_or("unknown error")
+                    ),
+                ));
+            }
+
+            // Still pending - release lock and wait before polling again
+            drop(handles);
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
 }
 
 impl Reader for AsyncHttpBrokerStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Handle listing: read /outstanding -> [0, 1, 2, ...]
+        if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
+            let handles = self.handles.lock().map_err(|e| {
+                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
+            })?;
+            let ids: Vec<structfs_core_store::Value> = handles
+                .keys()
+                .map(|id| structfs_core_store::Value::Integer(*id as i64))
+                .collect();
+            return Ok(Some(Record::parsed(structfs_core_store::Value::Array(ids))));
+        }
+
         let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| {
             Error::store(
                 "async_http_broker",
                 "read",
                 format!(
-                    "Invalid handle path '{}'. Expected format: outstanding/{{id}}[/response]",
+                    "Invalid path '{}'. Expected: outstanding, outstanding/{{id}}, or outstanding/{{id}}/...",
                     from
                 ),
             )
         })?;
+
+        // Parse sub-path components for deep navigation
+        let sub_components: Vec<&str> = sub_path
+            .as_deref()
+            .map(|s| s.split('/').collect())
+            .unwrap_or_default();
+
+        // Handle blocking wait: /outstanding/{id}/response/wait[/...]
+        if sub_components.len() >= 2
+            && sub_components[0] == "response"
+            && sub_components[1] == "wait"
+        {
+            return self.blocking_read_response_with_path(request_id, &sub_components[2..]);
+        }
 
         let handles = self
             .handles
@@ -562,83 +721,155 @@ impl Reader for AsyncHttpBrokerStore {
             )
         })?;
 
-        let value = match sub_path.as_deref() {
-            Some("response") => {
-                if let Some(ref response) = handle.response {
-                    to_value(response).map_err(|e| {
-                        Error::encode(structfs_core_store::Format::JSON, e.to_string())
-                    })?
-                } else {
-                    return Ok(None); // Response not ready yet
-                }
+        // Handle /outstanding/{id}/request[/...] - view queued request
+        if sub_components.first() == Some(&"request") {
+            let value = to_value(&handle.request)
+                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+
+            if sub_components.len() > 1 {
+                let nav_path = &sub_components[1..];
+                return match navigate_value(value, nav_path) {
+                    Ok(v) => Ok(Some(Record::parsed(v))),
+                    Err(i) => Err(Error::store(
+                        "async_http_broker",
+                        "read",
+                        format!("Path not found at index {}: '{}'", i, nav_path[i]),
+                    )),
+                };
             }
-            None => to_value(&handle.status)
-                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?,
-            Some(other) => {
+            return Ok(Some(Record::parsed(value)));
+        }
+
+        // Handle /outstanding/{id}/response[/...] - non-blocking response
+        if sub_components.first() == Some(&"response") {
+            if let Some(ref response) = handle.response {
+                let value = to_value(response)
+                    .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+
+                if sub_components.len() > 1 {
+                    let nav_path = &sub_components[1..];
+                    return match navigate_value(value, nav_path) {
+                        Ok(v) => Ok(Some(Record::parsed(v))),
+                        Err(i) => Err(Error::store(
+                            "async_http_broker",
+                            "read",
+                            format!("Path not found at index {}: '{}'", i, nav_path[i]),
+                        )),
+                    };
+                }
+                return Ok(Some(Record::parsed(value)));
+            } else if handle.status.is_failed() {
                 return Err(Error::store(
                     "async_http_broker",
                     "read",
                     format!(
-                        "Unknown sub-path '{}'. Use 'response' to get the response.",
-                        other
+                        "HTTP request failed: {}",
+                        handle.status.error.as_deref().unwrap_or("unknown error")
                     ),
                 ));
+            } else {
+                return Ok(None); // Response not ready yet
             }
-        };
+        }
 
-        Ok(Some(Record::parsed(value)))
+        // Handle /outstanding/{id} - return status
+        if sub_components.is_empty() {
+            let value = to_value(&handle.status)
+                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+            return Ok(Some(Record::parsed(value)));
+        }
+
+        // Reject unknown sub-paths
+        Err(Error::store(
+            "async_http_broker",
+            "read",
+            format!(
+                "Unknown sub-path '{}'. Use 'request', 'response', or 'response/wait'.",
+                sub_components.first().unwrap_or(&""),
+            ),
+        ))
     }
 }
 
 impl Writer for AsyncHttpBrokerStore {
-    fn write(&mut self, _to: &Path, data: Record) -> Result<Path, Error> {
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-
-        // Convert Record to HttpRequest
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         let value = data.into_value(&NoCodec)?;
-        let request: HttpRequest = from_value(value).map_err(|e| {
-            Error::decode(
-                structfs_core_store::Format::JSON,
-                format!("Data must be an HttpRequest: {}", e),
-            )
-        })?;
 
-        // Create initial pending status
-        let handle = AsyncRequestHandle {
-            status: RequestStatus::pending(request_id.to_string()),
-            response: None,
-        };
-
-        {
-            let mut handles = self.handles.lock().map_err(|e| {
-                Error::store("async_http_broker", "write", format!("Lock error: {}", e))
-            })?;
-            handles.insert(request_id, handle);
+        // Delete handle: write null to /outstanding/{id}
+        if let Some((request_id, None)) = Self::parse_handle_path(to) {
+            if value == structfs_core_store::Value::Null {
+                let mut handles = self.handles.lock().map_err(|e| {
+                    Error::store("async_http_broker", "write", format!("Lock error: {}", e))
+                })?;
+                handles.remove(&request_id);
+                return Ok(to.clone());
+            }
+            return Err(Error::store(
+                "async_http_broker",
+                "write",
+                "Cannot overwrite existing request. Write null to delete, or write to root to queue a new request.",
+            ));
         }
 
-        // Spawn background thread to execute the request
-        let handles = Arc::clone(&self.handles);
-        let timeout = self.timeout;
-        thread::spawn(move || {
-            let result = Self::execute_request(request, timeout);
+        // Queue new request: write to root
+        if to.is_empty() {
+            let request: HttpRequest = from_value(value).map_err(|e| {
+                Error::decode(
+                    structfs_core_store::Format::JSON,
+                    format!("Data must be an HttpRequest: {}", e),
+                )
+            })?;
 
-            if let Ok(mut handles) = handles.lock() {
-                if let Some(handle) = handles.get_mut(&request_id) {
-                    match result {
-                        Ok(response) => {
-                            handle.status = RequestStatus::complete(request_id.to_string());
-                            handle.response = Some(response);
-                        }
-                        Err(error) => {
-                            handle.status = RequestStatus::failed(request_id.to_string(), error);
+            let request_id = self.next_request_id;
+            self.next_request_id += 1;
+
+            // Create initial pending status with the request stored
+            let handle = AsyncRequestHandle {
+                request: request.clone(),
+                status: RequestStatus::pending(request_id.to_string()),
+                response: None,
+            };
+
+            {
+                let mut handles = self.handles.lock().map_err(|e| {
+                    Error::store("async_http_broker", "write", format!("Lock error: {}", e))
+                })?;
+                handles.insert(request_id, handle);
+            }
+
+            // Spawn background thread to execute the request
+            let handles = Arc::clone(&self.handles);
+            let timeout = self.timeout;
+            thread::spawn(move || {
+                let result = Self::execute_request(request, timeout);
+
+                if let Ok(mut handles) = handles.lock() {
+                    if let Some(handle) = handles.get_mut(&request_id) {
+                        match result {
+                            Ok(response) => {
+                                handle.status = RequestStatus::complete(request_id.to_string());
+                                handle.response = Some(response);
+                            }
+                            Err(error) => {
+                                handle.status =
+                                    RequestStatus::failed(request_id.to_string(), error);
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
 
-        Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))))
+            return Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))));
+        }
+
+        Err(Error::store(
+            "async_http_broker",
+            "write",
+            format!(
+                "Invalid write path '{}'. Write to root to queue a request, or write null to outstanding/{{id}} to delete.",
+                to
+            ),
+        ))
     }
 }
 
@@ -668,7 +899,14 @@ mod tests {
         // With sub-path
         assert_eq!(
             HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!("outstanding/0/request")),
-            Some((0, Some("request")))
+            Some((0, Some("request".to_string())))
+        );
+        // With deep sub-path
+        assert_eq!(
+            HttpBrokerStore::<ReqwestExecutor>::parse_handle_path(&path!(
+                "outstanding/0/response/status"
+            )),
+            Some((0, Some("response/status".to_string())))
         );
         // Invalid paths
         assert_eq!(
@@ -1077,6 +1315,98 @@ mod tests {
             .contains("Invalid write path"));
     }
 
+    // ==================== Deep path navigation tests ====================
+
+    #[test]
+    fn test_broker_deep_response_navigation() {
+        let mock = MockExecutor::new().with_response(
+            "https://api.example.com/data",
+            MockExecutor::success_response(serde_json::json!({"nested": {"value": 42}})),
+        );
+
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue and execute request
+        let request = HttpRequest::get("https://api.example.com/data");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // Deep navigation into response
+        let result = broker
+            .read(&handle.join(&path!("response/status")))
+            .unwrap()
+            .unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(value, structfs_core_store::Value::Integer(200));
+
+        // Navigate into body
+        let result = broker
+            .read(&handle.join(&path!("response/body/nested/value")))
+            .unwrap()
+            .unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(value, structfs_core_store::Value::Integer(42));
+    }
+
+    #[test]
+    fn test_broker_deep_request_navigation() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue request with specific details
+        let request = HttpRequest::get("https://api.example.com/users");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // Navigate into request method
+        let result = broker
+            .read(&handle.join(&path!("request/method")))
+            .unwrap()
+            .unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(value, structfs_core_store::Value::String("GET".to_string()));
+
+        // Navigate into request path
+        let result = broker
+            .read(&handle.join(&path!("request/path")))
+            .unwrap()
+            .unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        assert_eq!(
+            value,
+            structfs_core_store::Value::String("https://api.example.com/users".to_string())
+        );
+    }
+
+    #[test]
+    fn test_broker_deep_navigation_missing_path() {
+        let mock = MockExecutor::new().with_response(
+            "/test",
+            MockExecutor::success_response(serde_json::json!({"a": 1})),
+        );
+
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let handle = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        // Navigate to non-existent path returns error with failing component
+        let result = broker.read(&handle.join(&path!("response/body/nonexistent/path")));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent"),
+            "Error should mention failing component: {}",
+            err
+        );
+    }
+
     // ==================== HttpClientStore tests ====================
 
     #[test]
@@ -1292,10 +1622,7 @@ mod tests {
 
         let result = broker.read(&path!("invalid"));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid handle path"));
+        assert!(result.unwrap_err().to_string().contains("Invalid path"));
     }
 
     #[test]
@@ -1354,6 +1681,132 @@ mod tests {
     fn test_async_broker_custom_timeout() {
         let broker = AsyncHttpBrokerStore::new(Duration::from_secs(5)).unwrap();
         assert_eq!(broker.timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_async_broker_list_outstanding() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue multiple requests
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/a")).unwrap()),
+            )
+            .unwrap();
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/b")).unwrap()),
+            )
+            .unwrap();
+
+        // List outstanding
+        let result = broker.read(&path!("outstanding")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            structfs_core_store::Value::Array(ids) => {
+                assert_eq!(ids.len(), 2);
+            }
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_async_broker_view_queued_request() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request with specific details
+        let request = HttpRequest::get("https://api.example.com/users")
+            .with_header("Authorization", "Bearer token123");
+        let handle = broker
+            .write(&path!(""), Record::parsed(to_value(&request).unwrap()))
+            .unwrap();
+
+        // Read the queued request
+        let request_path = handle.join(&path!("request"));
+        let result = broker.read(&request_path).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+        let retrieved: HttpRequest = from_value(value).unwrap();
+
+        assert_eq!(retrieved.method, crate::types::Method::GET);
+        assert_eq!(retrieved.path, "https://api.example.com/users");
+        assert_eq!(
+            retrieved.headers.get("Authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_async_broker_delete_handle() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request
+        let handle = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        // Verify it exists
+        let list = broker.read(&path!("outstanding")).unwrap().unwrap();
+        let value = list.into_value(&NoCodec).unwrap();
+        match value {
+            structfs_core_store::Value::Array(ids) => assert_eq!(ids.len(), 1),
+            _ => panic!("Expected array"),
+        }
+
+        // Delete by writing null
+        broker
+            .write(&handle, Record::parsed(structfs_core_store::Value::Null))
+            .unwrap();
+
+        // Verify it's gone
+        let list = broker.read(&path!("outstanding")).unwrap().unwrap();
+        let value = list.into_value(&NoCodec).unwrap();
+        match value {
+            structfs_core_store::Value::Array(ids) => assert_eq!(ids.len(), 0),
+            _ => panic!("Expected array"),
+        }
+    }
+
+    #[test]
+    fn test_async_broker_cannot_overwrite() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request
+        let handle = broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/original")).unwrap()),
+            )
+            .unwrap();
+
+        // Try to overwrite with non-null value
+        let result = broker.write(
+            &handle,
+            Record::parsed(to_value(&HttpRequest::get("/replacement")).unwrap()),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot overwrite"));
+    }
+
+    #[test]
+    fn test_async_broker_invalid_write_path() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Try to write to invalid path
+        let result = broker.write(
+            &path!("something/else"),
+            Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid write path"));
     }
 
     // ==================== Production executor tests ====================
