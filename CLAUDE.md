@@ -60,7 +60,13 @@ cargo run -p structfs-repl
 
 3. **Path-based routing**: Paths are the universal addressing mechanism. The `Path` type normalizes trailing slashes and validates components.
 
-4. **Default context mounts**: The REPL provides built-in stores at `/ctx/*`:
+4. **Mutable Reader/Writer traits**: Both `read()` and `write()` take `&mut self`.
+   This is intentional—some stores (HTTP broker, filesystem) have state that
+   changes on read. Using `&mut self` uniformly avoids the complexity of split
+   traits or interior mutability. For concurrent access, wrap stores in
+   `Arc<Mutex<_>>` explicitly.
+
+5. **Default context mounts**: The REPL provides built-in stores at `/ctx/*`:
    - `/ctx/http` - Async HTTP broker (background execution)
    - `/ctx/http_sync` - Sync HTTP broker (blocks until complete)
    - `/ctx/help` - Documentation system

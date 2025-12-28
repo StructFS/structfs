@@ -9,17 +9,53 @@ use crate::{Error, Format, Path, Record, Value};
 /// This is the semantic read interface. Paths are validated Unicode identifiers,
 /// and the returned Record can be either raw bytes or parsed values.
 ///
+/// # Mutability
+///
+/// Both `Reader::read` and `Writer::write` take `&mut self`. This is intentional:
+///
+/// 1. **Stateful stores exist**: Some stores maintain state that changes on read.
+///    For example:
+///    - HTTP broker caches responses after first read
+///    - Filesystem store tracks file position
+///
+/// 2. **Uniformity**: A single trait signature works for all stores. Stores that
+///    don't mutate on read simply ignore the mutability—the compiler optimizes
+///    this away.
+///
+/// 3. **No interior mutability tax**: Stores don't need `Mutex` or `RefCell`
+///    internally just to satisfy the trait. This avoids runtime overhead and
+///    potential deadlocks.
+///
+/// # Concurrent Access
+///
+/// For concurrent access to a store, wrap it explicitly:
+///
+/// ```rust,ignore
+/// use std::sync::{Arc, Mutex};
+///
+/// let store = Arc::new(Mutex::new(MyStore::new()));
+///
+/// // In thread 1:
+/// let mut guard = store.lock().unwrap();
+/// guard.read(&path)?;
+///
+/// // In thread 2:
+/// let mut guard = store.lock().unwrap();
+/// guard.read(&other_path)?;
+/// ```
+///
+/// This makes synchronization explicit at the usage site rather than hidden
+/// in the trait design.
+///
 /// # Object Safety
 ///
 /// This trait is object-safe: you can use `Box<dyn Reader>`.
 pub trait Reader: Send + Sync {
     /// Read a record from a path.
     ///
-    /// # Returns
-    ///
-    /// * `Ok(None)` - The path does not exist.
-    /// * `Ok(Some(record))` - The record at the path.
-    /// * `Err(Error)` - An error occurred.
+    /// Returns `Ok(Some(record))` if data exists at the path,
+    /// `Ok(None)` if the path doesn't exist,
+    /// or `Err` if an error occurred.
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error>;
 }
 
@@ -28,17 +64,17 @@ pub trait Reader: Send + Sync {
 /// This is the semantic write interface. Paths are validated Unicode identifiers,
 /// and the data can be either raw bytes or parsed values.
 ///
+/// See [`Reader`] for discussion of the `&mut self` requirement.
+///
 /// # Object Safety
 ///
 /// This trait is object-safe: you can use `Box<dyn Writer>`.
 pub trait Writer: Send + Sync {
     /// Write a record to a path.
     ///
-    /// # Returns
-    ///
-    /// The "result path". This may be:
-    /// - The same as the input path (for simple stores)
-    /// - A different path (e.g., a generated ID, a handle for async operations)
+    /// Returns the path where data was written. This may differ from the
+    /// input path—for example, the HTTP broker returns a handle path like
+    /// `/outstanding/0` after queuing a request to the root path.
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error>;
 }
 
