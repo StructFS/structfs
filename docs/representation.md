@@ -78,7 +78,9 @@ Protocols define an abstract *struct*-based state machine over some set of
 > *protocol's* state machine as an abstract *struct*-based state model and the
 > set of *actions* as transition edges over a family of *interfaces*.
 
-## Consistency of a StructFS API
+## Recommended StructFS API properties
+
+### Consistency
 
 A StructFS store is considered strongly consistent if reading /foo returns a
 structure which contains a field "bar", and reading /foo/bar returns an
@@ -94,7 +96,7 @@ judgement.
 > When given two equal decisions when defining a StructFS API, prefer the more
 consistent one.
 
-## Concision of a StructFS API
+### Concision
 
 A StructFS interface is concise if there is one and only one way to perform a
 given action.
