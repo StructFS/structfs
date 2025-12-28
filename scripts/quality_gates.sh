@@ -34,8 +34,8 @@ if ! command -v cargo-llvm-cov &> /dev/null; then
     echo "skipped (cargo-llvm-cov not installed)"
 else
     cov_json=$(cargo llvm-cov --workspace --json 2>/dev/null)
-    # Extract line coverage percentage from totals
-    coverage=$(echo "$cov_json" | grep -o '"lines":{"count":[0-9]*,"covered":[0-9]*' | head -1 | \
+    # Extract line coverage percentage from totals (last entry in JSON)
+    coverage=$(echo "$cov_json" | grep -o '"lines":{"count":[0-9]*,"covered":[0-9]*' | tail -1 | \
         awk -F'[:,]' '{if ($3 > 0) printf "%.1f", ($5 / $3) * 100; else print "0"}')
 
     if [[ -z "$coverage" ]]; then

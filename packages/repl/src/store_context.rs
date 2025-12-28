@@ -1166,4 +1166,62 @@ mod tests {
         let err = ContextError::InvalidPath("test error".to_string());
         assert!(err.to_string().contains("test error"));
     }
+
+    // Factory error path tests
+    #[test]
+    fn factory_local_not_available() {
+        let factory = CoreReplStoreFactory;
+        let result = factory.create(&MountConfig::Local {
+            path: "/tmp".to_string(),
+        });
+        match result {
+            Err(e) => assert!(e.to_string().contains("not yet available")),
+            Ok(_) => panic!("Expected error for Local config"),
+        }
+    }
+
+    #[test]
+    fn factory_http_not_available() {
+        let factory = CoreReplStoreFactory;
+        let result = factory.create(&MountConfig::Http {
+            url: "https://example.com".to_string(),
+        });
+        match result {
+            Err(e) => assert!(e.to_string().contains("not yet available")),
+            Ok(_) => panic!("Expected error for Http config"),
+        }
+    }
+
+    #[test]
+    fn factory_structfs_not_available() {
+        let factory = CoreReplStoreFactory;
+        let result = factory.create(&MountConfig::Structfs {
+            url: "https://example.com".to_string(),
+        });
+        match result {
+            Err(e) => assert!(e.to_string().contains("not yet available")),
+            Ok(_) => panic!("Expected error for Structfs config"),
+        }
+    }
+
+    #[test]
+    fn factory_creates_memory_store() {
+        let factory = CoreReplStoreFactory;
+        let result = factory.create(&MountConfig::Memory);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn factory_creates_registers_store() {
+        let factory = CoreReplStoreFactory;
+        let result = factory.create(&MountConfig::Registers);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_registers_empty() {
+        let mut ctx = StoreContext::new();
+        let list = ctx.list_registers();
+        assert!(list.is_empty());
+    }
 }

@@ -111,6 +111,22 @@ mod tests {
     }
 
     #[test]
+    fn read_nested_path_returns_none() {
+        let mut store = EnvStore::new();
+        let result = store.read(&path!("HOME/nested/path")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_nonexistent_var() {
+        let mut store = EnvStore::new();
+        let result = store
+            .read(&path!("STRUCTFS_DEFINITELY_NONEXISTENT_VAR"))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn write_var() {
         let mut store = EnvStore::new();
         let path = path!("STRUCTFS_ENV_WRITE_TEST");
@@ -124,5 +140,37 @@ mod tests {
 
         // Cleanup
         store.write(&path, Record::parsed(Value::Null)).unwrap();
+    }
+
+    #[test]
+    fn write_root_error() {
+        let mut store = EnvStore::new();
+        let result = store.write(&path!(""), Record::parsed(Value::String("x".into())));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot write"));
+    }
+
+    #[test]
+    fn write_nested_error() {
+        let mut store = EnvStore::new();
+        let result = store.write(&path!("FOO/BAR"), Record::parsed(Value::String("x".into())));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Nested"));
+    }
+
+    #[test]
+    fn write_non_string_error() {
+        let mut store = EnvStore::new();
+        let result = store.write(
+            &path!("STRUCTFS_TEST_VAR"),
+            Record::parsed(Value::Integer(42)),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn default_impl() {
+        let _store: EnvStore = Default::default();
     }
 }

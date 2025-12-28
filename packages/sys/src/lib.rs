@@ -136,4 +136,37 @@ mod tests {
             _ => panic!("Expected map"),
         }
     }
+
+    #[test]
+    fn sys_store_default() {
+        let mut store: SysStore = Default::default();
+        // Just verify it works
+        let record = store.read(&path!("time/now")).unwrap();
+        assert!(record.is_some());
+    }
+
+    #[test]
+    fn sys_store_write() {
+        let mut store = SysStore::new();
+        // Write to env
+        store
+            .write(
+                &path!("env/STRUCTFS_SYS_WRITE_TEST"),
+                Record::parsed(Value::String("written".into())),
+            )
+            .unwrap();
+        let record = store
+            .read(&path!("env/STRUCTFS_SYS_WRITE_TEST"))
+            .unwrap()
+            .unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+        assert_eq!(value, Value::String("written".into()));
+        // Cleanup
+        store
+            .write(
+                &path!("env/STRUCTFS_SYS_WRITE_TEST"),
+                Record::parsed(Value::Null),
+            )
+            .unwrap();
+    }
 }
