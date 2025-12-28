@@ -93,3 +93,8 @@ judgement.
 
 > When given two equal decisions when defining a StructFS API, prefer the more
 consistent one.
+
+## Concision of a StructFS API
+
+A StructFS interface is concise if there is one and only one way to perform a
+given action.
