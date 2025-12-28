@@ -118,6 +118,63 @@ impl RegisterStore {
         self.registers.keys().collect()
     }
 
+    /// Documentation for the register store.
+    fn docs() -> Value {
+        let mut map = BTreeMap::new();
+        map.insert("title".into(), Value::String("Registers".into()));
+        map.insert(
+            "description".into(),
+            Value::String("Named storage for command outputs".into()),
+        );
+
+        let mut syntax = BTreeMap::new();
+        syntax.insert(
+            "capture".into(),
+            Value::String("@name <command> - Store command output in register".into()),
+        );
+        syntax.insert(
+            "read".into(),
+            Value::String("read @name - Read register value".into()),
+        );
+        syntax.insert(
+            "dereference".into(),
+            Value::String("*@name - Use register value as path".into()),
+        );
+        syntax.insert(
+            "write".into(),
+            Value::String("write @name <value> - Set register directly".into()),
+        );
+        map.insert("syntax".into(), Value::Map(syntax));
+
+        let examples = [
+            "@result read /ctx/sys/time/now",
+            "read @result",
+            "@path read /ctx/sys/env/HOME",
+            "read *@path",
+        ];
+        map.insert(
+            "examples".into(),
+            Value::Array(
+                examples
+                    .iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+
+        map.insert(
+            "keywords".into(),
+            Value::Array(vec![
+                Value::String("registers".into()),
+                Value::String("variables".into()),
+                Value::String("capture".into()),
+                Value::String("storage".into()),
+            ]),
+        );
+
+        Value::Map(map)
+    }
+
     /// Navigate into a Value by path.
     fn navigate<'a>(value: &'a Value, path: &Path) -> Option<&'a Value> {
         let mut current = value;
@@ -151,6 +208,11 @@ impl Reader for RegisterStore {
                 .map(|k| Value::String(k.clone()))
                 .collect();
             return Ok(Some(Record::parsed(Value::Array(list))));
+        }
+
+        // Handle docs path
+        if from[0] == "docs" {
+            return Ok(Some(Record::parsed(Self::docs())));
         }
 
         let register_name = &from[0];
@@ -707,6 +769,23 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn register_store_has_docs() {
+        let mut store = RegisterStore::new();
+        let result = store.read(&path!("docs")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("title"), Some(&Value::String("Registers".into())));
+                assert!(map.contains_key("syntax"));
+                assert!(map.contains_key("examples"));
+                assert!(map.contains_key("keywords"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
     // StoreContext tests
     #[test]
     fn test_register_write_read() {
@@ -937,6 +1016,12 @@ mod tests {
                 assert!(
                     topics.contains(&Value::String("ctx/repl".into())),
                     "Expected ctx/repl topic"
+                );
+                // Should include registers (has docs)
+                assert!(
+                    topics.contains(&Value::String("ctx/registers".into())),
+                    "Expected ctx/registers topic, got: {:?}",
+                    topics
                 );
             }
             _ => panic!("Expected array of topics"),

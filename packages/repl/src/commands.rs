@@ -316,13 +316,6 @@ pub fn format_help() -> String {
         "Dereference register as path"
     ));
 
-    help.push_str(&format!(
-        "\n{}\n",
-        Color::White
-            .dimmed()
-            .paint("Use 'help <topic>' for more info: commands, mounts, http, paths, registers")
-    ));
-
     help
 }
 
