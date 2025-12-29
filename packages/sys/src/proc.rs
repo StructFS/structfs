@@ -1,5 +1,6 @@
 //! Process information store.
 
+use collection_literals::btree;
 use std::collections::BTreeMap;
 
 use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
@@ -12,33 +13,21 @@ impl ProcStore {
         Self
     }
 
+    fn self_info() -> Value {
+        Value::Map(btree! {
+            "pid".into() => Value::String("Current process ID".into()),
+            "cwd".into() => Value::String("Current working directory".into()),
+            "args".into() => Value::String("Command line arguments".into()),
+            "exe".into() => Value::String("Path to current executable".into()),
+            "env".into() => Value::String("Environment variables".into()),
+        })
+    }
+
     fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
         if path.is_empty() {
-            let mut self_map = BTreeMap::new();
-            self_map.insert(
-                "pid".to_string(),
-                Value::String("Current process ID".to_string()),
-            );
-            self_map.insert(
-                "cwd".to_string(),
-                Value::String("Current working directory".to_string()),
-            );
-            self_map.insert(
-                "args".to_string(),
-                Value::String("Command line arguments".to_string()),
-            );
-            self_map.insert(
-                "exe".to_string(),
-                Value::String("Path to current executable".to_string()),
-            );
-            self_map.insert(
-                "env".to_string(),
-                Value::String("Environment variables".to_string()),
-            );
-
-            let mut map = BTreeMap::new();
-            map.insert("self".to_string(), Value::Map(self_map));
-            return Ok(Some(Value::Map(map)));
+            return Ok(Some(Value::Map(btree! {
+                "self".into() => Self::self_info(),
+            })));
         }
 
         // Must start with "self"
@@ -47,29 +36,7 @@ impl ProcStore {
         }
 
         if path.len() == 1 {
-            // Just /proc/self - list available info
-            let mut map = BTreeMap::new();
-            map.insert(
-                "pid".to_string(),
-                Value::String("Current process ID".to_string()),
-            );
-            map.insert(
-                "cwd".to_string(),
-                Value::String("Current working directory".to_string()),
-            );
-            map.insert(
-                "args".to_string(),
-                Value::String("Command line arguments".to_string()),
-            );
-            map.insert(
-                "exe".to_string(),
-                Value::String("Path to current executable".to_string()),
-            );
-            map.insert(
-                "env".to_string(),
-                Value::String("Environment variables".to_string()),
-            );
-            return Ok(Some(Value::Map(map)));
+            return Ok(Some(Self::self_info()));
         }
 
         if path.len() != 2 {

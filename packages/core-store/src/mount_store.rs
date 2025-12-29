@@ -13,6 +13,7 @@
 //! {"type": "structfs", "url": "https://structfs.example.com"}
 //! ```
 
+use collection_literals::btree;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -200,15 +201,15 @@ impl<F: StoreFactory> MountStore<F> {
     /// Convert MountInfo list to Value
     fn mounts_to_value(&self) -> Value {
         let mounts = self.list_mounts();
-        let mut arr = Vec::with_capacity(mounts.len());
-        for info in mounts {
-            let mut map = BTreeMap::new();
-            map.insert("path".to_string(), Value::String(info.path));
-            // Serialize config to a map
-            let config_value = config_to_value(&info.config);
-            map.insert("config".to_string(), config_value);
-            arr.push(Value::Map(map));
-        }
+        let arr: Vec<Value> = mounts
+            .into_iter()
+            .map(|info| {
+                Value::Map(btree! {
+                    "path".to_string() => Value::String(info.path),
+                    "config".to_string() => config_to_value(&info.config),
+                })
+            })
+            .collect();
         Value::Array(arr)
     }
 
@@ -220,46 +221,41 @@ impl<F: StoreFactory> MountStore<F> {
 
 /// Convert a MountConfig to Value
 fn config_to_value(config: &MountConfig) -> Value {
-    let mut map = BTreeMap::new();
-    match config {
-        MountConfig::Memory => {
-            map.insert("type".to_string(), Value::String("memory".to_string()));
-        }
-        MountConfig::Local { path } => {
-            map.insert("type".to_string(), Value::String("local".to_string()));
-            map.insert("path".to_string(), Value::String(path.clone()));
-        }
-        MountConfig::Http { url } => {
-            map.insert("type".to_string(), Value::String("http".to_string()));
-            map.insert("url".to_string(), Value::String(url.clone()));
-        }
-        MountConfig::HttpBroker => {
-            map.insert("type".to_string(), Value::String("httpbroker".to_string()));
-        }
-        MountConfig::AsyncHttpBroker => {
-            map.insert(
-                "type".to_string(),
-                Value::String("asynchttpbroker".to_string()),
-            );
-        }
-        MountConfig::Structfs { url } => {
-            map.insert("type".to_string(), Value::String("structfs".to_string()));
-            map.insert("url".to_string(), Value::String(url.clone()));
-        }
-        MountConfig::Help => {
-            map.insert("type".to_string(), Value::String("help".to_string()));
-        }
-        MountConfig::Sys => {
-            map.insert("type".to_string(), Value::String("sys".to_string()));
-        }
-        MountConfig::Repl => {
-            map.insert("type".to_string(), Value::String("repl".to_string()));
-        }
-        MountConfig::Registers => {
-            map.insert("type".to_string(), Value::String("registers".to_string()));
-        }
-    }
-    Value::Map(map)
+    Value::Map(match config {
+        MountConfig::Memory => btree! {
+            "type".to_string() => Value::String("memory".to_string()),
+        },
+        MountConfig::Local { path } => btree! {
+            "type".to_string() => Value::String("local".to_string()),
+            "path".to_string() => Value::String(path.clone()),
+        },
+        MountConfig::Http { url } => btree! {
+            "type".to_string() => Value::String("http".to_string()),
+            "url".to_string() => Value::String(url.clone()),
+        },
+        MountConfig::HttpBroker => btree! {
+            "type".to_string() => Value::String("httpbroker".to_string()),
+        },
+        MountConfig::AsyncHttpBroker => btree! {
+            "type".to_string() => Value::String("asynchttpbroker".to_string()),
+        },
+        MountConfig::Structfs { url } => btree! {
+            "type".to_string() => Value::String("structfs".to_string()),
+            "url".to_string() => Value::String(url.clone()),
+        },
+        MountConfig::Help => btree! {
+            "type".to_string() => Value::String("help".to_string()),
+        },
+        MountConfig::Sys => btree! {
+            "type".to_string() => Value::String("sys".to_string()),
+        },
+        MountConfig::Repl => btree! {
+            "type".to_string() => Value::String("repl".to_string()),
+        },
+        MountConfig::Registers => btree! {
+            "type".to_string() => Value::String("registers".to_string()),
+        },
+    })
 }
 
 /// Try to parse a Value as MountConfig

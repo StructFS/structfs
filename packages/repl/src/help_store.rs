@@ -17,6 +17,7 @@
 //!
 //! HelpStore holds NO content itself - it is purely an aggregator.
 
+use collection_literals::btree;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -145,9 +146,10 @@ impl DocsIndex {
             .topics
             .iter()
             .map(|(name, manifest)| {
-                let mut map = BTreeMap::new();
-                map.insert("name".into(), Value::String(name.clone()));
-                map.insert("title".into(), Value::String(manifest.title.clone()));
+                let mut map = btree! {
+                    "name".into() => Value::String(name.clone()),
+                    "title".into() => Value::String(manifest.title.clone()),
+                };
                 if let Some(ref desc) = manifest.description {
                     map.insert("description".into(), Value::String(desc.clone()));
                 }
@@ -176,19 +178,19 @@ impl DocsIndex {
                         .any(|k| k.to_lowercase().contains(&query_lower))
             })
             .map(|(name, manifest)| {
-                let mut map = BTreeMap::new();
-                map.insert("topic".into(), Value::String(name.clone()));
-                map.insert("title".into(), Value::String(manifest.title.clone()));
-                map.insert("path".into(), Value::String(format!("/ctx/help/{}", name)));
-                Value::Map(map)
+                Value::Map(btree! {
+                    "topic".into() => Value::String(name.clone()),
+                    "title".into() => Value::String(manifest.title.clone()),
+                    "path".into() => Value::String(format!("/ctx/help/{}", name)),
+                })
             })
             .collect();
 
-        let mut result = BTreeMap::new();
-        result.insert("query".into(), Value::String(query.to_string()));
-        result.insert("count".into(), Value::Integer(matches.len() as i64));
-        result.insert("results".into(), Value::Array(matches));
-        Value::Map(result)
+        Value::Map(btree! {
+            "query".into() => Value::String(query.to_string()),
+            "count".into() => Value::Integer(matches.len() as i64),
+            "results".into() => Value::Array(matches),
+        })
     }
 }
 
@@ -299,12 +301,12 @@ impl HelpStore {
             .redirects
             .iter()
             .map(|(topic, info)| {
-                let mut map = BTreeMap::new();
-                map.insert("topic".into(), Value::String(topic.clone()));
-                map.insert("from".into(), Value::String(info.from.clone()));
-                map.insert("to".into(), Value::String(info.to.clone()));
-                map.insert("mode".into(), Value::String(format!("{:?}", info.mode)));
-                Value::Map(map)
+                Value::Map(btree! {
+                    "topic".into() => Value::String(topic.clone()),
+                    "from".into() => Value::String(info.from.clone()),
+                    "to".into() => Value::String(info.to.clone()),
+                    "mode".into() => Value::String(format!("{:?}", info.mode)),
+                })
             })
             .collect();
         Value::Array(redirects)
@@ -312,12 +314,12 @@ impl HelpStore {
 
     fn get_redirect_info(state: &HelpStoreState, topic: &str) -> Option<Value> {
         state.redirects.get(topic).map(|info| {
-            let mut map = BTreeMap::new();
-            map.insert("topic".into(), Value::String(topic.to_string()));
-            map.insert("from".into(), Value::String(info.from.clone()));
-            map.insert("to".into(), Value::String(info.to.clone()));
-            map.insert("mode".into(), Value::String(format!("{:?}", info.mode)));
-            Value::Map(map)
+            Value::Map(btree! {
+                "topic".into() => Value::String(topic.to_string()),
+                "from".into() => Value::String(info.from.clone()),
+                "to".into() => Value::String(info.to.clone()),
+                "mode".into() => Value::String(format!("{:?}", info.mode)),
+            })
         })
     }
 
@@ -329,16 +331,10 @@ impl HelpStore {
 
         if path.is_empty() {
             // No query provided
-            let mut result = BTreeMap::new();
-            result.insert(
-                "error".into(),
-                Value::String("No search query provided".into()),
-            );
-            result.insert(
-                "usage".into(),
-                Value::String("read /ctx/help/search/<query>".into()),
-            );
-            return Ok(Some(Record::parsed(Value::Map(result))));
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "error".into() => Value::String("No search query provided".into()),
+                "usage".into() => Value::String("read /ctx/help/search/<query>".into()),
+            }))));
         }
 
         // The query is the full remaining path (allows multi-word queries)

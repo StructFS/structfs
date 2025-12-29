@@ -1,6 +1,6 @@
 //! Time and clock store.
 
-use std::collections::BTreeMap;
+use collection_literals::btree;
 use std::time::{Duration, Instant};
 
 use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
@@ -21,28 +21,13 @@ impl TimeStore {
 
     fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
         if path.is_empty() {
-            let mut map = BTreeMap::new();
-            map.insert(
-                "now".to_string(),
-                Value::String("ISO 8601 timestamp".to_string()),
-            );
-            map.insert(
-                "now_unix".to_string(),
-                Value::String("Unix timestamp (seconds)".to_string()),
-            );
-            map.insert(
-                "now_unix_ms".to_string(),
-                Value::String("Unix timestamp (milliseconds)".to_string()),
-            );
-            map.insert(
-                "monotonic".to_string(),
-                Value::String("Monotonic clock (nanoseconds since start)".to_string()),
-            );
-            map.insert(
-                "sleep".to_string(),
-                Value::String("Write {\"ms\": N} or {\"secs\": N} to sleep".to_string()),
-            );
-            return Ok(Some(Value::Map(map)));
+            return Ok(Some(Value::Map(btree! {
+                "now".into() => Value::String("ISO 8601 timestamp".into()),
+                "now_unix".into() => Value::String("Unix timestamp (seconds)".into()),
+                "now_unix_ms".into() => Value::String("Unix timestamp (milliseconds)".into()),
+                "monotonic".into() => Value::String("Monotonic clock (nanoseconds since start)".into()),
+                "sleep".into() => Value::String("Write {\"ms\": N} or {\"secs\": N} to sleep".into()),
+            })));
         }
 
         if path.len() != 1 {
@@ -131,7 +116,6 @@ impl Writer for TimeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::time::Duration;
     use structfs_core_store::path;
 
@@ -219,8 +203,7 @@ mod tests {
     #[test]
     fn write_sleep_ms() {
         let mut store = TimeStore::new();
-        let mut map = BTreeMap::new();
-        map.insert("ms".to_string(), Value::Integer(1));
+        let map = btree! { "ms".into() => Value::Integer(1) };
 
         let before = std::time::Instant::now();
         store
@@ -234,8 +217,7 @@ mod tests {
     #[test]
     fn write_sleep_secs() {
         let mut store = TimeStore::new();
-        let mut map = BTreeMap::new();
-        map.insert("secs".to_string(), Value::Integer(0));
+        let map = btree! { "secs".into() => Value::Integer(0) };
 
         // Just test that it doesn't error
         store
@@ -246,8 +228,7 @@ mod tests {
     #[test]
     fn write_sleep_missing_field_error() {
         let mut store = TimeStore::new();
-        let mut map = BTreeMap::new();
-        map.insert("invalid".to_string(), Value::Integer(100));
+        let map = btree! { "invalid".into() => Value::Integer(100) };
 
         let result = store.write(&path!("sleep"), Record::parsed(Value::Map(map)));
         assert!(result.is_err());

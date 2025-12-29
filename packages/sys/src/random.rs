@@ -1,6 +1,6 @@
 //! Random number generation store.
 
-use std::collections::BTreeMap;
+use collection_literals::btree;
 
 use rand::Rng;
 use uuid::Uuid;
@@ -17,22 +17,11 @@ impl RandomStore {
 
     fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
         if path.is_empty() {
-            let mut map = BTreeMap::new();
-            map.insert(
-                "u64".to_string(),
-                Value::String("Random 64-bit unsigned integer".to_string()),
-            );
-            map.insert(
-                "uuid".to_string(),
-                Value::String("Random UUID v4".to_string()),
-            );
-            map.insert(
-                "bytes".to_string(),
-                Value::String(
-                    "Write {\"count\": N} to get base64-encoded random bytes".to_string(),
-                ),
-            );
-            return Ok(Some(Value::Map(map)));
+            return Ok(Some(Value::Map(btree! {
+                "u64".into() => Value::String("Random 64-bit unsigned integer".into()),
+                "uuid".into() => Value::String("Random UUID v4".into()),
+                "bytes".into() => Value::String("Write {\"count\": N} to get base64-encoded random bytes".into()),
+            })));
         }
 
         if path.len() != 1 {
@@ -132,7 +121,6 @@ impl Writer for RandomStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use structfs_core_store::path;
 
     #[test]
@@ -194,9 +182,8 @@ mod tests {
     #[test]
     fn write_bytes() {
         let mut store = RandomStore::new();
-        let mut map = BTreeMap::new();
         // Use a small count - base64 encoding may produce characters not valid in paths
-        map.insert("count".to_string(), Value::Integer(3));
+        let map = btree! { "count".into() => Value::Integer(3) };
 
         // The write may succeed or fail depending on the random bytes generated
         // (base64 encoding may include invalid path characters)
@@ -211,8 +198,7 @@ mod tests {
     #[test]
     fn write_bytes_missing_count_error() {
         let mut store = RandomStore::new();
-        let mut map = BTreeMap::new();
-        map.insert("invalid".to_string(), Value::Integer(16));
+        let map = btree! { "invalid".into() => Value::Integer(16) };
 
         let result = store.write(&path!("bytes"), Record::parsed(Value::Map(map)));
         assert!(result.is_err());
@@ -231,8 +217,7 @@ mod tests {
     #[test]
     fn write_bytes_too_large_error() {
         let mut store = RandomStore::new();
-        let mut map = BTreeMap::new();
-        map.insert("count".to_string(), Value::Integer(2 * 1024 * 1024)); // 2MB
+        let map = btree! { "count".into() => Value::Integer(2 * 1024 * 1024) }; // 2MB
 
         let result = store.write(&path!("bytes"), Record::parsed(Value::Map(map)));
         assert!(result.is_err());

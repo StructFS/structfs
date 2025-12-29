@@ -13,6 +13,7 @@ async = ["async-trait", "structfs-ll-store/async"]
 [dependencies]
 structfs-ll-store = { path = "../ll-store" }
 bytes = "1.9"
+collection_literals = { workspace = true }
 serde.workspace = true
 thiserror.workspace = true
 unicode-ident = "1.0"

@@ -2,6 +2,7 @@
 //!
 //! This module provides the store context that manages mounts and registers.
 
+use collection_literals::btree;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -120,59 +121,28 @@ impl RegisterStore {
 
     /// Documentation for the register store.
     fn docs() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("Registers".into()));
-        map.insert(
-            "description".into(),
-            Value::String("Named storage for command outputs".into()),
-        );
-
-        let mut syntax = BTreeMap::new();
-        syntax.insert(
-            "capture".into(),
-            Value::String("@name <command> - Store command output in register".into()),
-        );
-        syntax.insert(
-            "read".into(),
-            Value::String("read @name - Read register value".into()),
-        );
-        syntax.insert(
-            "dereference".into(),
-            Value::String("*@name - Use register value as path".into()),
-        );
-        syntax.insert(
-            "write".into(),
-            Value::String("write @name <value> - Set register directly".into()),
-        );
-        map.insert("syntax".into(), Value::Map(syntax));
-
-        let examples = [
-            "@result read /ctx/sys/time/now",
-            "read @result",
-            "@path read /ctx/sys/env/HOME",
-            "read *@path",
-        ];
-        map.insert(
-            "examples".into(),
-            Value::Array(
-                examples
-                    .iter()
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-
-        map.insert(
-            "keywords".into(),
-            Value::Array(vec![
+        Value::Map(btree! {
+            "title".into() => Value::String("Registers".into()),
+            "description".into() => Value::String("Named storage for command outputs".into()),
+            "syntax".into() => Value::Map(btree! {
+                "capture".into() => Value::String("@name <command> - Store command output in register".into()),
+                "read".into() => Value::String("read @name - Read register value".into()),
+                "dereference".into() => Value::String("*@name - Use register value as path".into()),
+                "write".into() => Value::String("write @name <value> - Set register directly".into()),
+            }),
+            "examples".into() => Value::Array(vec![
+                Value::String("@result read /ctx/sys/time/now".into()),
+                Value::String("read @result".into()),
+                Value::String("@path read /ctx/sys/env/HOME".into()),
+                Value::String("read *@path".into()),
+            ]),
+            "keywords".into() => Value::Array(vec![
                 Value::String("registers".into()),
                 Value::String("variables".into()),
                 Value::String("capture".into()),
                 Value::String("storage".into()),
             ]),
-        );
-
-        Value::Map(map)
+        })
     }
 
     /// Navigate into a Value by path.

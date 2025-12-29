@@ -1,6 +1,6 @@
 //! Documentation store for sys primitives.
 
-use std::collections::BTreeMap;
+use collection_literals::btree;
 
 use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
 
@@ -18,135 +18,76 @@ impl DocsStore {
         }
 
         match path[0].as_str() {
-            "env" => Some(self.env_docs(&path.components[1..])),
-            "time" => Some(self.time_docs(&path.components[1..])),
-            "random" => Some(self.random_docs(&path.components[1..])),
-            "proc" => Some(self.proc_docs(&path.components[1..])),
-            "fs" => Some(self.fs_docs(&path.components[1..])),
+            "env" => Some(Self::env_docs()),
+            "time" => Some(Self::time_docs()),
+            "random" => Some(Self::random_docs()),
+            "proc" => Some(Self::proc_docs()),
+            "fs" => Some(Self::fs_docs()),
             _ => None,
         }
     }
 
     fn root_docs(&self) -> Value {
-        let mut subsystems = BTreeMap::new();
-        subsystems.insert(
-            "env".to_string(),
-            Value::String("Environment variables - read, write, list".to_string()),
-        );
-        subsystems.insert(
-            "time".to_string(),
-            Value::String("Clocks and sleep - current time, monotonic, delays".to_string()),
-        );
-        subsystems.insert(
-            "random".to_string(),
-            Value::String("Random generation - integers, UUIDs, bytes".to_string()),
-        );
-        subsystems.insert(
-            "proc".to_string(),
-            Value::String("Process info - PID, CWD, args, environment".to_string()),
-        );
-        subsystems.insert(
-            "fs".to_string(),
-            Value::String("Filesystem - open, read, write, stat, mkdir, etc.".to_string()),
-        );
-
-        let examples = Value::Array(vec![
-            Value::String("read env/HOME".to_string()),
-            Value::String("read time/now".to_string()),
-            Value::String("read random/uuid".to_string()),
-            Value::String("read proc/self/pid".to_string()),
-            Value::String(
-                "write fs/open {\"path\": \"/tmp/test\", \"mode\": \"write\"}".to_string(),
-            ),
-        ]);
-
-        let see_also = Value::Array(vec![
-            Value::String("docs/env".to_string()),
-            Value::String("docs/time".to_string()),
-            Value::String("docs/random".to_string()),
-            Value::String("docs/proc".to_string()),
-            Value::String("docs/fs".to_string()),
-        ]);
-
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("System Primitives".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("OS primitives exposed through StructFS paths.".to_string()),
-        );
-        map.insert("subsystems".to_string(), Value::Map(subsystems));
-        map.insert("examples".to_string(), examples);
-        map.insert("see_also".to_string(), see_also);
-
-        Value::Map(map)
+        Value::Map(btree! {
+            "title".into() => Value::String("System Primitives".into()),
+            "description".into() => Value::String("OS primitives exposed through StructFS paths.".into()),
+            "subsystems".into() => Value::Map(btree! {
+                "env".into() => Value::String("Environment variables - read, write, list".into()),
+                "time".into() => Value::String("Clocks and sleep - current time, monotonic, delays".into()),
+                "random".into() => Value::String("Random generation - integers, UUIDs, bytes".into()),
+                "proc".into() => Value::String("Process info - PID, CWD, args, environment".into()),
+                "fs".into() => Value::String("Filesystem - open, read, write, stat, mkdir, etc.".into()),
+            }),
+            "examples".into() => Value::Array(vec![
+                Value::String("read env/HOME".into()),
+                Value::String("read time/now".into()),
+                Value::String("read random/uuid".into()),
+                Value::String("read proc/self/pid".into()),
+                Value::String("write fs/open {\"path\": \"/tmp/test\", \"mode\": \"write\"}".into()),
+            ]),
+            "see_also".into() => Value::Array(vec![
+                Value::String("docs/env".into()),
+                Value::String("docs/time".into()),
+                Value::String("docs/random".into()),
+                Value::String("docs/proc".into()),
+                Value::String("docs/fs".into()),
+            ]),
+        })
     }
 
-    fn env_docs(&self, _subpath: &[String]) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Environment Variables".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("Read and write process environment variables.".to_string()),
-        );
-        Value::Map(map)
+    fn env_docs() -> Value {
+        Value::Map(btree! {
+            "title".into() => Value::String("Environment Variables".into()),
+            "description".into() => Value::String("Read and write process environment variables.".into()),
+        })
     }
 
-    fn time_docs(&self, _subpath: &[String]) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Time Operations".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("Clocks, timestamps, and delays.".to_string()),
-        );
-        Value::Map(map)
+    fn time_docs() -> Value {
+        Value::Map(btree! {
+            "title".into() => Value::String("Time Operations".into()),
+            "description".into() => Value::String("Clocks, timestamps, and delays.".into()),
+        })
     }
 
-    fn random_docs(&self, _subpath: &[String]) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Random Number Generation".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("Cryptographically secure random values.".to_string()),
-        );
-        Value::Map(map)
+    fn random_docs() -> Value {
+        Value::Map(btree! {
+            "title".into() => Value::String("Random Number Generation".into()),
+            "description".into() => Value::String("Cryptographically secure random values.".into()),
+        })
     }
 
-    fn proc_docs(&self, _subpath: &[String]) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Process Information".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("Information about the current process.".to_string()),
-        );
-        Value::Map(map)
+    fn proc_docs() -> Value {
+        Value::Map(btree! {
+            "title".into() => Value::String("Process Information".into()),
+            "description".into() => Value::String("Information about the current process.".into()),
+        })
     }
 
-    fn fs_docs(&self, _subpath: &[String]) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert(
-            "title".to_string(),
-            Value::String("Filesystem Operations".to_string()),
-        );
-        map.insert(
-            "description".to_string(),
-            Value::String("File and directory operations with handle-based I/O.".to_string()),
-        );
-        Value::Map(map)
+    fn fs_docs() -> Value {
+        Value::Map(btree! {
+            "title".into() => Value::String("Filesystem Operations".into()),
+            "description".into() => Value::String("File and directory operations with handle-based I/O.".into()),
+        })
     }
 }
 

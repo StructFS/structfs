@@ -20,6 +20,7 @@ structfs-sys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+collection_literals = { workspace = true }
 
 reedline = { workspace = true }
 nu-ansi-term = { workspace = true }

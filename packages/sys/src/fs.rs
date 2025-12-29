@@ -1,6 +1,7 @@
 //! Filesystem operations store.
 
-use std::collections::{BTreeMap, HashMap};
+use collection_literals::btree;
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,36 +112,15 @@ impl FsStore {
 
     fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
         if path.is_empty() {
-            let mut map = BTreeMap::new();
-            map.insert(
-                "open".to_string(),
-                Value::String("Write {path, mode} to get handle".to_string()),
-            );
-            map.insert(
-                "handles".to_string(),
-                Value::String("Open file handles".to_string()),
-            );
-            map.insert(
-                "stat".to_string(),
-                Value::String("Write {path} to get file info".to_string()),
-            );
-            map.insert(
-                "mkdir".to_string(),
-                Value::String("Write {path} to create directory".to_string()),
-            );
-            map.insert(
-                "rmdir".to_string(),
-                Value::String("Write {path} to remove directory".to_string()),
-            );
-            map.insert(
-                "unlink".to_string(),
-                Value::String("Write {path} to delete file".to_string()),
-            );
-            map.insert(
-                "rename".to_string(),
-                Value::String("Write {from, to} to rename".to_string()),
-            );
-            return Ok(Some(Value::Map(map)));
+            return Ok(Some(Value::Map(btree! {
+                "open".into() => Value::String("Write {path, mode} to get handle".into()),
+                "handles".into() => Value::String("Open file handles".into()),
+                "stat".into() => Value::String("Write {path} to get file info".into()),
+                "mkdir".into() => Value::String("Write {path} to create directory".into()),
+                "rmdir".into() => Value::String("Write {path} to remove directory".into()),
+                "unlink".into() => Value::String("Write {path} to delete file".into()),
+                "rename".into() => Value::String("Write {from, to} to rename".into()),
+            })));
         }
 
         // Handles are processed in Reader::read() directly
@@ -148,7 +128,6 @@ impl FsStore {
     }
 
     fn read_handles_listing(&self) -> Value {
-        // Return just the IDs as an array: [0, 1, 2, ...]
         let ids: Vec<Value> = self
             .handles
             .keys()
@@ -159,22 +138,18 @@ impl FsStore {
 
     fn read_handle_meta(&self, handle: &FileHandle) -> Result<Value, Error> {
         let metadata = fs::metadata(&handle.path)?;
-
-        let mut m = BTreeMap::new();
-        m.insert("size".to_string(), Value::Integer(metadata.len() as i64));
-        m.insert("is_file".to_string(), Value::Bool(metadata.is_file()));
-        m.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
-        m.insert("path".to_string(), Value::String(handle.path.clone()));
-        Ok(Value::Map(m))
+        Ok(Value::Map(btree! {
+            "size".into() => Value::Integer(metadata.len() as i64),
+            "is_file".into() => Value::Bool(metadata.is_file()),
+            "is_dir".into() => Value::Bool(metadata.is_dir()),
+            "path".into() => Value::String(handle.path.clone()),
+        }))
     }
 
     fn read_handle_position(&self, handle: &FileHandle) -> Value {
-        let mut m = BTreeMap::new();
-        m.insert(
-            "position".to_string(),
-            Value::Integer(handle.position as i64),
-        );
-        Value::Map(m)
+        Value::Map(btree! {
+            "position".into() => Value::Integer(handle.position as i64),
+        })
     }
 
     fn encode_content(buffer: Vec<u8>, encoding: ContentEncoding) -> Result<Value, Error> {
@@ -418,275 +393,121 @@ impl FsStore {
     }
 
     fn meta_root(&self) -> Value {
-        let mut fields = BTreeMap::new();
-
-        fields.insert(
-            "open".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Open a file handle".into()),
-                );
-                m
+        Value::Map(btree! {
+            "readable".into() => Value::Bool(true),
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Filesystem operations".into()),
+            "fields".into() => Value::Map(btree! {
+                "open".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Open a file handle".into()),
+                }),
+                "handles".into() => Value::Map(btree! {
+                    "readable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Open file handles".into()),
+                }),
+                "stat".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Get file metadata".into()),
+                }),
+                "mkdir".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Create directory".into()),
+                }),
+                "rmdir".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Remove directory".into()),
+                }),
+                "unlink".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Delete file".into()),
+                }),
+                "rename".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                    "description".into() => Value::String("Rename file or directory".into()),
+                }),
             }),
-        );
-
-        fields.insert(
-            "handles".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("readable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Open file handles".into()),
-                );
-                m
-            }),
-        );
-
-        fields.insert(
-            "stat".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Get file metadata".into()),
-                );
-                m
-            }),
-        );
-
-        fields.insert(
-            "mkdir".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Create directory".into()),
-                );
-                m
-            }),
-        );
-
-        fields.insert(
-            "rmdir".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Remove directory".into()),
-                );
-                m
-            }),
-        );
-
-        fields.insert(
-            "unlink".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Delete file".into()),
-                );
-                m
-            }),
-        );
-
-        fields.insert(
-            "rename".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert(
-                    "description".to_string(),
-                    Value::String("Rename file or directory".into()),
-                );
-                m
-            }),
-        );
-
-        let mut root = BTreeMap::new();
-        root.insert("readable".to_string(), Value::Bool(true));
-        root.insert("writable".to_string(), Value::Bool(true));
-        root.insert(
-            "description".to_string(),
-            Value::String("Filesystem operations".into()),
-        );
-        root.insert("fields".to_string(), Value::Map(fields));
-
-        Value::Map(root)
+        })
     }
 
     fn meta_open() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Open a file handle".into()),
-        );
-        m.insert(
-            "accepts".to_string(),
-            Value::Map({
-                let mut accepts = BTreeMap::new();
-                accepts.insert(
-                    "path".to_string(),
-                    Value::String("File path (required)".into()),
-                );
-                accepts.insert(
-                    "mode".to_string(),
-                    Value::String("read|write|append|readwrite|createnew".into()),
-                );
-                accepts.insert(
-                    "encoding".to_string(),
-                    Value::String("base64|utf8|bytes".into()),
-                );
-                accepts
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Open a file handle".into()),
+            "accepts".into() => Value::Map(btree! {
+                "path".into() => Value::String("File path (required)".into()),
+                "mode".into() => Value::String("read|write|append|readwrite|createnew".into()),
+                "encoding".into() => Value::String("base64|utf8|bytes".into()),
             }),
-        );
-        m.insert(
-            "returns".to_string(),
-            Value::String("Path to new handle: handles/{id}".into()),
-        );
-        Value::Map(m)
+            "returns".into() => Value::String("Path to new handle: handles/{id}".into()),
+        })
     }
 
     fn meta_stat() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Get file metadata".into()),
-        );
-        m.insert(
-            "accepts".to_string(),
-            Value::Map({
-                let mut accepts = BTreeMap::new();
-                accepts.insert(
-                    "path".to_string(),
-                    Value::String("File path (required)".into()),
-                );
-                accepts
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Get file metadata".into()),
+            "accepts".into() => Value::Map(btree! {
+                "path".into() => Value::String("File path (required)".into()),
             }),
-        );
-        Value::Map(m)
+        })
     }
 
     fn meta_mkdir() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Create directory".into()),
-        );
-        m.insert(
-            "accepts".to_string(),
-            Value::Map({
-                let mut accepts = BTreeMap::new();
-                accepts.insert(
-                    "path".to_string(),
-                    Value::String("Directory path (required)".into()),
-                );
-                accepts.insert(
-                    "recursive".to_string(),
-                    Value::String("Create parent directories (optional)".into()),
-                );
-                accepts
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Create directory".into()),
+            "accepts".into() => Value::Map(btree! {
+                "path".into() => Value::String("Directory path (required)".into()),
+                "recursive".into() => Value::String("Create parent directories (optional)".into()),
             }),
-        );
-        Value::Map(m)
+        })
     }
 
     fn meta_rmdir() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Remove directory".into()),
-        );
-        m.insert(
-            "accepts".to_string(),
-            Value::Map({
-                let mut accepts = BTreeMap::new();
-                accepts.insert(
-                    "path".to_string(),
-                    Value::String("Directory path (required)".into()),
-                );
-                accepts
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Remove directory".into()),
+            "accepts".into() => Value::Map(btree! {
+                "path".into() => Value::String("Directory path (required)".into()),
             }),
-        );
-        Value::Map(m)
+        })
     }
 
     fn meta_unlink() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Delete file".into()),
-        );
-        m.insert(
-            "accepts".to_string(),
-            Value::Map({
-                let mut accepts = BTreeMap::new();
-                accepts.insert(
-                    "path".to_string(),
-                    Value::String("File path (required)".into()),
-                );
-                accepts
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Delete file".into()),
+            "accepts".into() => Value::Map(btree! {
+                "path".into() => Value::String("File path (required)".into()),
             }),
-        );
-        Value::Map(m)
+        })
     }
 
     fn meta_rename() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Rename file or directory".into()),
-        );
-        m.insert(
-            "accepts".to_string(),
-            Value::Map({
-                let mut accepts = BTreeMap::new();
-                accepts.insert(
-                    "from".to_string(),
-                    Value::String("Source path (required)".into()),
-                );
-                accepts.insert(
-                    "to".to_string(),
-                    Value::String("Destination path (required)".into()),
-                );
-                accepts
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Rename file or directory".into()),
+            "accepts".into() => Value::Map(btree! {
+                "from".into() => Value::String("Source path (required)".into()),
+                "to".into() => Value::String("Destination path (required)".into()),
             }),
-        );
-        Value::Map(m)
+        })
     }
 
     fn read_meta_handles(&self, path: &Path) -> Result<Option<Record>, Error> {
         if path.is_empty() {
-            // List handles with basic info
             let ids: Vec<Value> = self
                 .handles
                 .keys()
                 .map(|id| Value::Integer(*id as i64))
                 .collect();
 
-            let mut m = BTreeMap::new();
-            m.insert("type".to_string(), Value::String("collection".into()));
-            m.insert(
-                "description".to_string(),
-                Value::String("Open file handles".into()),
-            );
-            m.insert("items".to_string(), Value::Array(ids));
-
-            return Ok(Some(Record::parsed(Value::Map(m))));
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "type".into() => Value::String("collection".into()),
+                "description".into() => Value::String("Open file handles".into()),
+                "items".into() => Value::Array(ids),
+            }))));
         }
 
         // Parse handle ID
@@ -714,109 +535,65 @@ impl FsStore {
     }
 
     fn meta_handle(&self, handle: &FileHandle) -> Value {
-        let mut state = BTreeMap::new();
-        state.insert(
-            "position".to_string(),
-            Value::Integer(handle.position as i64),
-        );
-        state.insert(
-            "encoding".to_string(),
-            Value::String(format!("{:?}", handle.encoding)),
-        );
-        state.insert(
-            "mode".to_string(),
-            Value::String(format!("{:?}", handle.mode)),
-        );
-        state.insert("path".to_string(), Value::String(handle.path.clone()));
-
-        let mut fields = BTreeMap::new();
-        fields.insert(
-            "position".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("readable".to_string(), Value::Bool(true));
-                m.insert("writable".to_string(), Value::Bool(true));
-                m.insert("type".to_string(), Value::String("integer".into()));
-                m
+        Value::Map(btree! {
+            "readable".into() => Value::Bool(true),
+            "writable".into() => Value::Bool(true),
+            "state".into() => Value::Map(btree! {
+                "position".into() => Value::Integer(handle.position as i64),
+                "encoding".into() => Value::String(format!("{:?}", handle.encoding)),
+                "mode".into() => Value::String(format!("{:?}", handle.mode)),
+                "path".into() => Value::String(handle.path.clone()),
             }),
-        );
-        fields.insert(
-            "meta".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("readable".to_string(), Value::Bool(true));
-                m
+            "fields".into() => Value::Map(btree! {
+                "position".into() => Value::Map(btree! {
+                    "readable".into() => Value::Bool(true),
+                    "writable".into() => Value::Bool(true),
+                    "type".into() => Value::String("integer".into()),
+                }),
+                "meta".into() => Value::Map(btree! {
+                    "readable".into() => Value::Bool(true),
+                }),
+                "at".into() => Value::Map(btree! {
+                    "readable".into() => Value::Bool(true),
+                    "writable".into() => Value::Bool(true),
+                }),
+                "close".into() => Value::Map(btree! {
+                    "writable".into() => Value::Bool(true),
+                }),
             }),
-        );
-        fields.insert(
-            "at".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("readable".to_string(), Value::Bool(true));
-                m.insert("writable".to_string(), Value::Bool(true));
-                m
-            }),
-        );
-        fields.insert(
-            "close".to_string(),
-            Value::Map({
-                let mut m = BTreeMap::new();
-                m.insert("writable".to_string(), Value::Bool(true));
-                m
-            }),
-        );
-
-        let mut m = BTreeMap::new();
-        m.insert("readable".to_string(), Value::Bool(true));
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert("state".to_string(), Value::Map(state));
-        m.insert("fields".to_string(), Value::Map(fields));
-
-        Value::Map(m)
+        })
     }
 
     fn meta_position(handle: &FileHandle) -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("readable".to_string(), Value::Bool(true));
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert("type".to_string(), Value::String("integer".into()));
-        m.insert("value".to_string(), Value::Integer(handle.position as i64));
-        m.insert(
-            "description".to_string(),
-            Value::String("Current byte offset. Write to seek.".into()),
-        );
-        Value::Map(m)
+        Value::Map(btree! {
+            "readable".into() => Value::Bool(true),
+            "writable".into() => Value::Bool(true),
+            "type".into() => Value::String("integer".into()),
+            "value".into() => Value::Integer(handle.position as i64),
+            "description".into() => Value::String("Current byte offset. Write to seek.".into()),
+        })
     }
 
     fn meta_handle_meta() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("readable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("File metadata (size, type)".into()),
-        );
-        Value::Map(m)
+        Value::Map(btree! {
+            "readable".into() => Value::Bool(true),
+            "description".into() => Value::String("File metadata (size, type)".into()),
+        })
     }
 
     fn meta_at() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("readable".to_string(), Value::Bool(true));
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Read/write at offset: at/{offset} or at/{offset}/len/{n}".into()),
-        );
-        Value::Map(m)
+        Value::Map(btree! {
+            "readable".into() => Value::Bool(true),
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Read/write at offset: at/{offset} or at/{offset}/len/{n}".into()),
+        })
     }
 
     fn meta_close() -> Value {
-        let mut m = BTreeMap::new();
-        m.insert("writable".to_string(), Value::Bool(true));
-        m.insert(
-            "description".to_string(),
-            Value::String("Close the file handle".into()),
-        );
-        Value::Map(m)
+        Value::Map(btree! {
+            "writable".into() => Value::Bool(true),
+            "description".into() => Value::String("Close the file handle".into()),
+        })
     }
 
     fn write_meta(&mut self, path: &Path, data: Record) -> Result<Path, Error> {
@@ -1082,6 +859,7 @@ impl Writer for FsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::io::Write;
     use structfs_core_store::path;
     use tempfile::{NamedTempFile, TempDir};

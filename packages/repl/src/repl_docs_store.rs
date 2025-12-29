@@ -3,6 +3,7 @@
 //! Mounted at `/ctx/repl`, with docs at `/ctx/repl/docs`.
 //! Discovery creates redirect: `/ctx/help/repl` -> `/ctx/repl/docs`.
 
+use collection_literals::btree;
 use std::collections::BTreeMap;
 
 use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
@@ -22,59 +23,39 @@ pub struct ReplDocsStore {
 
 impl ReplDocsStore {
     pub fn new() -> Self {
-        let mut docs = BTreeMap::new();
-
-        // Root manifest
-        docs.insert(String::new(), Self::root_manifest());
-
-        // Individual topics
-        docs.insert("commands".into(), Self::commands_docs());
-        docs.insert("registers".into(), Self::registers_docs());
-        docs.insert("paths".into(), Self::paths_docs());
-        docs.insert("examples".into(), Self::examples_docs());
-        docs.insert("mounts".into(), Self::mounts_docs());
-
+        let docs = btree! {
+            String::new() => Self::root_manifest(),
+            "commands".into() => Self::commands_docs(),
+            "registers".into() => Self::registers_docs(),
+            "paths".into() => Self::paths_docs(),
+            "examples".into() => Self::examples_docs(),
+            "mounts".into() => Self::mounts_docs(),
+        };
         Self { docs }
     }
 
     fn root_manifest() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("REPL Documentation".into()));
-        map.insert(
-            "description".into(),
-            Value::String("Interactive command-line interface for StructFS".into()),
-        );
-        map.insert(
-            "children".into(),
-            Value::Array(vec![
+        Value::Map(btree! {
+            "title".into() => Value::String("REPL Documentation".into()),
+            "description".into() => Value::String("Interactive command-line interface for StructFS".into()),
+            "children".into() => Value::Array(vec![
                 Value::String("commands".into()),
                 Value::String("registers".into()),
                 Value::String("paths".into()),
                 Value::String("mounts".into()),
                 Value::String("examples".into()),
             ]),
-        );
-        map.insert(
-            "keywords".into(),
-            Value::Array(vec![
+            "keywords".into() => Value::Array(vec![
                 Value::String("repl".into()),
                 Value::String("cli".into()),
                 Value::String("terminal".into()),
                 Value::String("interactive".into()),
             ]),
-        );
-        Value::Map(map)
+        })
     }
 
     fn commands_docs() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("Commands".into()));
-        map.insert(
-            "description".into(),
-            Value::String("Available REPL commands and their syntax".into()),
-        );
-
-        let commands = vec![
+        let commands = [
             ("read", "read <path>", "Read value at path (alias: get, r)"),
             (
                 "write",
@@ -93,83 +74,54 @@ impl ReplDocsStore {
         let command_list: Vec<Value> = commands
             .iter()
             .map(|(name, syntax, desc)| {
-                let mut cmd = BTreeMap::new();
-                cmd.insert("name".into(), Value::String(name.to_string()));
-                cmd.insert("syntax".into(), Value::String(syntax.to_string()));
-                cmd.insert("description".into(), Value::String(desc.to_string()));
-                Value::Map(cmd)
+                Value::Map(btree! {
+                    "name".into() => Value::String(name.to_string()),
+                    "syntax".into() => Value::String(syntax.to_string()),
+                    "description".into() => Value::String(desc.to_string()),
+                })
             })
             .collect();
 
-        map.insert("commands".into(), Value::Array(command_list));
-
-        let mut aliases = BTreeMap::new();
-        aliases.insert("r".into(), Value::String("read".into()));
-        aliases.insert("get".into(), Value::String("read".into()));
-        aliases.insert("w".into(), Value::String("write".into()));
-        aliases.insert("set".into(), Value::String("write".into()));
-        aliases.insert("regs".into(), Value::String("registers".into()));
-        aliases.insert("quit".into(), Value::String("exit".into()));
-        aliases.insert("q".into(), Value::String("exit".into()));
-        map.insert("aliases".into(), Value::Map(aliases));
-
-        Value::Map(map)
+        Value::Map(btree! {
+            "title".into() => Value::String("Commands".into()),
+            "description".into() => Value::String("Available REPL commands and their syntax".into()),
+            "commands".into() => Value::Array(command_list),
+            "aliases".into() => Value::Map(btree! {
+                "r".into() => Value::String("read".into()),
+                "get".into() => Value::String("read".into()),
+                "w".into() => Value::String("write".into()),
+                "set".into() => Value::String("write".into()),
+                "regs".into() => Value::String("registers".into()),
+                "quit".into() => Value::String("exit".into()),
+                "q".into() => Value::String("exit".into()),
+            }),
+        })
     }
 
     fn registers_docs() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("Registers".into()));
-        map.insert(
-            "description".into(),
-            Value::String("Named storage for command outputs".into()),
-        );
-
-        let mut syntax = BTreeMap::new();
-        syntax.insert(
-            "capture".into(),
-            Value::String("@name <command> - Store command output in register".into()),
-        );
-        syntax.insert(
-            "read".into(),
-            Value::String("read @name - Read register value".into()),
-        );
-        syntax.insert(
-            "dereference".into(),
-            Value::String("*@name - Use register value as path".into()),
-        );
-        syntax.insert(
-            "write".into(),
-            Value::String("write @name <value> - Set register directly".into()),
-        );
-        map.insert("syntax".into(), Value::Map(syntax));
-
         let examples = [
             "@result read /ctx/sys/time/now",
             "read @result",
             "@path read /ctx/sys/env/HOME",
             "read *@path",
         ];
-        map.insert(
-            "examples".into(),
-            Value::Array(
-                examples
-                    .iter()
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
 
-        Value::Map(map)
+        Value::Map(btree! {
+            "title".into() => Value::String("Registers".into()),
+            "description".into() => Value::String("Named storage for command outputs".into()),
+            "syntax".into() => Value::Map(btree! {
+                "capture".into() => Value::String("@name <command> - Store command output in register".into()),
+                "read".into() => Value::String("read @name - Read register value".into()),
+                "dereference".into() => Value::String("*@name - Use register value as path".into()),
+                "write".into() => Value::String("write @name <value> - Set register directly".into()),
+            }),
+            "examples".into() => Value::Array(
+                examples.iter().map(|s| Value::String(s.to_string())).collect()
+            ),
+        })
     }
 
     fn paths_docs() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("Path Syntax".into()));
-        map.insert(
-            "description".into(),
-            Value::String("How paths work in StructFS".into()),
-        );
-
         let rules = [
             "Paths are slash-separated components",
             "Leading slash is optional",
@@ -177,57 +129,32 @@ impl ReplDocsStore {
             "Trailing slashes are normalized away",
             "Empty components (//) are normalized",
         ];
-        map.insert(
-            "rules".into(),
-            Value::Array(rules.iter().map(|s| Value::String(s.to_string())).collect()),
-        );
 
         let examples = [
             ("/ctx/sys/time/now", "Absolute path"),
             ("ctx/sys/time/now", "Same path without leading slash"),
             ("data/users/0", "Numeric component for array access"),
         ];
+
         let example_list: Vec<Value> = examples
             .iter()
             .map(|(path, desc)| {
-                let mut ex = BTreeMap::new();
-                ex.insert("path".into(), Value::String(path.to_string()));
-                ex.insert("description".into(), Value::String(desc.to_string()));
-                Value::Map(ex)
+                Value::Map(btree! {
+                    "path".into() => Value::String(path.to_string()),
+                    "description".into() => Value::String(desc.to_string()),
+                })
             })
             .collect();
-        map.insert("examples".into(), Value::Array(example_list));
 
-        Value::Map(map)
+        Value::Map(btree! {
+            "title".into() => Value::String("Path Syntax".into()),
+            "description".into() => Value::String("How paths work in StructFS".into()),
+            "rules".into() => Value::Array(rules.iter().map(|s| Value::String(s.to_string())).collect()),
+            "examples".into() => Value::Array(example_list),
+        })
     }
 
     fn mounts_docs() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("Mount System".into()));
-        map.insert(
-            "description".into(),
-            Value::String("How stores are mounted and managed".into()),
-        );
-
-        let mut operations = BTreeMap::new();
-        operations.insert(
-            "list".into(),
-            Value::String("read /ctx/mounts - List all mounts".into()),
-        );
-        operations.insert(
-            "mount".into(),
-            Value::String("write /ctx/mounts/<name> {\"type\": \"memory\"} - Create mount".into()),
-        );
-        operations.insert(
-            "unmount".into(),
-            Value::String("write /ctx/mounts/<name> null - Remove mount".into()),
-        );
-        operations.insert(
-            "inspect".into(),
-            Value::String("read /ctx/mounts/<name> - Get mount config".into()),
-        );
-        map.insert("operations".into(), Value::Map(operations));
-
         let mount_types = [
             ("memory", "In-memory JSON store"),
             ("local", "Local filesystem directory"),
@@ -235,28 +162,31 @@ impl ReplDocsStore {
             ("httpbroker", "Sync HTTP request broker"),
             ("asynchttpbroker", "Async HTTP request broker"),
         ];
+
         let type_list: Vec<Value> = mount_types
             .iter()
             .map(|(name, desc)| {
-                let mut t = BTreeMap::new();
-                t.insert("type".into(), Value::String(name.to_string()));
-                t.insert("description".into(), Value::String(desc.to_string()));
-                Value::Map(t)
+                Value::Map(btree! {
+                    "type".into() => Value::String(name.to_string()),
+                    "description".into() => Value::String(desc.to_string()),
+                })
             })
             .collect();
-        map.insert("types".into(), Value::Array(type_list));
 
-        Value::Map(map)
+        Value::Map(btree! {
+            "title".into() => Value::String("Mount System".into()),
+            "description".into() => Value::String("How stores are mounted and managed".into()),
+            "operations".into() => Value::Map(btree! {
+                "list".into() => Value::String("read /ctx/mounts - List all mounts".into()),
+                "mount".into() => Value::String("write /ctx/mounts/<name> {\"type\": \"memory\"} - Create mount".into()),
+                "unmount".into() => Value::String("write /ctx/mounts/<name> null - Remove mount".into()),
+                "inspect".into() => Value::String("read /ctx/mounts/<name> - Get mount config".into()),
+            }),
+            "types".into() => Value::Array(type_list),
+        })
     }
 
     fn examples_docs() -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("title".into(), Value::String("Examples".into()));
-        map.insert(
-            "description".into(),
-            Value::String("Common usage patterns".into()),
-        );
-
         let examples: &[(&str, &[&str])] = &[
             ("Read system time", &["read /ctx/sys/time/now"]),
             (
@@ -283,23 +213,20 @@ impl ReplDocsStore {
         let example_list: Vec<Value> = examples
             .iter()
             .map(|(title, commands)| {
-                let mut ex = BTreeMap::new();
-                ex.insert("title".into(), Value::String(title.to_string()));
-                ex.insert(
-                    "commands".into(),
-                    Value::Array(
-                        commands
-                            .iter()
-                            .map(|c| Value::String(c.to_string()))
-                            .collect(),
+                Value::Map(btree! {
+                    "title".into() => Value::String(title.to_string()),
+                    "commands".into() => Value::Array(
+                        commands.iter().map(|c| Value::String(c.to_string())).collect()
                     ),
-                );
-                Value::Map(ex)
+                })
             })
             .collect();
 
-        map.insert("examples".into(), Value::Array(example_list));
-        Value::Map(map)
+        Value::Map(btree! {
+            "title".into() => Value::String("Examples".into()),
+            "description".into() => Value::String("Common usage patterns".into()),
+            "examples".into() => Value::Array(example_list),
+        })
     }
 }
 
