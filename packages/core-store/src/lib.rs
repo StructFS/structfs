@@ -32,6 +32,7 @@ pub mod overlay_store;
 mod path;
 pub mod path_trie;
 mod record;
+mod reference;
 mod traits;
 mod value;
 
@@ -42,6 +43,7 @@ pub use lazy_record::LazyRecord;
 pub use path::{Path, PathError};
 pub use path_trie::PathTrie;
 pub use record::Record;
+pub use reference::{Reference, TypeDescriptor, TypeInfo};
 pub use traits::{Codec, NoCodec, Reader, Store, Writer};
 pub use value::Value;
 

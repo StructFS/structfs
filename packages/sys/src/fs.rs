@@ -6,7 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
+use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Reference, Value, Writer};
 
 static FS_HANDLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -113,13 +113,14 @@ impl FsStore {
     fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
         if path.is_empty() {
             return Ok(Some(Value::Map(btree! {
-                "open".into() => Value::String("Write {path, mode} to get handle".into()),
-                "handles".into() => Value::String("Open file handles".into()),
-                "stat".into() => Value::String("Write {path} to get file info".into()),
-                "mkdir".into() => Value::String("Write {path} to create directory".into()),
-                "rmdir".into() => Value::String("Write {path} to remove directory".into()),
-                "unlink".into() => Value::String("Write {path} to delete file".into()),
-                "rename".into() => Value::String("Write {from, to} to rename".into()),
+                "handles".into() => Reference::with_type("handles", "collection").to_value(),
+                "open".into() => Reference::with_type("meta/open", "action").to_value(),
+                "stat".into() => Reference::with_type("meta/stat", "action").to_value(),
+                "mkdir".into() => Reference::with_type("meta/mkdir", "action").to_value(),
+                "rmdir".into() => Reference::with_type("meta/rmdir", "action").to_value(),
+                "unlink".into() => Reference::with_type("meta/unlink", "action").to_value(),
+                "rename".into() => Reference::with_type("meta/rename", "action").to_value(),
+                "meta".into() => Reference::with_type("meta", "meta").to_value(),
             })));
         }
 
@@ -128,12 +129,14 @@ impl FsStore {
     }
 
     fn read_handles_listing(&self) -> Value {
-        let ids: Vec<Value> = self
+        let items: Vec<Value> = self
             .handles
             .keys()
-            .map(|id| Value::Integer(*id as i64))
+            .map(|id| Reference::with_type(format!("handles/{}", id), "handle").to_value())
             .collect();
-        Value::Array(ids)
+        Value::Map(btree! {
+            "items".into() => Value::Array(items),
+        })
     }
 
     fn read_handle_meta(&self, handle: &FileHandle) -> Result<Value, Error> {
@@ -394,119 +397,160 @@ impl FsStore {
 
     fn meta_root(&self) -> Value {
         Value::Map(btree! {
-            "readable".into() => Value::Bool(true),
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Filesystem operations".into()),
-            "fields".into() => Value::Map(btree! {
-                "open".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Open a file handle".into()),
-                }),
-                "handles".into() => Value::Map(btree! {
-                    "readable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Open file handles".into()),
-                }),
-                "stat".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Get file metadata".into()),
-                }),
-                "mkdir".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Create directory".into()),
-                }),
-                "rmdir".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Remove directory".into()),
-                }),
-                "unlink".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Delete file".into()),
-                }),
-                "rename".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                    "description".into() => Value::String("Rename file or directory".into()),
-                }),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("store".into()),
             }),
+            "handles".into() => Reference::with_type("meta/handles", "collection").to_value(),
+            "open".into() => Reference::with_type("meta/open", "action").to_value(),
+            "stat".into() => Reference::with_type("meta/stat", "action").to_value(),
+            "mkdir".into() => Reference::with_type("meta/mkdir", "action").to_value(),
+            "rmdir".into() => Reference::with_type("meta/rmdir", "action").to_value(),
+            "unlink".into() => Reference::with_type("meta/unlink", "action").to_value(),
+            "rename".into() => Reference::with_type("meta/rename", "action").to_value(),
         })
     }
 
     fn meta_open() -> Value {
         Value::Map(btree! {
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Open a file handle".into()),
-            "accepts".into() => Value::Map(btree! {
-                "path".into() => Value::String("File path (required)".into()),
-                "mode".into() => Value::String("read|write|append|readwrite|createnew".into()),
-                "encoding".into() => Value::String("base64|utf8|bytes".into()),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("action".into()),
             }),
-            "returns".into() => Value::String("Path to new handle: handles/{id}".into()),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("open").to_value(),
+            "accepts".into() => Value::Map(btree! {
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
+                "mode".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "values".into() => Value::Array(vec![
+                        Value::String("read".into()),
+                        Value::String("write".into()),
+                        Value::String("append".into()),
+                        Value::String("readwrite".into()),
+                        Value::String("createnew".into()),
+                    ]),
+                }),
+                "encoding".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "values".into() => Value::Array(vec![
+                        Value::String("base64".into()),
+                        Value::String("utf8".into()),
+                        Value::String("bytes".into()),
+                    ]),
+                }),
+            }),
+            "returns".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! {"name".into() => Value::String("handle".into())}),
+                "collection".into() => Reference::new("handles").to_value(),
+            }),
         })
     }
 
     fn meta_stat() -> Value {
         Value::Map(btree! {
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Get file metadata".into()),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("action".into()),
+            }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("stat").to_value(),
             "accepts".into() => Value::Map(btree! {
-                "path".into() => Value::String("File path (required)".into()),
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
+            }),
+            "returns".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! {"name".into() => Value::String("stat".into())}),
             }),
         })
     }
 
     fn meta_mkdir() -> Value {
         Value::Map(btree! {
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Create directory".into()),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("action".into()),
+            }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("mkdir").to_value(),
             "accepts".into() => Value::Map(btree! {
-                "path".into() => Value::String("Directory path (required)".into()),
-                "recursive".into() => Value::String("Create parent directories (optional)".into()),
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
+                "recursive".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("boolean".into())}),
+                }),
             }),
         })
     }
 
     fn meta_rmdir() -> Value {
         Value::Map(btree! {
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Remove directory".into()),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("action".into()),
+            }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("rmdir").to_value(),
             "accepts".into() => Value::Map(btree! {
-                "path".into() => Value::String("Directory path (required)".into()),
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
             }),
         })
     }
 
     fn meta_unlink() -> Value {
         Value::Map(btree! {
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Delete file".into()),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("action".into()),
+            }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("unlink").to_value(),
             "accepts".into() => Value::Map(btree! {
-                "path".into() => Value::String("File path (required)".into()),
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
             }),
         })
     }
 
     fn meta_rename() -> Value {
         Value::Map(btree! {
-            "writable".into() => Value::Bool(true),
-            "description".into() => Value::String("Rename file or directory".into()),
+            "type".into() => Value::Map(btree! {
+                "name".into() => Value::String("action".into()),
+            }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("rename").to_value(),
             "accepts".into() => Value::Map(btree! {
-                "from".into() => Value::String("Source path (required)".into()),
-                "to".into() => Value::String("Destination path (required)".into()),
+                "from".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
+                "to".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! {"name".into() => Value::String("string".into())}),
+                    "required".into() => Value::Bool(true),
+                }),
             }),
         })
     }
 
     fn read_meta_handles(&self, path: &Path) -> Result<Option<Record>, Error> {
         if path.is_empty() {
-            let ids: Vec<Value> = self
+            let items: Vec<Value> = self
                 .handles
                 .keys()
-                .map(|id| Value::Integer(*id as i64))
+                .map(|id| Reference::with_type(format!("meta/handles/{}", id), "handle").to_value())
                 .collect();
 
             return Ok(Some(Record::parsed(Value::Map(btree! {
-                "type".into() => Value::String("collection".into()),
-                "description".into() => Value::String("Open file handles".into()),
-                "items".into() => Value::Array(ids),
+                "type".into() => Value::Map(btree! {
+                    "name".into() => Value::String("collection".into()),
+                }),
+                "items".into() => Value::Array(items),
             }))));
         }
 
@@ -521,7 +565,7 @@ impl FsStore {
             .ok_or_else(|| Error::store("fs", "meta", format!("Handle {} not found", id)))?;
 
         if path.len() == 1 {
-            return Ok(Some(Record::parsed(self.meta_handle(handle))));
+            return Ok(Some(Record::parsed(self.meta_handle(id, handle))));
         }
 
         // Sub-path meta
@@ -534,33 +578,22 @@ impl FsStore {
         }
     }
 
-    fn meta_handle(&self, handle: &FileHandle) -> Value {
+    fn meta_handle(&self, id: u64, handle: &FileHandle) -> Value {
+        let meta_prefix = format!("meta/handles/{}", id);
+        let data_prefix = format!("handles/{}", id);
+
         Value::Map(btree! {
-            "readable".into() => Value::Bool(true),
-            "writable".into() => Value::Bool(true),
             "state".into() => Value::Map(btree! {
                 "position".into() => Value::Integer(handle.position as i64),
                 "encoding".into() => Value::String(format!("{:?}", handle.encoding)),
                 "mode".into() => Value::String(format!("{:?}", handle.mode)),
-                "path".into() => Value::String(handle.path.clone()),
+                "file".into() => Value::String(handle.path.clone()),
             }),
-            "fields".into() => Value::Map(btree! {
-                "position".into() => Value::Map(btree! {
-                    "readable".into() => Value::Bool(true),
-                    "writable".into() => Value::Bool(true),
-                    "type".into() => Value::String("integer".into()),
-                }),
-                "meta".into() => Value::Map(btree! {
-                    "readable".into() => Value::Bool(true),
-                }),
-                "at".into() => Value::Map(btree! {
-                    "readable".into() => Value::Bool(true),
-                    "writable".into() => Value::Bool(true),
-                }),
-                "close".into() => Value::Map(btree! {
-                    "writable".into() => Value::Bool(true),
-                }),
-            }),
+            "position".into() => Reference::with_type(format!("{}/position", meta_prefix), "integer").to_value(),
+            "encoding".into() => Reference::with_type(format!("{}/encoding", meta_prefix), "string").to_value(),
+            "close".into() => Reference::with_type(format!("{}/close", meta_prefix), "action").to_value(),
+            "content".into() => Reference::with_type(&data_prefix, "stream").to_value(),
+            "at".into() => Reference::with_type(format!("{}/at", data_prefix), "accessor").to_value(),
         })
     }
 
@@ -901,8 +934,16 @@ mod tests {
         let record = store.read(&path!("handles")).unwrap().unwrap();
         let value = record.into_value(&NoCodec).unwrap();
         match value {
-            Value::Array(_) => {}
-            _ => panic!("Expected array"),
+            Value::Map(map) => {
+                // Should have items array
+                assert!(map.contains_key("items"));
+                if let Some(Value::Array(_)) = map.get("items") {
+                    // Empty array is fine
+                } else {
+                    panic!("Expected items to be an array");
+                }
+            }
+            _ => panic!("Expected map with items"),
         }
     }
 
@@ -1832,21 +1873,30 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
-                assert!(map.contains_key("fields"));
-
-                // Check fields contains expected operations
-                if let Some(Value::Map(fields)) = map.get("fields") {
-                    assert!(fields.contains_key("open"));
-                    assert!(fields.contains_key("handles"));
-                    assert!(fields.contains_key("stat"));
-                    assert!(fields.contains_key("mkdir"));
-                    assert!(fields.contains_key("rmdir"));
-                    assert!(fields.contains_key("unlink"));
-                    assert!(fields.contains_key("rename"));
+                // Check type is "store"
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("store".to_string()))
+                    );
                 } else {
-                    panic!("Expected fields map");
+                    panic!("Expected type map");
+                }
+
+                // Check references to operations exist
+                assert!(map.contains_key("open"));
+                assert!(map.contains_key("handles"));
+                assert!(map.contains_key("stat"));
+                assert!(map.contains_key("mkdir"));
+                assert!(map.contains_key("rmdir"));
+                assert!(map.contains_key("unlink"));
+                assert!(map.contains_key("rename"));
+
+                // Verify open is a reference
+                if let Some(Value::Map(open_ref)) = map.get("open") {
+                    assert!(open_ref.contains_key("path"));
+                } else {
+                    panic!("Expected open reference");
                 }
             }
             _ => panic!("Expected map"),
@@ -1861,7 +1911,18 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                // Check it's an action type
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("action".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
+
+                assert_eq!(map.get("method"), Some(&Value::String("write".to_string())));
+                assert!(map.contains_key("target"));
                 assert!(map.contains_key("accepts"));
                 assert!(map.contains_key("returns"));
             }
@@ -1877,7 +1938,16 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                // Check it's an action type
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("action".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
+                assert!(map.contains_key("target"));
                 assert!(map.contains_key("accepts"));
             }
             _ => panic!("Expected map"),
@@ -1892,7 +1962,15 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("action".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
+                assert!(map.contains_key("target"));
                 assert!(map.contains_key("accepts"));
             }
             _ => panic!("Expected map"),
@@ -1907,7 +1985,15 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("action".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
+                assert!(map.contains_key("target"));
             }
             _ => panic!("Expected map"),
         }
@@ -1921,7 +2007,15 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("action".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
+                assert!(map.contains_key("target"));
             }
             _ => panic!("Expected map"),
         }
@@ -1935,7 +2029,15 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("action".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
+                assert!(map.contains_key("target"));
                 assert!(map.contains_key("accepts"));
             }
             _ => panic!("Expected map"),
@@ -1950,10 +2052,15 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(
-                    map.get("type"),
-                    Some(&Value::String("collection".to_string()))
-                );
+                // Check it's a collection type
+                if let Some(Value::Map(type_map)) = map.get("type") {
+                    assert_eq!(
+                        type_map.get("name"),
+                        Some(&Value::String("collection".to_string()))
+                    );
+                } else {
+                    panic!("Expected type map");
+                }
                 assert!(map.contains_key("items"));
             }
             _ => panic!("Expected map"),
@@ -1986,19 +2093,28 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
-                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
-                assert!(map.contains_key("state"));
-                assert!(map.contains_key("fields"));
-
                 // Check state has expected fields
                 if let Some(Value::Map(state)) = map.get("state") {
                     assert!(state.contains_key("position"));
                     assert!(state.contains_key("encoding"));
                     assert!(state.contains_key("mode"));
-                    assert!(state.contains_key("path"));
+                    assert!(state.contains_key("file"));
                 } else {
                     panic!("Expected state map");
+                }
+
+                // Check navigation references exist
+                assert!(map.contains_key("position"));
+                assert!(map.contains_key("encoding"));
+                assert!(map.contains_key("close"));
+                assert!(map.contains_key("content"));
+                assert!(map.contains_key("at"));
+
+                // Verify position is a reference
+                if let Some(Value::Map(pos_ref)) = map.get("position") {
+                    assert!(pos_ref.contains_key("path"));
+                } else {
+                    panic!("Expected position reference");
                 }
             }
             _ => panic!("Expected map"),
