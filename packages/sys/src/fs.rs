@@ -398,6 +398,470 @@ impl FsStore {
     }
 }
 
+// Meta lens implementation
+impl FsStore {
+    fn read_meta(&self, path: &Path) -> Result<Option<Record>, Error> {
+        if path.is_empty() {
+            return Ok(Some(Record::parsed(self.meta_root())));
+        }
+
+        match path[0].as_str() {
+            "open" => Ok(Some(Record::parsed(Self::meta_open()))),
+            "handles" => self.read_meta_handles(&path.slice(1, path.len())),
+            "stat" => Ok(Some(Record::parsed(Self::meta_stat()))),
+            "mkdir" => Ok(Some(Record::parsed(Self::meta_mkdir()))),
+            "rmdir" => Ok(Some(Record::parsed(Self::meta_rmdir()))),
+            "unlink" => Ok(Some(Record::parsed(Self::meta_unlink()))),
+            "rename" => Ok(Some(Record::parsed(Self::meta_rename()))),
+            _ => Ok(None),
+        }
+    }
+
+    fn meta_root(&self) -> Value {
+        let mut fields = BTreeMap::new();
+
+        fields.insert(
+            "open".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Open a file handle".into()),
+                );
+                m
+            }),
+        );
+
+        fields.insert(
+            "handles".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("readable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Open file handles".into()),
+                );
+                m
+            }),
+        );
+
+        fields.insert(
+            "stat".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Get file metadata".into()),
+                );
+                m
+            }),
+        );
+
+        fields.insert(
+            "mkdir".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Create directory".into()),
+                );
+                m
+            }),
+        );
+
+        fields.insert(
+            "rmdir".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Remove directory".into()),
+                );
+                m
+            }),
+        );
+
+        fields.insert(
+            "unlink".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Delete file".into()),
+                );
+                m
+            }),
+        );
+
+        fields.insert(
+            "rename".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert(
+                    "description".to_string(),
+                    Value::String("Rename file or directory".into()),
+                );
+                m
+            }),
+        );
+
+        let mut root = BTreeMap::new();
+        root.insert("readable".to_string(), Value::Bool(true));
+        root.insert("writable".to_string(), Value::Bool(true));
+        root.insert(
+            "description".to_string(),
+            Value::String("Filesystem operations".into()),
+        );
+        root.insert("fields".to_string(), Value::Map(fields));
+
+        Value::Map(root)
+    }
+
+    fn meta_open() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Open a file handle".into()),
+        );
+        m.insert(
+            "accepts".to_string(),
+            Value::Map({
+                let mut accepts = BTreeMap::new();
+                accepts.insert(
+                    "path".to_string(),
+                    Value::String("File path (required)".into()),
+                );
+                accepts.insert(
+                    "mode".to_string(),
+                    Value::String("read|write|append|readwrite|createnew".into()),
+                );
+                accepts.insert(
+                    "encoding".to_string(),
+                    Value::String("base64|utf8|bytes".into()),
+                );
+                accepts
+            }),
+        );
+        m.insert(
+            "returns".to_string(),
+            Value::String("Path to new handle: handles/{id}".into()),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_stat() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Get file metadata".into()),
+        );
+        m.insert(
+            "accepts".to_string(),
+            Value::Map({
+                let mut accepts = BTreeMap::new();
+                accepts.insert(
+                    "path".to_string(),
+                    Value::String("File path (required)".into()),
+                );
+                accepts
+            }),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_mkdir() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Create directory".into()),
+        );
+        m.insert(
+            "accepts".to_string(),
+            Value::Map({
+                let mut accepts = BTreeMap::new();
+                accepts.insert(
+                    "path".to_string(),
+                    Value::String("Directory path (required)".into()),
+                );
+                accepts.insert(
+                    "recursive".to_string(),
+                    Value::String("Create parent directories (optional)".into()),
+                );
+                accepts
+            }),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_rmdir() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Remove directory".into()),
+        );
+        m.insert(
+            "accepts".to_string(),
+            Value::Map({
+                let mut accepts = BTreeMap::new();
+                accepts.insert(
+                    "path".to_string(),
+                    Value::String("Directory path (required)".into()),
+                );
+                accepts
+            }),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_unlink() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Delete file".into()),
+        );
+        m.insert(
+            "accepts".to_string(),
+            Value::Map({
+                let mut accepts = BTreeMap::new();
+                accepts.insert(
+                    "path".to_string(),
+                    Value::String("File path (required)".into()),
+                );
+                accepts
+            }),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_rename() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Rename file or directory".into()),
+        );
+        m.insert(
+            "accepts".to_string(),
+            Value::Map({
+                let mut accepts = BTreeMap::new();
+                accepts.insert(
+                    "from".to_string(),
+                    Value::String("Source path (required)".into()),
+                );
+                accepts.insert(
+                    "to".to_string(),
+                    Value::String("Destination path (required)".into()),
+                );
+                accepts
+            }),
+        );
+        Value::Map(m)
+    }
+
+    fn read_meta_handles(&self, path: &Path) -> Result<Option<Record>, Error> {
+        if path.is_empty() {
+            // List handles with basic info
+            let ids: Vec<Value> = self
+                .handles
+                .keys()
+                .map(|id| Value::Integer(*id as i64))
+                .collect();
+
+            let mut m = BTreeMap::new();
+            m.insert("type".to_string(), Value::String("collection".into()));
+            m.insert(
+                "description".to_string(),
+                Value::String("Open file handles".into()),
+            );
+            m.insert("items".to_string(), Value::Array(ids));
+
+            return Ok(Some(Record::parsed(Value::Map(m))));
+        }
+
+        // Parse handle ID
+        let id: u64 = path[0]
+            .parse()
+            .map_err(|_| Error::store("fs", "meta", "Invalid handle ID"))?;
+
+        let handle = self
+            .handles
+            .get(&id)
+            .ok_or_else(|| Error::store("fs", "meta", format!("Handle {} not found", id)))?;
+
+        if path.len() == 1 {
+            return Ok(Some(Record::parsed(self.meta_handle(handle))));
+        }
+
+        // Sub-path meta
+        match path[1].as_str() {
+            "position" => Ok(Some(Record::parsed(Self::meta_position(handle)))),
+            "meta" => Ok(Some(Record::parsed(Self::meta_handle_meta()))),
+            "at" => Ok(Some(Record::parsed(Self::meta_at()))),
+            "close" => Ok(Some(Record::parsed(Self::meta_close()))),
+            _ => Ok(None),
+        }
+    }
+
+    fn meta_handle(&self, handle: &FileHandle) -> Value {
+        let mut state = BTreeMap::new();
+        state.insert(
+            "position".to_string(),
+            Value::Integer(handle.position as i64),
+        );
+        state.insert(
+            "encoding".to_string(),
+            Value::String(format!("{:?}", handle.encoding)),
+        );
+        state.insert(
+            "mode".to_string(),
+            Value::String(format!("{:?}", handle.mode)),
+        );
+        state.insert("path".to_string(), Value::String(handle.path.clone()));
+
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "position".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("readable".to_string(), Value::Bool(true));
+                m.insert("writable".to_string(), Value::Bool(true));
+                m.insert("type".to_string(), Value::String("integer".into()));
+                m
+            }),
+        );
+        fields.insert(
+            "meta".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("readable".to_string(), Value::Bool(true));
+                m
+            }),
+        );
+        fields.insert(
+            "at".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("readable".to_string(), Value::Bool(true));
+                m.insert("writable".to_string(), Value::Bool(true));
+                m
+            }),
+        );
+        fields.insert(
+            "close".to_string(),
+            Value::Map({
+                let mut m = BTreeMap::new();
+                m.insert("writable".to_string(), Value::Bool(true));
+                m
+            }),
+        );
+
+        let mut m = BTreeMap::new();
+        m.insert("readable".to_string(), Value::Bool(true));
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert("state".to_string(), Value::Map(state));
+        m.insert("fields".to_string(), Value::Map(fields));
+
+        Value::Map(m)
+    }
+
+    fn meta_position(handle: &FileHandle) -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("readable".to_string(), Value::Bool(true));
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert("type".to_string(), Value::String("integer".into()));
+        m.insert("value".to_string(), Value::Integer(handle.position as i64));
+        m.insert(
+            "description".to_string(),
+            Value::String("Current byte offset. Write to seek.".into()),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_handle_meta() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("readable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("File metadata (size, type)".into()),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_at() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("readable".to_string(), Value::Bool(true));
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Read/write at offset: at/{offset} or at/{offset}/len/{n}".into()),
+        );
+        Value::Map(m)
+    }
+
+    fn meta_close() -> Value {
+        let mut m = BTreeMap::new();
+        m.insert("writable".to_string(), Value::Bool(true));
+        m.insert(
+            "description".to_string(),
+            Value::String("Close the file handle".into()),
+        );
+        Value::Map(m)
+    }
+
+    fn write_meta(&mut self, path: &Path, data: Record) -> Result<Path, Error> {
+        // Only handles/*/position is writable via meta
+        if path.len() < 3 || path[0] != "handles" {
+            return Err(Error::store(
+                "fs",
+                "meta",
+                format!("Cannot write to meta/{}", path),
+            ));
+        }
+
+        let id: u64 = path[1]
+            .parse()
+            .map_err(|_| Error::store("fs", "meta", "Invalid handle ID"))?;
+
+        match path[2].as_str() {
+            "position" => {
+                let value = data.into_value(&NoCodec)?;
+                let pos = match value {
+                    Value::Integer(n) => n as u64,
+                    _ => {
+                        return Err(Error::store("fs", "meta", "position must be integer"));
+                    }
+                };
+
+                let handle = self.handles.get_mut(&id).ok_or_else(|| {
+                    Error::store("fs", "meta", format!("Handle {} not found", id))
+                })?;
+
+                handle.file.seek(SeekFrom::Start(pos))?;
+                handle.position = pos;
+
+                // Return the meta path we wrote to
+                Ok(Path::parse(&format!("meta/handles/{}/position", id)).unwrap())
+            }
+            _ => Err(Error::store(
+                "fs",
+                "meta",
+                format!("Cannot write to meta/handles/{}/{}", id, path[2]),
+            )),
+        }
+    }
+}
+
 impl Default for FsStore {
     fn default() -> Self {
         Self::new()
@@ -406,6 +870,12 @@ impl Default for FsStore {
 
 impl Reader for FsStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Check for meta prefix
+        if !from.is_empty() && from[0] == "meta" {
+            let rest = from.slice(1, from.len());
+            return self.read_meta(&rest);
+        }
+
         // Handle /handles listing
         if from.len() == 1 && from[0] == "handles" {
             return Ok(Some(Record::parsed(self.read_handles_listing())));
@@ -455,6 +925,12 @@ impl Writer for FsStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         if to.is_empty() {
             return Err(Error::store("fs", "write", "Cannot write to fs root"));
+        }
+
+        // Check for meta prefix
+        if to[0] == "meta" {
+            let rest = to.slice(1, to.len());
+            return self.write_meta(&rest, data);
         }
 
         let value = data.into_value(&NoCodec)?;
@@ -1566,6 +2042,483 @@ mod tests {
                 assert_eq!(s, "Hello, UTF-8 world!");
             }
             _ => panic!("Expected string"),
+        }
+    }
+
+    // Meta lens tests
+    #[test]
+    fn meta_root_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert!(map.contains_key("fields"));
+
+                // Check fields contains expected operations
+                if let Some(Value::Map(fields)) = map.get("fields") {
+                    assert!(fields.contains_key("open"));
+                    assert!(fields.contains_key("handles"));
+                    assert!(fields.contains_key("stat"));
+                    assert!(fields.contains_key("mkdir"));
+                    assert!(fields.contains_key("rmdir"));
+                    assert!(fields.contains_key("unlink"));
+                    assert!(fields.contains_key("rename"));
+                } else {
+                    panic!("Expected fields map");
+                }
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_open_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/open")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert!(map.contains_key("accepts"));
+                assert!(map.contains_key("returns"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_stat_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/stat")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert!(map.contains_key("accepts"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_mkdir_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/mkdir")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert!(map.contains_key("accepts"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_rmdir_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/rmdir")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_unlink_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/unlink")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_rename_returns_schema() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/rename")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert!(map.contains_key("accepts"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_handles_lists_handle_ids() {
+        let mut store = FsStore::new();
+        let record = store.read(&path!("meta/handles")).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(
+                    map.get("type"),
+                    Some(&Value::String("collection".to_string()))
+                );
+                assert!(map.contains_key("items"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_handle_returns_affordances() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "test content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        // Read meta for handle
+        let meta_path = Path::parse(&format!("meta/handles/{}", id)).unwrap();
+        let record = store.read(&meta_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert!(map.contains_key("state"));
+                assert!(map.contains_key("fields"));
+
+                // Check state has expected fields
+                if let Some(Value::Map(state)) = map.get("state") {
+                    assert!(state.contains_key("position"));
+                    assert!(state.contains_key("encoding"));
+                    assert!(state.contains_key("mode"));
+                    assert!(state.contains_key("path"));
+                } else {
+                    panic!("Expected state map");
+                }
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_handle_position_returns_value() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "0123456789").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        // Read meta/handles/{id}/position
+        let meta_path = Path::parse(&format!("meta/handles/{}/position", id)).unwrap();
+        let record = store.read(&meta_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+                assert_eq!(map.get("value"), Some(&Value::Integer(0)));
+                assert!(map.contains_key("description"));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_handle_position_write_seeks() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        std::fs::write(&file_path, "0123456789").unwrap();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert(
+            "path".to_string(),
+            Value::String(file_path.to_string_lossy().into()),
+        );
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        // Write to meta/handles/{id}/position
+        let meta_pos_path = Path::parse(&format!("meta/handles/{}/position", id)).unwrap();
+        store
+            .write(&meta_pos_path, Record::parsed(Value::Integer(5)))
+            .unwrap();
+
+        // Verify position changed via regular position read
+        let pos_path = handle_path.join(&path!("position"));
+        let record = store.read(&pos_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        if let Value::Map(m) = value {
+            assert_eq!(m.get("position"), Some(&Value::Integer(5)));
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn meta_write_invalid_path_error() {
+        let mut store = FsStore::new();
+        let result = store.write(&path!("meta/open"), Record::parsed(Value::Null));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_write_invalid_handle_id_error() {
+        let mut store = FsStore::new();
+        let result = store.write(
+            &path!("meta/handles/invalid/position"),
+            Record::parsed(Value::Integer(0)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_write_nonexistent_handle_error() {
+        let mut store = FsStore::new();
+        let result = store.write(
+            &path!("meta/handles/999999/position"),
+            Record::parsed(Value::Integer(0)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_write_invalid_subpath_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        // Try to write to invalid meta subpath
+        let meta_path = Path::parse(&format!("meta/handles/{}/invalid", id)).unwrap();
+        let result = store.write(&meta_path, Record::parsed(Value::Integer(0)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_write_position_invalid_type_error() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        // Try to write non-integer to position
+        let meta_path = Path::parse(&format!("meta/handles/{}/position", id)).unwrap();
+        let result = store.write(
+            &meta_path,
+            Record::parsed(Value::String("not an int".to_string())),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_unknown_path_returns_none() {
+        let mut store = FsStore::new();
+        let result = store.read(&path!("meta/unknown")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn meta_handle_invalid_id_error() {
+        let mut store = FsStore::new();
+        let result = store.read(&path!("meta/handles/invalid"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_handle_not_found_error() {
+        let mut store = FsStore::new();
+        let result = store.read(&path!("meta/handles/999999"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn meta_handle_subpath_unknown_returns_none() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        // Read unknown subpath
+        let meta_path = Path::parse(&format!("meta/handles/{}/unknown", id)).unwrap();
+        let result = store.read(&meta_path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn meta_handle_meta_returns_schema() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        let meta_path = Path::parse(&format!("meta/handles/{}/meta", id)).unwrap();
+        let record = store.read(&meta_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_handle_at_returns_schema() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        let meta_path = Path::parse(&format!("meta/handles/{}/at", id)).unwrap();
+        let record = store.read(&meta_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("readable"), Some(&Value::Bool(true)));
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+            }
+            _ => panic!("Expected map"),
+        }
+    }
+
+    #[test]
+    fn meta_handle_close_returns_schema() {
+        let mut temp = NamedTempFile::new().unwrap();
+        write!(temp, "content").unwrap();
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let mut store = FsStore::new();
+
+        // Open file
+        let mut open_map = BTreeMap::new();
+        open_map.insert("path".to_string(), Value::String(temp_path));
+        open_map.insert("mode".to_string(), Value::String("read".to_string()));
+
+        let handle_path = store
+            .write(&path!("open"), Record::parsed(Value::Map(open_map)))
+            .unwrap();
+
+        let id = &handle_path[1];
+
+        let meta_path = Path::parse(&format!("meta/handles/{}/close", id)).unwrap();
+        let record = store.read(&meta_path).unwrap().unwrap();
+        let value = record.into_value(&NoCodec).unwrap();
+
+        match value {
+            Value::Map(map) => {
+                assert_eq!(map.get("writable"), Some(&Value::Bool(true)));
+            }
+            _ => panic!("Expected map"),
         }
     }
 }
