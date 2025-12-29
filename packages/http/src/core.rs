@@ -8,10 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use collection_literals::btree;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use structfs_core_store::{path, Error, NoCodec, Path, Reader, Record, Writer};
+use structfs_core_store::{path, Error, NoCodec, Path, Reader, Record, Reference, Value, Writer};
 use structfs_serde_store::{from_value, to_value};
 
 use crate::executor::{HttpExecutor, ReqwestExecutor};
@@ -21,205 +22,91 @@ use crate::types::{HttpRequest, HttpResponse};
 
 const OUTSTANDING_PREFIX: &str = "outstanding";
 const DOCS_PATH: &str = "docs";
+const META_PATH: &str = "meta";
 
 type RequestId = u64;
 
 /// Generate documentation for the sync HTTP broker store.
-fn sync_broker_docs() -> structfs_core_store::Value {
-    let mut map = std::collections::BTreeMap::new();
-    map.insert(
-        "title".to_string(),
-        structfs_core_store::Value::String("Sync HTTP Broker".to_string()),
-    );
-    map.insert(
-        "description".to_string(),
-        structfs_core_store::Value::String(
-            "Queue HTTP requests by writing, execute on read (blocks until complete).".to_string(),
-        ),
-    );
-
-    let mut paths = std::collections::BTreeMap::new();
-    paths.insert(
-        "write /".to_string(),
-        structfs_core_store::Value::String("Queue request, returns outstanding/{id}".to_string()),
-    );
-    paths.insert(
-        "read /outstanding".to_string(),
-        structfs_core_store::Value::String("List queued request IDs".to_string()),
-    );
-    paths.insert(
-        "read /outstanding/{id}".to_string(),
-        structfs_core_store::Value::String(
-            "Execute request (blocks) and return response".to_string(),
-        ),
-    );
-    paths.insert(
-        "read /outstanding/{id}/request".to_string(),
-        structfs_core_store::Value::String("View the queued request".to_string()),
-    );
-    paths.insert(
-        "read /outstanding/{id}/response/body".to_string(),
-        structfs_core_store::Value::String("Navigate into response fields".to_string()),
-    );
-    paths.insert(
-        "write /outstanding/{id} null".to_string(),
-        structfs_core_store::Value::String("Delete the handle".to_string()),
-    );
-    map.insert("paths".to_string(), structfs_core_store::Value::Map(paths));
-
-    let example = vec![
-        "write / {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}",
-        "# Returns: outstanding/0",
-        "read /outstanding/0",
-        "# Blocks until complete, returns response",
-    ];
-    map.insert(
-        "example".to_string(),
-        structfs_core_store::Value::Array(
-            example
-                .into_iter()
-                .map(|s| structfs_core_store::Value::String(s.to_string()))
-                .collect(),
-        ),
-    );
-
-    structfs_core_store::Value::Map(map)
+fn sync_broker_docs() -> Value {
+    Value::Map(btree! {
+        "title".into() => Value::String("Sync HTTP Broker".into()),
+        "description".into() => Value::String("Queue HTTP requests by writing, execute on read (blocks until complete).".into()),
+        "paths".into() => Value::Map(btree! {
+            "write /".into() => Value::String("Queue request, returns outstanding/{id}".into()),
+            "read /outstanding".into() => Value::String("List queued request IDs".into()),
+            "read /outstanding/{id}".into() => Value::String("Execute request (blocks) and return response".into()),
+            "read /outstanding/{id}/request".into() => Value::String("View the queued request".into()),
+            "read /outstanding/{id}/response/body".into() => Value::String("Navigate into response fields".into()),
+            "write /outstanding/{id} null".into() => Value::String("Delete the handle".into()),
+        }),
+        "example".into() => Value::Array(vec![
+            Value::String("write / {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}".into()),
+            Value::String("# Returns: outstanding/0".into()),
+            Value::String("read /outstanding/0".into()),
+            Value::String("# Blocks until complete, returns response".into()),
+        ]),
+    })
 }
 
 /// Generate documentation for the HTTP client store.
-fn http_client_docs() -> structfs_core_store::Value {
-    let mut map = std::collections::BTreeMap::new();
-    map.insert(
-        "title".to_string(),
-        structfs_core_store::Value::String("HTTP Client Store".to_string()),
-    );
-    map.insert(
-        "description".to_string(),
-        structfs_core_store::Value::String(
-            "Direct HTTP client with a base URL. Read = GET, Write = POST.".to_string(),
-        ),
-    );
-
-    let mut paths = std::collections::BTreeMap::new();
-    paths.insert(
-        "read /<path>".to_string(),
-        structfs_core_store::Value::String("GET request to base_url/<path>".to_string()),
-    );
-    paths.insert(
-        "write /<path> <json>".to_string(),
-        structfs_core_store::Value::String("POST request to base_url/<path>".to_string()),
-    );
-    paths.insert(
-        "write / <HttpRequest>".to_string(),
-        structfs_core_store::Value::String("Execute arbitrary request".to_string()),
-    );
-    map.insert("paths".to_string(), structfs_core_store::Value::Map(paths));
-
-    let example = vec![
-        "# Mount at /api with base URL",
-        "write /ctx/mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}",
-        "read /api/users  # GET https://api.example.com/users",
-        "write /api/users {\"name\": \"Alice\"}  # POST with body",
-    ];
-    map.insert(
-        "example".to_string(),
-        structfs_core_store::Value::Array(
-            example
-                .into_iter()
-                .map(|s| structfs_core_store::Value::String(s.to_string()))
-                .collect(),
-        ),
-    );
-
-    structfs_core_store::Value::Map(map)
+fn http_client_docs() -> Value {
+    Value::Map(btree! {
+        "title".into() => Value::String("HTTP Client Store".into()),
+        "description".into() => Value::String("Direct HTTP client with a base URL. Read = GET, Write = POST.".into()),
+        "paths".into() => Value::Map(btree! {
+            "read /<path>".into() => Value::String("GET request to base_url/<path>".into()),
+            "write /<path> <json>".into() => Value::String("POST request to base_url/<path>".into()),
+            "write / <HttpRequest>".into() => Value::String("Execute arbitrary request".into()),
+        }),
+        "example".into() => Value::Array(vec![
+            Value::String("# Mount at /api with base URL".into()),
+            Value::String("write /ctx/mounts/api {\"type\": \"http\", \"url\": \"https://api.example.com\"}".into()),
+            Value::String("read /api/users  # GET https://api.example.com/users".into()),
+            Value::String("write /api/users {\"name\": \"Alice\"}  # POST with body".into()),
+        ]),
+    })
 }
 
 /// Generate documentation for the async HTTP broker store.
-fn async_broker_docs() -> structfs_core_store::Value {
-    let mut map = std::collections::BTreeMap::new();
-    map.insert(
-        "title".to_string(),
-        structfs_core_store::Value::String("Async HTTP Broker".to_string()),
-    );
-    map.insert(
-        "description".to_string(),
-        structfs_core_store::Value::String(
-            "Queue HTTP requests by writing, requests execute in background threads.".to_string(),
-        ),
-    );
-
-    let mut paths = std::collections::BTreeMap::new();
-    paths.insert(
-        "write /".to_string(),
-        structfs_core_store::Value::String("Queue request, returns outstanding/{id}".to_string()),
-    );
-    paths.insert(
-        "read /outstanding".to_string(),
-        structfs_core_store::Value::String("List queued request IDs".to_string()),
-    );
-    paths.insert(
-        "read /outstanding/{id}".to_string(),
-        structfs_core_store::Value::String(
-            "Get request status (pending/complete/failed)".to_string(),
-        ),
-    );
-    paths.insert(
-        "read /outstanding/{id}/request".to_string(),
-        structfs_core_store::Value::String("View the queued request".to_string()),
-    );
-    paths.insert(
-        "read /outstanding/{id}/response".to_string(),
-        structfs_core_store::Value::String("Get response (None if still pending)".to_string()),
-    );
-    paths.insert(
-        "read /outstanding/{id}/response/wait".to_string(),
-        structfs_core_store::Value::String("Block until response ready".to_string()),
-    );
-    paths.insert(
-        "write /outstanding/{id} null".to_string(),
-        structfs_core_store::Value::String("Delete the handle".to_string()),
-    );
-    map.insert("paths".to_string(), structfs_core_store::Value::Map(paths));
-
-    let example = vec![
-        "write / {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}",
-        "# Returns: outstanding/0 (request starts executing)",
-        "read /outstanding/0",
-        "# Returns status: {\"status\": \"pending\"} or {\"status\": \"complete\"}",
-        "read /outstanding/0/response/wait",
-        "# Blocks until complete, returns response",
-    ];
-    map.insert(
-        "example".to_string(),
-        structfs_core_store::Value::Array(
-            example
-                .into_iter()
-                .map(|s| structfs_core_store::Value::String(s.to_string()))
-                .collect(),
-        ),
-    );
-
-    structfs_core_store::Value::Map(map)
+fn async_broker_docs() -> Value {
+    Value::Map(btree! {
+        "title".into() => Value::String("Async HTTP Broker".into()),
+        "description".into() => Value::String("Queue HTTP requests by writing, requests execute in background threads.".into()),
+        "paths".into() => Value::Map(btree! {
+            "write /".into() => Value::String("Queue request, returns outstanding/{id}".into()),
+            "read /outstanding".into() => Value::String("List queued request IDs".into()),
+            "read /outstanding/{id}".into() => Value::String("Get request status (pending/complete/failed)".into()),
+            "read /outstanding/{id}/request".into() => Value::String("View the queued request".into()),
+            "read /outstanding/{id}/response".into() => Value::String("Get response (None if still pending)".into()),
+            "read /outstanding/{id}/response/wait".into() => Value::String("Block until response ready".into()),
+            "write /outstanding/{id} null".into() => Value::String("Delete the handle".into()),
+        }),
+        "example".into() => Value::Array(vec![
+            Value::String("write / {\"method\": \"GET\", \"path\": \"https://httpbin.org/json\"}".into()),
+            Value::String("# Returns: outstanding/0 (request starts executing)".into()),
+            Value::String("read /outstanding/0".into()),
+            Value::String("# Returns status: {\"status\": \"pending\"} or {\"status\": \"complete\"}".into()),
+            Value::String("read /outstanding/0/response/wait".into()),
+            Value::String("# Blocks until complete, returns response".into()),
+        ]),
+    })
 }
 
 /// Navigate into a Value structure using path components.
 ///
 /// Given a Value and a path like ["headers", "content-type"], returns the nested value.
 /// Returns `Err(index)` if navigation fails at path component `index`.
-fn navigate_value(
-    value: structfs_core_store::Value,
-    path: &[&str],
-) -> Result<structfs_core_store::Value, usize> {
+fn navigate_value(value: Value, path: &[&str]) -> Result<Value, usize> {
     let mut current = value;
 
     for (i, key) in path.iter().enumerate() {
         current = match current {
-            structfs_core_store::Value::Map(map) => map
+            Value::Map(map) => map
                 .into_iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v)
                 .ok_or(i)?,
-            structfs_core_store::Value::Array(arr) => {
+            Value::Array(arr) => {
                 let index: usize = key.parse().map_err(|_| i)?;
                 arr.into_iter().nth(index).ok_or(i)?
             }
@@ -344,23 +231,176 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
     pub fn handle_count(&self) -> usize {
         self.handles.len()
     }
+
+    /// Read meta paths for action descriptors and handle inspection.
+    fn read_meta(&self, path: &Path) -> Result<Option<Record>, Error> {
+        // meta/ root - list available meta operations
+        if path.len() == 1 {
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "queue".into() => Reference::with_type("meta/queue", "action").to_value(),
+                "outstanding".into() => Reference::with_type("meta/outstanding", "collection").to_value(),
+            }))));
+        }
+
+        // meta/queue - action descriptor for queuing requests
+        if path.len() == 2 && path[1] == "queue" {
+            return Ok(Some(Record::parsed(Self::queue_action_descriptor())));
+        }
+
+        // meta/outstanding - list handles with meta references
+        if path.len() == 2 && path[1] == OUTSTANDING_PREFIX {
+            let items: Vec<Value> = self
+                .handles
+                .keys()
+                .map(|id| {
+                    Reference::with_type(format!("meta/outstanding/{}", id), "request-handle-meta")
+                        .to_value()
+                })
+                .collect();
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "items".into() => Value::Array(items),
+            }))));
+        }
+
+        // meta/outstanding/{id} - handle state and navigation
+        if path.len() >= 3 && path[1] == OUTSTANDING_PREFIX {
+            let id: RequestId = path[2].parse().map_err(|_| {
+                Error::store(
+                    "http_broker",
+                    "read",
+                    format!("Invalid handle ID: {}", path[2]),
+                )
+            })?;
+
+            let handle = self.handles.get(&id).ok_or_else(|| {
+                Error::store(
+                    "http_broker",
+                    "read",
+                    format!("Request with ID {} not found", id),
+                )
+            })?;
+
+            // meta/outstanding/{id}/delete - delete action descriptor
+            if path.len() == 4 && path[3] == "delete" {
+                return Ok(Some(Record::parsed(Self::delete_action_descriptor(id))));
+            }
+
+            // meta/outstanding/{id} - handle state + navigation
+            let state = if handle.is_executed() {
+                if handle.response.is_some() {
+                    "complete"
+                } else {
+                    "failed"
+                }
+            } else {
+                "pending"
+            };
+
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "state".into() => Value::Map(btree! {
+                    "status".into() => Value::String(state.to_string()),
+                    "method".into() => Value::String(format!("{:?}", handle.request.method)),
+                    "url".into() => Value::String(handle.request.path.clone()),
+                }),
+                "request".into() => Reference::with_type(format!("outstanding/{}/request", id), "http-request").to_value(),
+                "response".into() => Reference::with_type(format!("outstanding/{}/response", id), "http-response").to_value(),
+                "delete".into() => Reference::with_type(format!("meta/outstanding/{}/delete", id), "action").to_value(),
+            }))));
+        }
+
+        Err(Error::store(
+            "http_broker",
+            "read",
+            format!("Unknown meta path: {}", path),
+        ))
+    }
+
+    /// Generate action descriptor for queue operation.
+    fn queue_action_descriptor() -> Value {
+        Value::Map(btree! {
+            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("").to_value(),
+            "accepts".into() => Value::Map(btree! {
+                "method".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                    "required".into() => Value::Bool(true),
+                    "values".into() => Value::Array(vec![
+                        Value::String("GET".into()),
+                        Value::String("POST".into()),
+                        Value::String("PUT".into()),
+                        Value::String("PATCH".into()),
+                        Value::String("DELETE".into()),
+                        Value::String("HEAD".into()),
+                        Value::String("OPTIONS".into()),
+                    ]),
+                }),
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                    "required".into() => Value::Bool(true),
+                }),
+                "headers".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("map".into()) }),
+                    "required".into() => Value::Bool(false),
+                }),
+                "body".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                    "required".into() => Value::Bool(false),
+                }),
+            }),
+            "returns".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! { "name".into() => Value::String("request-handle".into()) }),
+                "collection".into() => Reference::new("outstanding").to_value(),
+            }),
+        })
+    }
+
+    /// Generate action descriptor for delete operation.
+    fn delete_action_descriptor(id: RequestId) -> Value {
+        Value::Map(btree! {
+            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new(format!("outstanding/{}", id)).to_value(),
+            "accepts".into() => Value::String("null".into()),
+            "returns".into() => Value::String("void".into()),
+        })
+    }
 }
 
 impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Handle root: read / -> references to outstanding, meta, docs
+        if from.is_empty() {
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "outstanding".into() => Reference::with_type("outstanding", "collection").to_value(),
+                "queue".into() => Reference::with_type("meta/queue", "action").to_value(),
+                "meta".into() => Reference::with_type("meta", "meta").to_value(),
+                "docs".into() => Reference::with_type("docs", "docs").to_value(),
+            }))));
+        }
+
         // Handle docs: read /docs or /docs/... -> documentation
-        if !from.is_empty() && from[0] == DOCS_PATH {
+        if from[0] == DOCS_PATH {
             return Ok(Some(Record::parsed(sync_broker_docs())));
         }
 
-        // Handle listing: read /outstanding -> [0, 1, 2, ...]
+        // Handle meta paths
+        if from[0] == META_PATH {
+            return self.read_meta(from);
+        }
+
+        // Handle listing: read /outstanding -> {items: [refs...]}
         if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
-            let ids: Vec<structfs_core_store::Value> = self
+            let items: Vec<Value> = self
                 .handles
                 .keys()
-                .map(|id| structfs_core_store::Value::Integer(*id as i64))
+                .map(|id| {
+                    Reference::with_type(format!("outstanding/{}", id), "request-handle").to_value()
+                })
                 .collect();
-            return Ok(Some(Record::parsed(structfs_core_store::Value::Array(ids))));
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "items".into() => Value::Array(items),
+            }))));
         }
 
         // Parse /outstanding/{id} or /outstanding/{id}/request
@@ -467,7 +507,7 @@ impl<E: HttpExecutor> Writer for HttpBrokerStore<E> {
 
         // Delete handle: write null to /outstanding/{id}
         if let Some((request_id, None)) = Self::parse_handle_path(to) {
-            if value == structfs_core_store::Value::Null {
+            if value == Value::Null {
                 self.handles.remove(&request_id);
                 return Ok(to.clone());
             }
@@ -856,25 +896,183 @@ impl AsyncHttpBrokerStore {
             thread::sleep(POLL_INTERVAL);
         }
     }
+
+    /// Read meta paths for action descriptors and handle inspection.
+    fn read_meta(&self, path: &Path) -> Result<Option<Record>, Error> {
+        // meta/ root - list available meta operations
+        if path.len() == 1 {
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "queue".into() => Reference::with_type("meta/queue", "action").to_value(),
+                "outstanding".into() => Reference::with_type("meta/outstanding", "collection").to_value(),
+            }))));
+        }
+
+        // meta/queue - action descriptor for queuing requests
+        if path.len() == 2 && path[1] == "queue" {
+            return Ok(Some(Record::parsed(Self::queue_action_descriptor())));
+        }
+
+        // meta/outstanding - list handles with meta references
+        if path.len() == 2 && path[1] == OUTSTANDING_PREFIX {
+            let handles = self.handles.lock().map_err(|e| {
+                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
+            })?;
+            let items: Vec<Value> = handles
+                .keys()
+                .map(|id| {
+                    Reference::with_type(format!("meta/outstanding/{}", id), "request-handle-meta")
+                        .to_value()
+                })
+                .collect();
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "items".into() => Value::Array(items),
+            }))));
+        }
+
+        // meta/outstanding/{id} - handle state and navigation
+        if path.len() >= 3 && path[1] == OUTSTANDING_PREFIX {
+            let id: RequestId = path[2].parse().map_err(|_| {
+                Error::store(
+                    "async_http_broker",
+                    "read",
+                    format!("Invalid handle ID: {}", path[2]),
+                )
+            })?;
+
+            let handles = self.handles.lock().map_err(|e| {
+                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
+            })?;
+
+            let handle = handles.get(&id).ok_or_else(|| {
+                Error::store(
+                    "async_http_broker",
+                    "read",
+                    format!("Request with ID {} not found", id),
+                )
+            })?;
+
+            // meta/outstanding/{id}/delete - delete action descriptor
+            if path.len() == 4 && path[3] == "delete" {
+                return Ok(Some(Record::parsed(Self::delete_action_descriptor(id))));
+            }
+
+            // meta/outstanding/{id} - handle state + navigation
+            let state = if handle.status.is_complete() {
+                "complete"
+            } else if handle.status.is_failed() {
+                "failed"
+            } else {
+                "pending"
+            };
+
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "state".into() => Value::Map(btree! {
+                    "status".into() => Value::String(state.to_string()),
+                    "method".into() => Value::String(format!("{:?}", handle.request.method)),
+                    "url".into() => Value::String(handle.request.path.clone()),
+                }),
+                "request".into() => Reference::with_type(format!("outstanding/{}/request", id), "http-request").to_value(),
+                "response".into() => Reference::with_type(format!("outstanding/{}/response", id), "http-response").to_value(),
+                "wait".into() => Reference::with_type(format!("outstanding/{}/response/wait", id), "accessor").to_value(),
+                "delete".into() => Reference::with_type(format!("meta/outstanding/{}/delete", id), "action").to_value(),
+            }))));
+        }
+
+        Err(Error::store(
+            "async_http_broker",
+            "read",
+            format!("Unknown meta path: {}", path),
+        ))
+    }
+
+    /// Generate action descriptor for queue operation.
+    fn queue_action_descriptor() -> Value {
+        Value::Map(btree! {
+            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new("").to_value(),
+            "accepts".into() => Value::Map(btree! {
+                "method".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                    "required".into() => Value::Bool(true),
+                    "values".into() => Value::Array(vec![
+                        Value::String("GET".into()),
+                        Value::String("POST".into()),
+                        Value::String("PUT".into()),
+                        Value::String("PATCH".into()),
+                        Value::String("DELETE".into()),
+                        Value::String("HEAD".into()),
+                        Value::String("OPTIONS".into()),
+                    ]),
+                }),
+                "path".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                    "required".into() => Value::Bool(true),
+                }),
+                "headers".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("map".into()) }),
+                    "required".into() => Value::Bool(false),
+                }),
+                "body".into() => Value::Map(btree! {
+                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                    "required".into() => Value::Bool(false),
+                }),
+            }),
+            "returns".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! { "name".into() => Value::String("request-handle".into()) }),
+                "collection".into() => Reference::new("outstanding").to_value(),
+            }),
+        })
+    }
+
+    /// Generate action descriptor for delete operation.
+    fn delete_action_descriptor(id: RequestId) -> Value {
+        Value::Map(btree! {
+            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
+            "method".into() => Value::String("write".into()),
+            "target".into() => Reference::new(format!("outstanding/{}", id)).to_value(),
+            "accepts".into() => Value::String("null".into()),
+            "returns".into() => Value::String("void".into()),
+        })
+    }
 }
 
 impl Reader for AsyncHttpBrokerStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        // Handle root: read / -> references to outstanding, meta, docs
+        if from.is_empty() {
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "outstanding".into() => Reference::with_type("outstanding", "collection").to_value(),
+                "queue".into() => Reference::with_type("meta/queue", "action").to_value(),
+                "meta".into() => Reference::with_type("meta", "meta").to_value(),
+                "docs".into() => Reference::with_type("docs", "docs").to_value(),
+            }))));
+        }
+
         // Handle docs: read /docs or /docs/... -> documentation
-        if !from.is_empty() && from[0] == DOCS_PATH {
+        if from[0] == DOCS_PATH {
             return Ok(Some(Record::parsed(async_broker_docs())));
         }
 
-        // Handle listing: read /outstanding -> [0, 1, 2, ...]
+        // Handle meta paths
+        if from[0] == META_PATH {
+            return self.read_meta(from);
+        }
+
+        // Handle listing: read /outstanding -> {items: [refs...]}
         if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
             let handles = self.handles.lock().map_err(|e| {
                 Error::store("async_http_broker", "read", format!("Lock error: {}", e))
             })?;
-            let ids: Vec<structfs_core_store::Value> = handles
+            let items: Vec<Value> = handles
                 .keys()
-                .map(|id| structfs_core_store::Value::Integer(*id as i64))
+                .map(|id| {
+                    Reference::with_type(format!("outstanding/{}", id), "request-handle").to_value()
+                })
                 .collect();
-            return Ok(Some(Record::parsed(structfs_core_store::Value::Array(ids))));
+            return Ok(Some(Record::parsed(Value::Map(btree! {
+                "items".into() => Value::Array(items),
+            }))));
         }
 
         let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| {
@@ -991,7 +1189,7 @@ impl Writer for AsyncHttpBrokerStore {
 
         // Delete handle: write null to /outstanding/{id}
         if let Some((request_id, None)) = Self::parse_handle_path(to) {
-            if value == structfs_core_store::Value::Null {
+            if value == Value::Null {
                 let mut handles = self.handles.lock().map_err(|e| {
                     Error::store("async_http_broker", "write", format!("Lock error: {}", e))
                 })?;
@@ -1338,18 +1536,21 @@ mod tests {
             )
             .unwrap();
 
-        // List outstanding
+        // List outstanding - now returns {items: [refs...]}
         let result = broker.read(&path!("outstanding")).unwrap().unwrap();
         let value = result.into_value(&NoCodec).unwrap();
 
-        match value {
-            structfs_core_store::Value::Array(ids) => {
-                assert_eq!(ids.len(), 3);
-                assert_eq!(ids[0], structfs_core_store::Value::Integer(0));
-                assert_eq!(ids[1], structfs_core_store::Value::Integer(1));
-                assert_eq!(ids[2], structfs_core_store::Value::Integer(2));
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 3);
+                for item in items {
+                    assert!(Reference::from_value(item).is_some());
+                }
+            } else {
+                panic!("Expected items array");
             }
-            _ => panic!("Expected array"),
+        } else {
+            panic!("Expected map with items");
         }
     }
 
@@ -1461,12 +1662,16 @@ mod tests {
         let result = broker.read(&path!("outstanding")).unwrap().unwrap();
         let value = result.into_value(&NoCodec).unwrap();
 
-        match value {
-            structfs_core_store::Value::Array(ids) => {
-                assert_eq!(ids.len(), 1);
-                assert_eq!(ids[0], structfs_core_store::Value::Integer(1));
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 1);
+                let reference = Reference::from_value(&items[0]).unwrap();
+                assert_eq!(reference.path, "outstanding/1");
+            } else {
+                panic!("Expected items array");
             }
-            _ => panic!("Expected array"),
+        } else {
+            panic!("Expected map with items");
         }
     }
 
@@ -1895,15 +2100,21 @@ mod tests {
             )
             .unwrap();
 
-        // List outstanding
+        // List outstanding - now returns {items: [refs...]}
         let result = broker.read(&path!("outstanding")).unwrap().unwrap();
         let value = result.into_value(&NoCodec).unwrap();
 
-        match value {
-            structfs_core_store::Value::Array(ids) => {
-                assert_eq!(ids.len(), 2);
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 2);
+                for item in items {
+                    assert!(Reference::from_value(item).is_some());
+                }
+            } else {
+                panic!("Expected items array");
             }
-            _ => panic!("Expected array"),
+        } else {
+            panic!("Expected map with items");
         }
     }
 
@@ -1947,9 +2158,14 @@ mod tests {
         // Verify it exists
         let list = broker.read(&path!("outstanding")).unwrap().unwrap();
         let value = list.into_value(&NoCodec).unwrap();
-        match value {
-            structfs_core_store::Value::Array(ids) => assert_eq!(ids.len(), 1),
-            _ => panic!("Expected array"),
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 1);
+            } else {
+                panic!("Expected items array");
+            }
+        } else {
+            panic!("Expected map with items");
         }
 
         // Delete by writing null
@@ -1960,9 +2176,14 @@ mod tests {
         // Verify it's gone
         let list = broker.read(&path!("outstanding")).unwrap().unwrap();
         let value = list.into_value(&NoCodec).unwrap();
-        match value {
-            structfs_core_store::Value::Array(ids) => assert_eq!(ids.len(), 0),
-            _ => panic!("Expected array"),
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 0);
+            } else {
+                panic!("Expected items array");
+            }
+        } else {
+            panic!("Expected map with items");
         }
     }
 
@@ -2091,5 +2312,399 @@ mod tests {
             }
             _ => panic!("Expected map"),
         }
+    }
+
+    // ==================== HATEOAS tests ====================
+
+    #[test]
+    fn test_sync_broker_root_returns_references() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            assert!(Reference::from_value(map.get("outstanding").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("queue").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("meta").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("docs").unwrap()).is_some());
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_sync_broker_meta_root() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("meta")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            assert!(Reference::from_value(map.get("queue").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("outstanding").unwrap()).is_some());
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_sync_broker_meta_queue_action() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("meta/queue")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            // Check type is action
+            if let Some(structfs_core_store::Value::Map(type_info)) = map.get("type") {
+                assert_eq!(
+                    type_info.get("name"),
+                    Some(&structfs_core_store::Value::String("action".to_string()))
+                );
+            } else {
+                panic!("Expected type info");
+            }
+            // Check method is write
+            assert_eq!(
+                map.get("method"),
+                Some(&structfs_core_store::Value::String("write".to_string()))
+            );
+            // Check target is root
+            assert!(Reference::from_value(map.get("target").unwrap()).is_some());
+            // Check accepts contains method and path
+            if let Some(structfs_core_store::Value::Map(accepts)) = map.get("accepts") {
+                assert!(accepts.contains_key("method"));
+                assert!(accepts.contains_key("path"));
+            } else {
+                panic!("Expected accepts map");
+            }
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_sync_broker_meta_outstanding_listing() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        let result = broker.read(&path!("meta/outstanding")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 1);
+                let reference = Reference::from_value(&items[0]).unwrap();
+                assert_eq!(reference.path, "meta/outstanding/0");
+            } else {
+                panic!("Expected items array");
+            }
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_sync_broker_meta_handle_state() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("https://example.com")).unwrap()),
+            )
+            .unwrap();
+
+        let result = broker.read(&path!("meta/outstanding/0")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            // Check state
+            if let Some(structfs_core_store::Value::Map(state)) = map.get("state") {
+                assert_eq!(
+                    state.get("status"),
+                    Some(&structfs_core_store::Value::String("pending".to_string()))
+                );
+            } else {
+                panic!("Expected state map");
+            }
+            // Check navigation references
+            assert!(Reference::from_value(map.get("request").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("response").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("delete").unwrap()).is_some());
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_sync_broker_meta_delete_action() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        let result = broker
+            .read(&path!("meta/outstanding/0/delete"))
+            .unwrap()
+            .unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            // Check type is action
+            if let Some(structfs_core_store::Value::Map(type_info)) = map.get("type") {
+                assert_eq!(
+                    type_info.get("name"),
+                    Some(&structfs_core_store::Value::String("action".to_string()))
+                );
+            } else {
+                panic!("Expected type info");
+            }
+            // Check target is outstanding/0
+            let target = Reference::from_value(map.get("target").unwrap()).unwrap();
+            assert_eq!(target.path, "outstanding/0");
+            // Check accepts is null
+            assert_eq!(
+                map.get("accepts"),
+                Some(&structfs_core_store::Value::String("null".to_string()))
+            );
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_sync_broker_meta_unknown_path() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("meta/unknown"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown meta path"));
+    }
+
+    #[test]
+    fn test_sync_broker_meta_handle_not_found() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("meta/outstanding/999"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_sync_broker_meta_invalid_handle_id() {
+        let mock = MockExecutor::new();
+        let mut broker = HttpBrokerStore::with_executor(mock);
+
+        let result = broker.read(&path!("meta/outstanding/abc"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid handle ID"));
+    }
+
+    #[test]
+    fn test_async_broker_root_returns_references() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            assert!(Reference::from_value(map.get("outstanding").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("queue").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("meta").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("docs").unwrap()).is_some());
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_async_broker_meta_root() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("meta")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            assert!(Reference::from_value(map.get("queue").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("outstanding").unwrap()).is_some());
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_async_broker_meta_queue_action() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("meta/queue")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            // Check type is action
+            if let Some(structfs_core_store::Value::Map(type_info)) = map.get("type") {
+                assert_eq!(
+                    type_info.get("name"),
+                    Some(&structfs_core_store::Value::String("action".to_string()))
+                );
+            } else {
+                panic!("Expected type info");
+            }
+            // Check method is write
+            assert_eq!(
+                map.get("method"),
+                Some(&structfs_core_store::Value::String("write".to_string()))
+            );
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_async_broker_meta_outstanding_listing() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        let result = broker.read(&path!("meta/outstanding")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            if let Some(structfs_core_store::Value::Array(items)) = map.get("items") {
+                assert_eq!(items.len(), 1);
+            } else {
+                panic!("Expected items array");
+            }
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_async_broker_meta_handle_state() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("https://example.com")).unwrap()),
+            )
+            .unwrap();
+
+        let result = broker.read(&path!("meta/outstanding/0")).unwrap().unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            // Check state exists
+            assert!(map.contains_key("state"));
+            // Check navigation references including wait
+            assert!(Reference::from_value(map.get("request").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("response").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("wait").unwrap()).is_some());
+            assert!(Reference::from_value(map.get("delete").unwrap()).is_some());
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_async_broker_meta_delete_action() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        // Queue a request
+        broker
+            .write(
+                &path!(""),
+                Record::parsed(to_value(&HttpRequest::get("/test")).unwrap()),
+            )
+            .unwrap();
+
+        let result = broker
+            .read(&path!("meta/outstanding/0/delete"))
+            .unwrap()
+            .unwrap();
+        let value = result.into_value(&NoCodec).unwrap();
+
+        if let structfs_core_store::Value::Map(map) = value {
+            // Check type is action
+            if let Some(structfs_core_store::Value::Map(type_info)) = map.get("type") {
+                assert_eq!(
+                    type_info.get("name"),
+                    Some(&structfs_core_store::Value::String("action".to_string()))
+                );
+            } else {
+                panic!("Expected type info");
+            }
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_async_broker_meta_unknown_path() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("meta/unknown"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown meta path"));
+    }
+
+    #[test]
+    fn test_async_broker_meta_handle_not_found() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("meta/outstanding/999"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_async_broker_meta_invalid_handle_id() {
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+
+        let result = broker.read(&path!("meta/outstanding/abc"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid handle ID"));
     }
 }

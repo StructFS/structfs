@@ -1583,6 +1583,7 @@ dependencies = [
 name = "structfs-http"
 version = "0.1.0"
 dependencies = [
+ "collection_literals",
  "http",
  "reqwest",
  "serde",
