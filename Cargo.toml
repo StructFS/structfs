@@ -8,6 +8,7 @@ members = [
     "packages/http",
     "packages/repl",
     "packages/sys",
+    "featherweight/runtime",
 ]
 
 [workspace.package]
@@ -57,3 +58,8 @@ reedline = "0.44"
 nu-ansi-term = "0.50"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
+
+# Featherweight runtime
+wasmtime = "40"
+uuid = { version = "1.11", features = ["v4"] }
+tracing = "0.1"
