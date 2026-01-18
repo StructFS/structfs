@@ -1,0 +1,17 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cb49911ae3dbe602488186ba7a8cf946889fb74bfce55fa3d68f2b59746d9724 # shrinks to s = "\u{14647}:"
+cc c54e305d76d71c80e804e50bfb6ef738c1c7d12b602861017ee71abeedc86a4e # shrinks to s = "^,"
+cc b77798693387b1086643084e7f0ba9db6e0c7496cffaa9da7b94174fedb07519 # shrinks to s = "0¡0 "
+cc 4df31cc92d9f6d4df74220e3aa4f1e7a6f400f88b87782d1bdc0b9e127ba3de1 # shrinks to s = "\u{b}\u{e000}¡"
+cc f8c9d71401e864fb7da3ef9b0e7e5c61ec2ff041f1bd818d83ecfb0ca390a707 # shrinks to s = "[ "
+cc 3ee8180dc7df2f6814ac797bffffde71fed31b577ec2f41044d9f6ac11c3c87b # shrinks to s = "A"
+cc b20ae80c806a2d69efb9dd5937c3456fd5c8c87480167aab1eb7577a8d181db9 # shrinks to s = ",_"
+cc 8e95fa43784eafad4ef0b73ed66ba39c236a37a91a41d63602445e0adcafd2cf # shrinks to s = "a"
+cc fea69867621980427ae490bb3081183663a9e96279337f22c6752097fae8c258 # shrinks to s = "𞸤"
+cc add3a92710a498ca94423ac483a83a3ef8b3f60c247be329d870164896650b37 # shrinks to s = "_ "
+cc 1d36dce3b7b9e064254b8d09013f6c0ab641d956aab95b1181e0387501c43cf8 # shrinks to s = "_"

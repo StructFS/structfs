@@ -1,0 +1,12 @@
+[package]
+name = "namecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Encode Unicode strings as valid programming language identifiers"
+
+[dependencies]
+unicode-ident = "1.0"
+
+[dev-dependencies]
+proptest = "1.0"
