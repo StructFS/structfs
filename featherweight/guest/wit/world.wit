@@ -1,0 +1,61 @@
+/// Featherweight Block interface for WASM components.
+///
+/// This WIT file defines the contract between the Featherweight runtime (host)
+/// and WASM Blocks (guests). Blocks interact with the world exclusively through
+/// the store interface provided by the host.
+
+package featherweight:block@0.1.0;
+
+/// The store interface provided by the host to guest Blocks.
+/// This is how Blocks read and write data.
+interface store {
+    /// A value that can be stored.
+    /// Simplified for initial implementation.
+    variant value {
+        val-null,
+        val-bool(bool),
+        val-integer(s64),
+        val-float(f64),
+        val-text(string),
+    }
+
+    /// Result of a read operation.
+    variant read-result {
+        /// Value found at path
+        found(value),
+        /// No value at path
+        not-found,
+        /// Error occurred
+        read-error(string),
+    }
+
+    /// Result of a write operation.
+    variant write-result {
+        /// Write succeeded, returns the path written to
+        written(string),
+        /// Error occurred
+        write-error(string),
+    }
+
+    /// Read a value from a path.
+    read: func(path: string) -> read-result;
+
+    /// Write a value to a path.
+    write: func(path: string, val: value) -> write-result;
+}
+
+/// The Block interface that guests must implement.
+interface block {
+    /// Run the Block. Called once when the Block starts.
+    /// Returns Ok(()) on success or an error message on failure.
+    run: func() -> result<_, string>;
+}
+
+/// The world that WASM Blocks live in.
+world block-world {
+    /// Host provides store access
+    import store;
+
+    /// Guest implements the Block
+    export block;
+}

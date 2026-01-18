@@ -9,7 +9,7 @@ description = "Block-based pico-process runtime for Isotope virtual OS"
 [dependencies]
 structfs-core-store = { workspace = true }
 
-wasmtime = { workspace = true }
+wasmtime = { workspace = true, features = ["component-model"] }
 tokio = { workspace = true, features = ["sync"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -19,5 +19,11 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 collection_literals = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [[example]]
 name = "hello_world"
+
+[[example]]
+name = "wasm_hello"

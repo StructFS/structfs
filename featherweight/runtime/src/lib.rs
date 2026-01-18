@@ -155,6 +155,7 @@ pub mod block;
 pub mod channel;
 pub mod error;
 pub mod runtime;
+pub mod wasm_block;
 
 pub use block::{
     Block, BlockContext, BlockHandle, BlockId, BlockState, ErasedStore, ExportedStore,
@@ -162,3 +163,4 @@ pub use block::{
 pub use channel::ChannelStore;
 pub use error::{Result, RuntimeError};
 pub use runtime::{Runtime, RuntimeConfig, SharedStoreAdapter};
+pub use wasm_block::WasmBlock;

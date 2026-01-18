@@ -97,10 +97,8 @@ impl Block<PrefixedStore> for GreetingService {
 
                 // Write the response
                 let resp_path = Path::parse("response").unwrap();
-                ctx.root.write(
-                    &resp_path,
-                    Record::parsed(Value::String(greeting.clone())),
-                )?;
+                ctx.root
+                    .write(&resp_path, Record::parsed(Value::String(greeting.clone())))?;
 
                 println!("[GreetingService] Sent response: {}", greeting);
             }
@@ -124,10 +122,8 @@ impl Block<PrefixedStore> for Client {
         // Send our name to the greeting service
         println!("[Client] Sending name: {}", self.name);
         let req_path = Path::parse("request").unwrap();
-        ctx.root.write(
-            &req_path,
-            Record::parsed(Value::String(self.name.clone())),
-        )?;
+        ctx.root
+            .write(&req_path, Record::parsed(Value::String(self.name.clone())))?;
 
         println!("[Client] Done sending request.");
         Ok(())

@@ -203,6 +203,8 @@ impl Writer for SharedStoreAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use structfs_core_store::{NoCodec, Value};
 
     #[test]
     fn runtime_config_default() {
@@ -214,5 +216,204 @@ mod tests {
     fn runtime_new() {
         let runtime = Runtime::new(RuntimeConfig::default());
         assert_eq!(runtime.block_count(), 0);
+    }
+
+    // A simple test Block implementation
+    struct TestBlock {
+        success: bool,
+    }
+
+    #[async_trait]
+    impl crate::block::Block<()> for TestBlock {
+        async fn run(&mut self, _ctx: BlockContext<()>) -> crate::error::Result<()> {
+            if self.success {
+                Ok(())
+            } else {
+                Err(crate::error::RuntimeError::Io(std::io::Error::other(
+                    "test failure",
+                )))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_spawn_block() {
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        let block = TestBlock { success: true };
+
+        let handle = runtime.spawn(block, ()).await.unwrap();
+        assert_eq!(handle.state().await, BlockState::Running);
+        assert_eq!(runtime.block_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_spawn_max_blocks() {
+        let config = RuntimeConfig { max_blocks: 1 };
+        let mut runtime = Runtime::new(config);
+
+        // First spawn succeeds
+        let block1 = TestBlock { success: true };
+        let _handle = runtime.spawn(block1, ()).await.unwrap();
+
+        // Second spawn fails
+        let block2 = TestBlock { success: true };
+        let result = runtime.spawn(block2, ()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_blocks_iterator() {
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        let block = TestBlock { success: true };
+        runtime.spawn(block, ()).await.unwrap();
+
+        let ids: Vec<_> = runtime.blocks().collect();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_get_handle() {
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        let block = TestBlock { success: true };
+        let handle = runtime.spawn(block, ()).await.unwrap();
+
+        let retrieved = runtime.get_handle(handle.id);
+        assert!(retrieved.is_some());
+
+        // Non-existent block
+        let fake_id = BlockId::new();
+        assert!(runtime.get_handle(fake_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_register_and_get_export() {
+        struct TestStore;
+        impl Reader for TestStore {
+            fn read(&mut self, _path: &Path) -> std::result::Result<Option<Record>, StoreError> {
+                Ok(Some(Record::parsed(Value::Integer(42))))
+            }
+        }
+        impl Writer for TestStore {
+            fn write(
+                &mut self,
+                path: &Path,
+                _record: Record,
+            ) -> std::result::Result<Path, StoreError> {
+                Ok(path.clone())
+            }
+        }
+
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        let block = TestBlock { success: true };
+        let handle = runtime.spawn(block, ()).await.unwrap();
+
+        // Register an export
+        runtime
+            .register_export(handle.id, "myexport", TestStore)
+            .unwrap();
+
+        // Get the export
+        let export = runtime.get_export(handle.id, "myexport").unwrap();
+        let mut guard = export.lock().await;
+        let result = guard.read(&Path::parse("test").unwrap());
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn runtime_get_export_not_found() {
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+        let block = TestBlock { success: true };
+        let handle = runtime.spawn(block, ()).await.unwrap();
+
+        // Export doesn't exist
+        let result = runtime.get_export(handle.id, "nonexistent");
+        assert!(matches!(
+            result,
+            Err(crate::error::RuntimeError::ExportNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_export_block_not_found() {
+        struct TestStore;
+        impl Reader for TestStore {
+            fn read(&mut self, _path: &Path) -> std::result::Result<Option<Record>, StoreError> {
+                Ok(None)
+            }
+        }
+        impl Writer for TestStore {
+            fn write(
+                &mut self,
+                path: &Path,
+                _record: Record,
+            ) -> std::result::Result<Path, StoreError> {
+                Ok(path.clone())
+            }
+        }
+
+        let mut runtime = Runtime::new(RuntimeConfig::default());
+
+        // Block doesn't exist
+        let fake_id = BlockId::new();
+        let result = runtime.register_export(fake_id, "export", TestStore);
+        assert!(matches!(
+            result,
+            Err(crate::error::RuntimeError::BlockNotFound(_))
+        ));
+
+        // Get export for non-existent block
+        let result = runtime.get_export(fake_id, "export");
+        assert!(matches!(
+            result,
+            Err(crate::error::RuntimeError::BlockNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn shared_store_adapter() {
+        struct TestStore {
+            value: Option<Value>,
+        }
+        impl Reader for TestStore {
+            fn read(&mut self, _path: &Path) -> std::result::Result<Option<Record>, StoreError> {
+                Ok(self.value.clone().map(Record::parsed))
+            }
+        }
+        impl Writer for TestStore {
+            fn write(
+                &mut self,
+                path: &Path,
+                record: Record,
+            ) -> std::result::Result<Path, StoreError> {
+                self.value = Some(record.into_value(&NoCodec)?);
+                Ok(path.clone())
+            }
+        }
+
+        // Create a shared store
+        let store: Box<dyn ErasedStore> = Box::new(TestStore { value: None });
+        let shared: ExportedStore = Arc::new(Mutex::new(store));
+
+        // Wrap in adapter
+        let mut adapter = SharedStoreAdapter::new(shared);
+
+        // Write through adapter
+        let path = Path::parse("data").unwrap();
+        let result = Writer::write(
+            &mut adapter,
+            &path,
+            Record::parsed(Value::String("hello".to_string())),
+        );
+        assert!(result.is_ok());
+
+        // Read back through adapter
+        let result = Reader::read(&mut adapter, &path);
+        match result {
+            Ok(Some(r)) => {
+                let value: Value = r.into_value(&NoCodec).unwrap();
+                assert_eq!(value, Value::String("hello".to_string()));
+            }
+            _ => panic!("Expected Ok(Some(Record))"),
+        }
     }
 }
