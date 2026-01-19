@@ -21,6 +21,24 @@ This is not a new idea—Plan 9 showed that "everything is a file" dramatically
 simplifies system design. Isotope pushes further: everything is a *store
 operation*, and stores compose.
 
+### StructFS as Transport
+
+StructFS is a transport layer, not an application layer. Developers don't write
+raw read/write handlers any more than web developers write raw TCP sockets.
+
+A Block can wrap any application protocol:
+
+- A gRPC service that thinks in protobuf and streaming RPCs
+- An OpenAPI service that thinks in JSON and REST semantics
+- A language-native SDK with decorators or traits
+
+The wrapping layer translates between the application protocol and StructFS
+operations. The Block's internal code never sees StructFS directly—it sees its
+native protocol.
+
+This spec defines the transport contract. How developers interact with that
+transport is an SDK/framework concern, not a protocol concern.
+
 ### Blocks as Pico-Processes
 
 The fundamental unit of execution in Isotope is the **Block**. A Block is:

@@ -81,12 +81,35 @@ config:
 
 Lists the Blocks in this Assembly. Each Block has a local name used in wiring.
 
+Short form (defaults to `application/json` serialization):
+
 ```yaml
 blocks:
   api: ./api-block.wasm           # Local Wasm file
   cache: registry:cache-block:1.2  # From a registry
   database: ./database-block.wasm
 ```
+
+Expanded form with explicit serialization:
+
+```yaml
+blocks:
+  api:
+    wasm: ./api-block.wasm
+    serialization: application/json
+
+  backend:
+    wasm: ./backend-block.wasm
+    serialization: application/protobuf
+
+  metrics:
+    wasm: ./metrics-block.wasm
+    serialization: application/msgpack
+```
+
+The `serialization` field declares the encoding format for all communication
+with this Block. It must be set before the Block starts—all messages, including
+startup and shutdown, use this format. See `06-protocol.md` for details.
 
 Block references can point to:
 - Local Wasm files

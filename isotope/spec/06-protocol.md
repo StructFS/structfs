@@ -48,9 +48,15 @@ write("/jobs", {task: "process", data: {...}})
 
 The caller then reads from `/jobs/outstanding/42` to get the result.
 
-## Value Types
+## The StructFS Data Model
 
-Isotope uses StructFS Value types:
+StructFS defines a **semantic data model**, not a serialization format. This is
+analogous to Rust's serde: serde defines an abstract data model that many
+concrete formats (JSON, TOML, MessagePack, bincode) can serialize to and from.
+
+### Value Types
+
+The StructFS data model comprises:
 
 - **Null** — Absence of value
 - **Bool** — true/false
@@ -60,6 +66,107 @@ Isotope uses StructFS Value types:
 - **Bytes** — Arbitrary octets
 - **Array** — Ordered list of Values
 - **Map** — String-keyed collection of Values
+
+### Serialization Independence
+
+Any serialization format that can faithfully represent these types IS StructFS-
+compatible:
+
+- **JSON** — Maps naturally to the data model
+- **Protocol Buffers** — StructFS-compatible when schema maps to Value types
+- **MessagePack** — Binary format, fully compatible
+- **CBOR** — Binary format, fully compatible
+- **Custom binary formats** — Compatible if they preserve semantics
+
+When a Block reads from a path, it receives a Value—not "JSON" or "protobuf."
+The bytes on the wire might be any compatible serialization. The Block operates
+on the semantic Value, not the encoding.
+
+```
+                     StructFS Data Model
+                     (semantic contract)
+                            │
+          ┌─────────────────┼─────────────────┐
+          │                 │                 │
+        JSON            Protobuf          MessagePack
+     (encoding)        (encoding)         (encoding)
+```
+
+### Block Serialization Declaration
+
+A Block's serialization format is declared in the Assembly definition, before
+the Block starts. All communication with the Block—including startup and
+shutdown—uses this format. There is no negotiation; the format is fixed for
+the Block's lifetime.
+
+```yaml
+# In Assembly definition
+blocks:
+  api:
+    wasm: ./api-block.wasm
+    serialization: application/json
+
+  backend:
+    wasm: ./backend-block.wasm
+    serialization: application/protobuf
+```
+
+Common formats:
+
+- `application/json` — JSON encoding
+- `application/protobuf` — Protocol Buffers encoding
+- `application/msgpack` — MessagePack encoding
+- `application/cbor` — CBOR encoding
+
+The runtime uses this declaration to encode all Values delivered to the Block
+and decode all Values the Block writes. The Block sees only bytes in its
+declared format—it never needs to handle format detection or switching.
+
+### Runtime Translation
+
+When two Blocks with different serialization formats communicate, the runtime
+translates:
+
+```
+Block A (JSON) writes to Block B (protobuf)
+→ A writes JSON bytes
+→ Runtime decodes JSON to Value
+→ Runtime encodes Value to protobuf
+→ B receives protobuf bytes
+```
+
+This translation is transparent. Block A thinks it's writing JSON. Block B
+thinks it's reading protobuf. Both are correct—they're exchanging Values.
+
+For Blocks with the same format, the runtime may pass bytes directly without
+decode/encode (an optimization, not a guarantee).
+
+### Implications
+
+**Schema is orthogonal to serialization.** A protobuf `.proto` file or OpenAPI
+spec defines the *shape* of Values a Block accepts. This is separate from which
+encoding carries those Values on the wire.
+
+**Format translation is the runtime's job.** Blocks don't need adapters to talk
+to Blocks with different formats. The runtime handles it.
+
+**One format simplifies Blocks.** A Block doesn't need content-type negotiation
+or multiple encoders. It picks one format and the runtime does the rest.
+
+**Blocks can wrap existing protocols.** A Block wrapping a gRPC service declares
+`application/protobuf` and internally runs standard gRPC handlers. A Block
+wrapping an OpenAPI service declares `application/json` and internally handles
+REST-style requests. The wrapped service doesn't know it's running on StructFS—
+it just sees its native protocol.
+
+This enables middleware that operates at the StructFS Value layer, translating
+between protocols:
+
+```
+gRPC client → StructFS Value → OpenAPI server
+```
+
+The middleware sees Values, agnostic to the serialization on either side.
 
 ## Blocking Behavior
 

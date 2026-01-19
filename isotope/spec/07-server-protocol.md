@@ -350,6 +350,31 @@ The runtime implements the Server Protocol by:
 The Block is unaware of these mechanisms—it just reads Requests and writes
 Responses.
 
+## A Note on Examples
+
+The examples below show the raw Server Protocol—manual run loops, explicit
+request dispatch, direct response writing. This is analogous to showing TCP
+socket code: technically accurate, but not how developers typically work.
+
+In practice, developers use:
+
+- **Language-native SDKs** that generate the run loop and dispatch machinery
+- **Protocol wrappers** that translate gRPC, OpenAPI, or other protocols to StructFS
+- **Framework conventions** like handler decorators or trait implementations
+
+A real Block might look like:
+
+```rust
+#[structfs::store]
+impl UserStore {
+    #[read("users/{id}")]
+    fn get_user(&self, id: u64) -> Result<User, Error> { ... }
+}
+```
+
+The raw protocol matters for runtime implementers and SDK authors. Application
+developers work at a higher level.
+
 ## Example: Echo Server
 
 A minimal echo server:
