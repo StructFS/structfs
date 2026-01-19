@@ -131,9 +131,41 @@ The caller can then read from `outstanding/42` (which becomes another Request).
 }
 ```
 
+## Blocking vs Non-Blocking Request Reads
+
+The Server Protocol provides two paths for reading Requests, with different
+blocking behavior:
+
+### Blocking: `/iso/server/requests`
+
+```python
+request = read("/iso/server/requests")
+```
+
+This **blocks** until a Request is available. The Block suspends until:
+- A Request arrives, OR
+- Shutdown is signaled (returns `null` or shutdown marker)
+
+This is the typical path for simple request-response Blocks.
+
+### Non-Blocking: `/iso/server/requests/pending`
+
+```python
+requests = read("/iso/server/requests/pending")
+```
+
+This returns **immediately** with an array of all pending Requests. If no
+Requests are pending, returns an empty array `[]`.
+
+This enables:
+- Batch processing (collect multiple requests, process together)
+- Polling patterns (check for work, do other things)
+- Custom scheduling (prioritize certain requests)
+- Cooperative multitasking within a Block
+
 ## Block Run Loop
 
-A typical Block run loop:
+A typical Block run loop using blocking reads:
 
 ```python
 while True:
@@ -161,23 +193,30 @@ The Block:
 
 ## Batch Processing
 
-Blocks can read multiple pending Requests:
+A Block can use non-blocking reads for batch processing:
 
 ```python
-requests = read("/iso/server/requests/pending")
+while True:
+    # Non-blocking: get all pending requests
+    requests = read("/iso/server/requests/pending")
 
-for request in requests:
-    response = process(request)
-    write(request.respond_to, response)
+    if not requests:
+        # No pending work - could do other things, or block for one
+        request = read("/iso/server/requests")  # Block for next
+        if is_shutdown_signal(request):
+            break
+        requests = [request]
+
+    # Process batch
+    for request in requests:
+        response = process(request)
+        write(request.respond_to, response)
 ```
 
-`/iso/server/requests/pending` returns an array of all pending Requests
-(non-blocking, returns empty array if none).
-
-This allows Blocks to:
-- Batch database operations
-- Prioritize certain requests
-- Implement custom scheduling
+This pattern allows Blocks to:
+- Batch database operations for efficiency
+- Prioritize certain request types
+- Implement fair scheduling across request types
 
 ## Async Operations
 
@@ -234,7 +273,7 @@ write("/iso/shutdown/complete", {})
 
 ## Reentrancy and Cycles
 
-Blocks are single-threaded, but the Server Protocol allows cycles:
+Blocks are single-threaded, but the Server Protocol allows cyclic wiring:
 
 ```
 Block A writes to Block B
@@ -242,14 +281,11 @@ Block A writes to Block B
 → A receives B's write as a new Request
 ```
 
-This works because:
+This CAN work when:
 1. A's write to B returns (with a handle or immediate response)
 2. A continues (or blocks reading from handle)
 3. B's write to A queues as a Request
 4. A eventually reads that Request
-
-Deadlock is avoided because operations don't synchronously nest—they go
-through the runtime's request queue.
 
 Example: OAuth callback
 
@@ -258,6 +294,47 @@ Auth Block writes to External Service
 → External Service calls back to Auth Block's callback endpoint
 → Auth Block receives callback as Request
 → Auth Block processes callback, completes original flow
+```
+
+### Deadlocks Are Possible
+
+**Deadlocks are 100% possible** in Isotope. Because paths served by a Block can
+route to other Blocks (via wiring), cyclic dependencies can easily form.
+
+Example deadlock:
+
+```
+Block A writes to /services/b/foo (routes to Block B)
+→ A blocks waiting for B's response
+→ B, while handling, writes to /services/a/bar (routes to Block A)
+→ B blocks waiting for A's response
+→ A is blocked, cannot read the new Request
+→ DEADLOCK
+```
+
+### Runtime Responsibilities for Deadlock
+
+The Isotope runtime is responsible for:
+
+1. **Static Analysis**: Warn at Assembly load time when wiring configurations
+   could produce deadlocks (cyclic dependencies where all edges are synchronous)
+
+2. **Runtime Detection**: Detect deadlocks at runtime when they occur (similar
+   to Go's "all goroutines are asleep" detection)
+
+3. **Deadlock Breaking**: Provide facilities to break deadlocks, such as:
+   - Timeout on blocked operations
+   - Returning an error to one participant to break the cycle
+   - Configurable deadlock policies per Assembly
+
+Blocks that need cyclic communication should use the handle pattern to avoid
+synchronous blocking:
+
+```python
+# Instead of blocking write:
+handle = write("/services/other/request", data)
+# Don't immediately read the handle - continue processing requests
+# Read the handle later when not blocked on it
 ```
 
 ## Runtime Responsibilities

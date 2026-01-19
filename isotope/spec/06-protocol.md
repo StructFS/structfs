@@ -136,29 +136,80 @@ The consistency model is a property of the store, not the protocol.
 
 ## Error Handling
 
-Errors fall into categories:
+Errors are always expressed in terms of **paths and stores**, never in terms of
+implementation details. A caller should not be able to tell whether a path is
+served by a simple in-memory store, a remote service, or a complex Assembly of
+components. The abstraction must not leak.
 
-### Path Errors
+### Error Structure
 
-- **PathNotFound** — No store handles this path
-- **InvalidPath** — Path syntax is invalid
+```json
+{
+    "result": "error",
+    "error": {
+        "type": "unavailable",
+        "message": "Store temporarily unavailable",
+        "retryable": true
+    }
+}
+```
 
-### Permission Errors
+The `retryable` field indicates whether the caller should retry the operation:
+- `true` — Transient failure, retry may succeed
+- `false` — Permanent failure, retry will not help
 
-- **NotReadable** — Path cannot be read
-- **NotWritable** — Path cannot be written
-- **Forbidden** — Caller lacks capability
+### Error Categories
 
-### Store Errors
+#### Path Errors
 
-- **StoreError(details)** — Store-specific error
-- **Timeout** — Operation timed out
-- **Unavailable** — Store temporarily unavailable
+- **not_found** — No store handles this path (retryable: false)
+- **invalid_path** — Path syntax is invalid (retryable: false)
 
-### Value Errors
+#### Permission Errors
 
-- **TypeMismatch** — Value type doesn't match expectation
-- **ValidationFailed** — Value failed schema validation
+- **not_readable** — Path cannot be read (retryable: false)
+- **not_writable** — Path cannot be written (retryable: false)
+- **forbidden** — Caller lacks capability (retryable: false)
+
+#### Store Errors
+
+- **unavailable** — Store temporarily unavailable (retryable: true)
+- **timeout** — Operation timed out (retryable: true)
+- **store_error** — Store-specific error (retryable: depends on details)
+
+#### Value Errors
+
+- **type_mismatch** — Value type doesn't match expectation (retryable: false)
+- **validation_failed** — Value failed schema validation (retryable: false)
+
+### Transient vs Permanent Failures
+
+**Transient failures** (retryable: true):
+- The store is temporarily overloaded
+- A network hiccup occurred
+- The store is restarting
+
+**Permanent failures** (retryable: false):
+- The path doesn't exist
+- The caller lacks permission
+- The data is invalid
+
+### Error Transparency
+
+The implementation behind a path should never leak through errors. Compare:
+
+**Wrong** (leaks implementation):
+```json
+{"type": "block_failed", "message": "Cache block crashed"}
+```
+
+**Correct** (store-level abstraction):
+```json
+{"type": "unavailable", "message": "Store temporarily unavailable", "retryable": true}
+```
+
+The caller doesn't know or care that there's a "cache block" — they just know
+the store at that path is temporarily unavailable and they can retry.
 
 ## References
 

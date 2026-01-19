@@ -464,7 +464,9 @@ mod proptests {
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
-    use crate::bootstring::{adapt_bias, decode_digit, encode_digit, threshold, BASE, T_MAX, T_MIN};
+    use crate::bootstring::{
+        adapt_bias, decode_digit, encode_digit, threshold, BASE, T_MAX, T_MIN,
+    };
 
     // ==================== Bootstring Function Proofs ====================
 
@@ -476,7 +478,10 @@ mod kani_proofs {
         let result = encode_digit(digit);
 
         if digit < 32 {
-            assert!(result.is_some(), "encode_digit should return Some for digit < 32");
+            assert!(
+                result.is_some(),
+                "encode_digit should return Some for digit < 32"
+            );
             let c = result.unwrap();
             // Verify the character is in expected range
             assert!(
@@ -484,7 +489,10 @@ mod kani_proofs {
                 "encoded digit should be a-z or 0-5"
             );
         } else {
-            assert!(result.is_none(), "encode_digit should return None for digit >= 32");
+            assert!(
+                result.is_none(),
+                "encode_digit should return None for digit >= 32"
+            );
         }
     }
 
@@ -527,7 +535,11 @@ mod kani_proofs {
 
         let decoded = decode_digit(encoded.unwrap());
         assert!(decoded.is_some());
-        assert_eq!(decoded.unwrap(), digit, "digit roundtrip should be identity");
+        assert_eq!(
+            decoded.unwrap(),
+            digit,
+            "digit roundtrip should be identity"
+        );
     }
 
     /// Verify threshold returns values in expected range
@@ -661,7 +673,10 @@ mod kani_proofs {
     fn verify_encode_produces_valid_xid() {
         let input = "test with spaces";
         let encoded = encode(input);
-        assert!(is_xid_identifier(&encoded), "encode should produce valid XID");
+        assert!(
+            is_xid_identifier(&encoded),
+            "encode should produce valid XID"
+        );
     }
 
     // ==================== Bounded Input Proofs ====================

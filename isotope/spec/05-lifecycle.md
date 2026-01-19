@@ -100,37 +100,112 @@ write("/services/db/health", {})      // Starts database Block
 
 ## Shutdown Protocol
 
-### Normal Shutdown
+Isotope provides two shutdown modes, analogous to SIGTERM and SIGKILL in POSIX:
 
-1. Runtime sets shutdown flag (readable at `/iso/shutdown/requested`)
-2. Block's next read from `/iso/server/requests` returns shutdown signal
-   (or Block checks `/iso/shutdown/requested` directly)
-3. Block stops accepting new work
-4. Block completes in-flight operations
-5. Block writes to `/iso/shutdown/complete`
-6. Block exits its run loop
-7. Runtime terminates the Block
+### Graceful Shutdown (SIGTERM-like)
 
-### Shutdown Timeout
+Graceful shutdown gives Blocks time to clean up and complete in-flight work.
 
-The runtime may enforce a shutdown timeout. If a Block doesn't reach Stopped
-within the timeout:
+1. Runtime sets `/iso/shutdown/requested` to `true`
+2. Runtime sets `/iso/shutdown/mode` to `"graceful"`
+3. Block's next read from `/iso/server/requests` returns `null` (unblocks)
+4. Block checks `/iso/shutdown/requested`, sees shutdown in progress
+5. Block stops accepting new work
+6. Block completes in-flight operations
+7. Block performs cleanup (close connections, flush buffers, etc.)
+8. Block writes to `/iso/shutdown/complete`
+9. Block exits its run loop
+10. Runtime terminates the Block, state becomes Stopped
 
-1. Runtime forcibly terminates the Block
-2. Block state becomes Failed
-3. In-flight operations may be lost
+Blocks should handle graceful shutdown cooperatively:
+
+```python
+while True:
+    request = read("/iso/server/requests")
+
+    if request is None:
+        # Shutdown signaled - check mode
+        mode = read("/iso/shutdown/mode")
+        if mode == "graceful":
+            cleanup()
+        break
+
+    process(request)
+
+write("/iso/shutdown/complete", {})
+```
+
+### Immediate Shutdown (SIGKILL-like)
+
+Immediate shutdown terminates the Block without waiting for cleanup.
+
+1. Runtime sets `/iso/shutdown/mode` to `"immediate"`
+2. Runtime forcibly terminates the Block
+3. Block code stops executing immediately
+4. Block state becomes Stopped (not Failed—this is intentional termination)
+
+The Block has no opportunity to clean up. Use immediate shutdown when:
+- Graceful shutdown has timed out
+- The Block is unresponsive
+- Emergency shutdown is required
+
+### Graceful Timeout to Immediate
+
+The typical pattern is graceful shutdown with a timeout fallback:
+
+1. Request graceful shutdown
+2. Wait for timeout (configurable per Block/Assembly)
+3. If Block hasn't reached Stopped, escalate to immediate
+
+```yaml
+shutdown:
+  timeout: 30s          # Wait this long for graceful
+  escalate: immediate   # Then force-kill
+```
+
+### In-Flight Request Handling
+
+When a Block is shutdown while requests are pending or being processed:
+
+**Graceful shutdown:**
+- Block should complete in-flight requests before exiting
+- New requests are rejected (runtime returns error to callers)
+- The `respond_to` paths remain valid until responses are written
+
+**Immediate shutdown:**
+- In-flight requests are NOT completed
+- The runtime is responsible for resolving pending requests:
+  - Return error responses to waiting callers
+  - If restart policy is configured, may spin up new instance and retry
+  - Caller sees a store-level error (abstraction does not leak):
+    ```json
+    {"result": "error", "error": {"type": "unavailable", "retryable": true}}
+    ```
 
 ### Cascading Shutdown (Assemblies)
 
-When an Assembly shuts down:
+When an Assembly receives shutdown:
 
-1. Public Block receives shutdown signal
-2. Public Block stops accepting external requests
-3. Public Block completes in-flight work
-4. Public Block writes to `/iso/shutdown/complete`
-5. Runtime propagates shutdown to all running internal Blocks
-6. Internal Blocks perform their shutdown sequences
-7. Assembly enters Stopped (or Failed if any Block failed)
+1. Assembly determines shutdown mode (graceful or immediate)
+2. **Graceful path:**
+   - Public Block receives graceful shutdown
+   - Public Block stops accepting external requests
+   - Public Block completes in-flight work and writes `/iso/shutdown/complete`
+   - Runtime propagates graceful shutdown to all running internal Blocks
+   - Internal Blocks perform their shutdown sequences (recursively for nested Assemblies)
+   - Assembly enters Stopped when all Blocks are Stopped
+3. **Immediate path:**
+   - All Blocks terminated immediately
+   - No cleanup opportunity
+   - Assembly enters Stopped
+
+### Shutdown Paths
+
+| Path | Read | Write | Description |
+|------|------|-------|-------------|
+| `/iso/shutdown/requested` | bool | - | True if shutdown has been requested |
+| `/iso/shutdown/mode` | string | - | `"graceful"` or `"immediate"` |
+| `/iso/shutdown/complete` | - | {} | Block writes here to signal clean exit |
 
 ## Assembly Lifecycle
 

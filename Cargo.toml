@@ -13,6 +13,20 @@ members = [
     "namecode",
 ]
 
+# Exclude WASM-only crates from default builds
+# Build featherweight/guest with: cargo component build -p featherweight-guest
+default-members = [
+    "packages/ll-store",
+    "packages/core-store",
+    "packages/serde-store",
+    "packages/json_store",
+    "packages/http",
+    "packages/repl",
+    "packages/sys",
+    "featherweight/runtime",
+    "namecode",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
