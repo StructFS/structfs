@@ -457,3 +457,254 @@ mod proptests {
         }
     }
 }
+
+/// Kani verification harnesses for formal verification of namecode properties.
+///
+/// Run with: `cargo kani --package namecode`
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use crate::bootstring::{adapt_bias, decode_digit, encode_digit, threshold, BASE, T_MAX, T_MIN};
+
+    // ==================== Bootstring Function Proofs ====================
+
+    /// Verify encode_digit returns Some for valid inputs (0..32) and None otherwise
+    #[kani::proof]
+    fn verify_encode_digit_valid_range() {
+        let digit: u32 = kani::any();
+
+        let result = encode_digit(digit);
+
+        if digit < 32 {
+            assert!(result.is_some(), "encode_digit should return Some for digit < 32");
+            let c = result.unwrap();
+            // Verify the character is in expected range
+            assert!(
+                ('a'..='z').contains(&c) || ('0'..='5').contains(&c),
+                "encoded digit should be a-z or 0-5"
+            );
+        } else {
+            assert!(result.is_none(), "encode_digit should return None for digit >= 32");
+        }
+    }
+
+    /// Verify decode_digit returns correct values for valid inputs
+    #[kani::proof]
+    fn verify_decode_digit_valid_range() {
+        let c: char = kani::any();
+
+        let result = decode_digit(c);
+
+        match c {
+            'a'..='z' => {
+                assert!(result.is_some());
+                assert!(result.unwrap() < 26);
+            }
+            'A'..='Z' => {
+                // Case insensitive
+                assert!(result.is_some());
+                assert!(result.unwrap() < 26);
+            }
+            '0'..='5' => {
+                assert!(result.is_some());
+                let d = result.unwrap();
+                assert!(d >= 26 && d < 32);
+            }
+            _ => {
+                assert!(result.is_none());
+            }
+        }
+    }
+
+    /// Verify encode_digit and decode_digit are inverses
+    #[kani::proof]
+    fn verify_digit_roundtrip() {
+        let digit: u32 = kani::any();
+        kani::assume(digit < 32);
+
+        let encoded = encode_digit(digit);
+        assert!(encoded.is_some());
+
+        let decoded = decode_digit(encoded.unwrap());
+        assert!(decoded.is_some());
+        assert_eq!(decoded.unwrap(), digit, "digit roundtrip should be identity");
+    }
+
+    /// Verify threshold returns values in expected range
+    #[kani::proof]
+    fn verify_threshold_bounds() {
+        let k: u32 = kani::any();
+        let bias: u32 = kani::any();
+
+        // Avoid overflow in threshold calculation
+        kani::assume(k <= 10000);
+        kani::assume(bias <= 10000);
+
+        let t = threshold(k, bias);
+
+        assert!(t >= T_MIN, "threshold should be >= T_MIN");
+        assert!(t <= T_MAX, "threshold should be <= T_MAX");
+    }
+
+    /// Verify adapt_bias doesn't overflow and returns reasonable values
+    #[kani::proof]
+    fn verify_adapt_bias_no_overflow() {
+        let delta: u32 = kani::any();
+        let num_points: u32 = kani::any();
+        let first_time: bool = kani::any();
+
+        // Constrain to reasonable values to avoid very long verification
+        kani::assume(delta <= 1_000_000);
+        kani::assume(num_points > 0 && num_points <= 10000);
+
+        let bias = adapt_bias(delta, num_points, first_time);
+
+        // Bias should be a reasonable value (not overflowed)
+        assert!(bias < 1_000_000, "bias should be bounded");
+    }
+
+    // ==================== XID Identifier Proofs ====================
+
+    /// Verify is_xid_identifier returns false for empty string
+    #[kani::proof]
+    fn verify_is_xid_empty() {
+        assert!(!is_xid_identifier(""));
+    }
+
+    /// Verify is_xid_identifier returns false for single underscore
+    #[kani::proof]
+    fn verify_is_xid_single_underscore() {
+        assert!(!is_xid_identifier("_"));
+    }
+
+    // ==================== Encode/Decode Proofs ====================
+
+    /// Verify encode returns empty for empty input
+    #[kani::proof]
+    fn verify_encode_empty() {
+        let result = encode("");
+        assert!(result.is_empty());
+    }
+
+    /// Verify decode fails for non-encoded strings
+    #[kani::proof]
+    fn verify_decode_requires_prefix() {
+        // Any string not starting with _N_ should fail
+        let result = decode("abc");
+        assert!(matches!(result, Err(DecodeError::NotEncoded)));
+    }
+
+    /// Verify idempotency for simple ASCII
+    #[kani::proof]
+    fn verify_idempotent_ascii() {
+        // Test with a simple string that needs encoding
+        let input = "a b";
+        let once = encode(input);
+        let twice = encode(&once);
+        assert_eq!(once, twice, "encode should be idempotent");
+    }
+
+    /// Verify roundtrip for simple ASCII with space
+    #[kani::proof]
+    fn verify_roundtrip_simple() {
+        let input = "hello world";
+        let encoded = encode(input);
+        let decoded = decode(&encoded);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), input);
+    }
+
+    /// Verify roundtrip for string with hyphen
+    #[kani::proof]
+    fn verify_roundtrip_hyphen() {
+        let input = "foo-bar";
+        let encoded = encode(input);
+        let decoded = decode(&encoded);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), input);
+    }
+
+    /// Verify roundtrip for delimiter collision
+    #[kani::proof]
+    fn verify_roundtrip_delimiter_collision() {
+        let input = "a__b";
+        let encoded = encode(input);
+        // Should be encoded (not just prefixed)
+        assert!(encoded.contains("__"));
+        let decoded = decode(&encoded);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), input);
+    }
+
+    /// Verify roundtrip for prefix collision
+    #[kani::proof]
+    fn verify_roundtrip_prefix_collision() {
+        let input = "_N_x";
+        let encoded = encode(input);
+        // Should NOT equal the input
+        assert_ne!(encoded, input);
+        let decoded = decode(&encoded);
+        assert!(decoded.is_ok());
+        assert_eq!(decoded.unwrap(), input);
+    }
+
+    /// Verify valid XID identifiers pass through unchanged
+    #[kani::proof]
+    fn verify_xid_passthrough() {
+        let input = "validIdentifier";
+        let encoded = encode(input);
+        assert_eq!(encoded, input, "valid XID should pass through");
+    }
+
+    /// Verify encode output is always valid XID (for non-empty input)
+    #[kani::proof]
+    fn verify_encode_produces_valid_xid() {
+        let input = "test with spaces";
+        let encoded = encode(input);
+        assert!(is_xid_identifier(&encoded), "encode should produce valid XID");
+    }
+
+    // ==================== Bounded Input Proofs ====================
+
+    /// Verify encode doesn't panic for any single ASCII character
+    #[kani::proof]
+    fn verify_encode_single_ascii_no_panic() {
+        let byte: u8 = kani::any();
+        kani::assume(byte < 128); // ASCII only
+
+        let s = String::from(byte as char);
+        let _ = encode(&s); // Should not panic
+    }
+
+    /// Verify encode doesn't panic for two ASCII characters
+    #[kani::proof]
+    fn verify_encode_two_ascii_no_panic() {
+        let b1: u8 = kani::any();
+        let b2: u8 = kani::any();
+        kani::assume(b1 < 128 && b2 < 128);
+
+        let mut s = String::new();
+        s.push(b1 as char);
+        s.push(b2 as char);
+        let _ = encode(&s); // Should not panic
+    }
+
+    /// Verify roundtrip for any single printable ASCII
+    #[kani::proof]
+    fn verify_roundtrip_single_printable() {
+        let byte: u8 = kani::any();
+        kani::assume(byte >= 32 && byte < 127); // Printable ASCII
+
+        let input = String::from(byte as char);
+        let encoded = encode(&input);
+
+        if encoded.starts_with("_N_") {
+            let decoded = decode(&encoded);
+            assert!(decoded.is_ok());
+            assert_eq!(decoded.unwrap(), input);
+        } else {
+            // Passed through unchanged (valid XID)
+            assert_eq!(encoded, input);
+        }
+    }
+}

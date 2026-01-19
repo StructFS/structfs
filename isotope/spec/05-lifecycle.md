@@ -5,208 +5,248 @@ Assemblies.
 
 ## Block States
 
-A Block exists in one of five states:
+A Block exists in one of six states:
 
 ```
-         ┌──────────────────────────────────────────┐
-         │                                          │
-         ▼                                          │
-    ┌─────────┐     ┌─────────┐     ┌─────────┐    │
-    │ Created │────▶│ Starting│────▶│ Running │────┘
+    ┌─────────┐     ┌─────────┐     ┌─────────┐
+    │ Created │────▶│ Starting│────▶│ Running │
     └─────────┘     └─────────┘     └────┬────┘
-                                         │
-                    ┌────────────────────┼────────────────────┐
-                    │                    │                    │
-                    ▼                    ▼                    ▼
-              ┌──────────┐        ┌──────────┐        ┌──────────┐
-              │ Stopping │───────▶│ Stopped  │        │  Failed  │
-              └──────────┘        └──────────┘        └──────────┘
+                          │              │
+                          │         ┌────┴────┐
+                          │         │         │
+                          ▼         ▼         ▼
+                    ┌──────────┐  ┌──────────┐
+                    │  Failed  │  │ Stopping │
+                    └──────────┘  └────┬─────┘
+                          ▲            │
+                          │            ▼
+                          │      ┌──────────┐
+                          └──────│ Stopped  │
+                                 └──────────┘
 ```
 
 ### Created
 
-The Block exists but has not been started. Its namespace is configured but
-`run()` has not been called.
+The Block exists but has not been started. It has an identity and namespace
+configuration, but no code is running.
 
 **Transitions:**
-- → Starting: When the Assembly starts the Block
+- → Starting: When the runtime starts the Block (on first access, or at Assembly startup for public Blocks)
 
 ### Starting
 
-The Block is initializing. `run()` has been called but the Block has not yet
-signaled readiness.
+The Block is initializing. Its run function has been called but it hasn't yet
+begun reading requests.
 
 **Transitions:**
-- → Running: Block signals readiness or begins processing
-- → Failed: Initialization error
+- → Running: Block begins reading from `/iso/server/requests`
+- → Failed: Error during initialization
 
 ### Running
 
-The Block is executing normally. It can read and write paths in its namespace.
+The Block is processing requests. It reads from `/iso/server/requests` and
+writes responses.
 
 **Transitions:**
-- → Stopping: Shutdown requested (by Assembly or self)
+- → Stopping: Shutdown signaled
 - → Failed: Unrecoverable error
 
 ### Stopping
 
-The Block has been asked to shut down and is draining. It should:
+The Block has been asked to shut down. It should:
 
-1. Stop accepting new work
-2. Complete in-flight operations
-3. Clean up resources
-4. Signal completion
+1. Stop reading new requests
+2. Complete in-flight work
+3. Write to `/iso/shutdown/complete`
 
 **Transitions:**
-- → Stopped: Graceful shutdown complete
-- → Failed: Error during shutdown or timeout
+- → Stopped: Block wrote to `/iso/shutdown/complete` and exited
+- → Failed: Error during shutdown, or shutdown timeout
 
 ### Stopped
 
-The Block has terminated normally. Its exports are no longer available.
+The Block has terminated normally. Its store is no longer available.
 
 **Terminal state.**
 
 ### Failed
 
-The Block has terminated abnormally. Error information is available at
-`/ctx/iso/proc/{id}/error`.
+The Block has terminated abnormally. Error information should be available
+for diagnostics.
 
 **Terminal state.**
 
-## State Queries
+## Lazy Startup
 
-A Block can query its own state:
+Blocks start **lazily** by default. A Block in Created state transitions to
+Starting when:
+
+1. An operation is routed to it (someone reads/writes to its store)
+2. It's the public Block of a starting Assembly
+3. Another Block explicitly "pokes" it by writing to it
+
+This enables massive Assemblies where most Blocks are idle. Only the Blocks
+that receive traffic actually run.
+
+### Eager Startup Pattern
+
+If a Block needs its dependencies running immediately, it can poke them:
 
 ```
-read /ctx/iso/self/state → "running" | "stopping" | ...
-```
-
-A Block can observe the shutdown signal:
-
-```
-read /ctx/iso/shutdown/requested → true | false
+// In public Block's initialization
+write("/services/cache/health", {})   // Starts cache Block
+write("/services/db/health", {})      // Starts database Block
 ```
 
 ## Shutdown Protocol
 
-When a Block needs to shut down:
+### Normal Shutdown
 
-1. **Signal**: Assembly writes to Block's shutdown path, or Block observes
-   system-wide shutdown
-2. **Acknowledge**: Block reads `/ctx/iso/shutdown/requested` and sees `true`
-3. **Drain**: Block completes in-flight work, stops accepting new work
-4. **Complete**: Block writes to `/ctx/iso/shutdown/complete`
-5. **Terminate**: Block's `run()` returns
+1. Runtime sets shutdown flag (readable at `/iso/shutdown/requested`)
+2. Block's next read from `/iso/server/requests` returns shutdown signal
+   (or Block checks `/iso/shutdown/requested` directly)
+3. Block stops accepting new work
+4. Block completes in-flight operations
+5. Block writes to `/iso/shutdown/complete`
+6. Block exits its run loop
+7. Runtime terminates the Block
 
-### Timeouts
+### Shutdown Timeout
 
-The Assembly may enforce a shutdown timeout. If a Block doesn't complete
-shutdown within the timeout:
+The runtime may enforce a shutdown timeout. If a Block doesn't reach Stopped
+within the timeout:
 
-1. Block is forcibly terminated
+1. Runtime forcibly terminates the Block
 2. Block state becomes Failed
-3. Error indicates timeout
+3. In-flight operations may be lost
 
-### Cascading Shutdown
+### Cascading Shutdown (Assemblies)
 
 When an Assembly shuts down:
 
-1. Assembly enters Stopping state
-2. Assembly signals shutdown to all constituent Blocks
-3. Blocks begin their shutdown sequences
-4. Assembly waits for all Blocks to reach Stopped/Failed
-5. Assembly enters Stopped state
+1. Public Block receives shutdown signal
+2. Public Block stops accepting external requests
+3. Public Block completes in-flight work
+4. Public Block writes to `/iso/shutdown/complete`
+5. Runtime propagates shutdown to all running internal Blocks
+6. Internal Blocks perform their shutdown sequences
+7. Assembly enters Stopped (or Failed if any Block failed)
 
 ## Assembly Lifecycle
 
-Assemblies follow the same state machine as Blocks, with additional semantics
-for managing constituent Blocks:
+Assemblies follow the same state machine as Blocks. An Assembly's state reflects
+its public Block's state:
 
-### Assembly Starting
+| Assembly State | Meaning |
+|---------------|---------|
+| Created | No Blocks running |
+| Starting | Public Block is starting |
+| Running | Public Block is running |
+| Stopping | Public Block is stopping |
+| Stopped | All Blocks stopped |
+| Failed | Public Block failed, or shutdown failed |
 
-1. Assembly enters Starting state
-2. Assembly starts entrypoint Blocks (if any)
-3. Non-entrypoint Blocks may start lazily or eagerly (configurable)
-4. Assembly enters Running when entrypoints are Running
+### Internal Block States
 
-### Assembly Running
+Internal Blocks (non-public) have their own states independent of the Assembly:
 
-- Entrypoint Blocks are Running
-- Other Blocks start on first access (if lazy) or are already Running (if eager)
-- Assembly routes operations to constituent Blocks
+- Most start in Created
+- Transition to Running when first accessed
+- Transition to Stopping when Assembly shuts down
+- May be in Failed if they crash
 
-### Assembly Stopping
+## Failure Handling
 
-1. Assembly enters Stopping state
-2. Stop accepting new operations (return "stopping" error)
-3. Signal shutdown to all Running Blocks
-4. Wait for all Blocks to reach terminal state
-5. Assembly enters Stopped (if all Blocks Stopped) or Failed (if any Failed)
-
-## Block Failure Handling
-
-When a Block fails, the Assembly must decide what to do:
+When a Block fails, the Assembly decides what to do based on configuration:
 
 ### Fail-Fast (Default)
 
-Block failure causes Assembly failure. The Assembly enters Stopping state,
-shuts down other Blocks, and fails.
+Block failure causes Assembly failure:
+
+```
+Block api fails
+→ Assembly enters Stopping
+→ All Blocks receive shutdown
+→ Assembly enters Failed
+```
 
 ### Isolate
 
-Block failure is isolated. The failing Block's paths return errors, but other
-Blocks continue. The Assembly remains Running.
+Block failure is isolated:
+
+```yaml
+failure:
+  cache: isolate
+```
+
+```
+Block cache fails
+→ Operations to cache return errors
+→ Assembly remains Running
+→ Other Blocks unaffected
+```
 
 ### Restart
 
-Block failure triggers restart. The Assembly creates a new instance of the
-Block with fresh state. (Stateful restart requires additional mechanisms.)
+Block failure triggers restart:
 
-### Supervision
-
-More complex policies can be built:
-
-```
-supervision:
-  critical:        # These Blocks failing causes Assembly failure
-    - router
-    - auth
-  restartable:     # These Blocks are restarted on failure
-    - cache
+```yaml
+failure:
+  worker:
+    policy: restart
     max_restarts: 3
     window: 60s
-  optional:        # These Blocks failing is logged but ignored
-    - metrics
 ```
+
+```
+Block worker fails
+→ Runtime restarts worker (if under limit)
+→ New worker instance created
+→ Operations resume
+```
+
+Restart creates a fresh Block instance. State is not preserved (stateful
+restart would require checkpointing, which is out of scope).
 
 ## Observability
 
-Block and Assembly lifecycle events should be observable:
+Block state is observable:
 
 ```
-# Watch for state changes
-watch /ctx/iso/proc/{id}/state
-
-# Get lifecycle history
-read /ctx/iso/proc/{id}/history
-→ [
-    {"state": "created", "time": "..."},
-    {"state": "starting", "time": "..."},
-    {"state": "running", "time": "..."},
-    ...
-  ]
+read("/iso/self/state") → "running"
 ```
+
+For diagnostics, runtimes may provide:
+
+```
+/iso/self/started_at      # When Block started
+/iso/self/request_count   # Requests processed
+/iso/self/last_error      # Last error (if any)
+```
+
+## State Queries from Outside
+
+Within an Assembly, you generally cannot query another Block's state directly.
+If you need to know if a service is healthy:
+
+1. Write to its health endpoint
+2. Check the response
+
+This maintains the principle that Blocks only communicate via StructFS
+operations, not out-of-band state queries.
 
 ## Open Questions
 
-1. **Health checks**: Should there be a standard health check mechanism
-   (readiness probe, liveness probe)?
+1. **Startup readiness**: Should Blocks signal "ready" explicitly, or is
+   "started reading requests" sufficient?
 
-2. **Restart semantics**: When a Block is restarted, does it keep its ID?
-   What about its namespace configuration?
+2. **Health checks**: Should there be a standardized health check protocol
+   (like Kubernetes readiness/liveness probes)?
 
-3. **Preemption**: Can a Running Block be preempted (paused) and later resumed?
+3. **Crash recovery**: If a Block crashes and restarts, how do callers know?
+   Should there be a "generation" counter?
 
-4. **Checkpointing**: Can a Block's state be checkpointed for later restoration
+4. **Preemption**: Can a Running Block be paused and later resumed?
+
+5. **Checkpointing**: Can a Block's state be saved for later restoration
    or migration?

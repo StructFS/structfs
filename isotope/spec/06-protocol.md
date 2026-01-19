@@ -1,115 +1,122 @@
 # Protocol
 
-This document specifies the semantics of store operations in Isotope. These
-operations form the "protocol" through which all system interaction occurs.
+This document specifies the semantics of StructFS operations in Isotope. For
+how Blocks serve these operations, see `07-server-protocol.md`.
+
+## StructFS Foundation
+
+Isotope builds on StructFS. All operations are StructFS reads and writes. This
+document describes how those operations behave in the Isotope context.
+
+See the StructFS manifesto (`docs/manifesto.md`) and patterns (`docs/patterns/`)
+for foundational concepts.
 
 ## Operations
-
-There are two fundamental operations:
 
 ### Read
 
 ```
-read(path) → Result<Option<Record>, Error>
+read(path) → Result<Value, Error>
 ```
 
 Read the value at `path`. Returns:
 
-- `Ok(Some(record))` — Value exists
-- `Ok(None)` — Path exists but has no value (or value is explicitly null)
-- `Err(error)` — Operation failed
+- `Value` — The data at that path (may be null if path exists but has no value)
+- `Error` — Operation failed
+
+Following StructFS semantics, a missing path may return null rather than error.
+The distinction between "path doesn't exist" and "path exists with null value"
+is store-dependent.
 
 ### Write
 
 ```
-write(path, record) → Result<Path, Error>
+write(path, value) → Result<Path, Error>
 ```
 
-Write `record` to `path`. Returns:
+Write `value` to `path`. Returns:
 
-- `Ok(result_path)` — Write succeeded, returns the path written to
-- `Err(error)` — Operation failed
+- `Path` — The path written to (may differ from input for append-style stores)
+- `Error` — Operation failed
 
-The `result_path` may differ from `path` in append-style stores:
-
-```
-write /log/entries {"msg": "hello"}
-→ Ok(/log/entries/0)  # Actual path where entry was stored
-```
-
-## Records
-
-A Record is the unit of data exchange. It contains:
-
-- **Value**: The actual data (see below)
-- **Format**: Hint about how to interpret the bytes (optional)
-
-### Value Types
-
-Values follow StructFS's Value type:
-
-- Null
-- Bool
-- Integer (signed 64-bit)
-- Float (64-bit)
-- String (UTF-8)
-- Bytes (arbitrary octets)
-- Array (ordered list of Values)
-- Map (string-keyed collection of Values)
-
-## Blocking Semantics
-
-### Non-Blocking (Default)
-
-By default, operations are non-blocking:
-
-- Read returns immediately with current state
-- Write returns immediately after accepting the write
-
-### Blocking Reads
-
-Some stores support blocking reads that wait for data:
+The returned path is significant. For deferred operations:
 
 ```
-read /channel/events  # Blocks until an event is available
+write("/jobs", {task: "process", data: {...}})
+→ "/jobs/outstanding/42"
 ```
 
-Blocking is a property of the store, not the operation. A Block cannot force
-a non-blocking store to block.
+The caller then reads from `/jobs/outstanding/42` to get the result.
 
-### Blocking Writes
+## Value Types
 
-Some stores may block writes:
+Isotope uses StructFS Value types:
+
+- **Null** — Absence of value
+- **Bool** — true/false
+- **Integer** — Signed 64-bit
+- **Float** — 64-bit IEEE 754
+- **String** — UTF-8 text
+- **Bytes** — Arbitrary octets
+- **Array** — Ordered list of Values
+- **Map** — String-keyed collection of Values
+
+## Blocking Behavior
+
+StructFS operations can block. Whether they do depends on the store:
+
+### Immediate Return
+
+Most operations return immediately:
 
 ```
-write /queue/jobs {...}  # Blocks if queue is full
+read("/config/timeout") → "30s"  // Immediate
 ```
 
-Again, this is store-dependent.
+### Blocking Read
+
+Some stores block until data is available:
+
+```
+read("/iso/server/requests")  // Blocks until a request arrives
+```
+
+This is how Blocks receive incoming requests—they block waiting.
+
+### Deferred Operations (Handle Pattern)
+
+For async operations, write returns a handle path:
+
+```
+write("/jobs/submit", {task: ...})
+→ "/jobs/outstanding/42"
+
+// Later:
+read("/jobs/outstanding/42")
+→ {status: "complete", result: ...}
+```
+
+The runtime is non-blocking internally. "Blocking" from the Block's perspective
+means the runtime suspends that Block until the operation completes.
 
 ## Consistency
 
-Isotope does not mandate a global consistency model. Each store defines its
-own consistency guarantees:
+Isotope does not mandate a global consistency model. Each store defines its own:
 
 ### Strong Consistency
 
-Read always returns the result of the most recent write:
-
 ```
-write /data/x {"v": 1}
-read /data/x  → {"v": 1}  # Guaranteed
+write("/data/x", 1)
+read("/data/x") → 1  // Guaranteed
 ```
 
 ### Eventual Consistency
 
-Read may return stale data:
-
 ```
-write /cache/x {"v": 1}
-read /cache/x  → {"v": 0}  # Might still see old value
-# ... eventually ...
-read /cache/x  → {"v": 1}  # Eventually consistent
+write("/cache/x", 1)
+read("/cache/x") → null  // Might not see it yet
+// ... later ...
+read("/cache/x") → 1     // Eventually consistent
 ```
 
 ### Causal Consistency
@@ -117,165 +124,116 @@ read /cache/x  → {"v": 1}  # Eventually consistent
 Operations from the same Block are seen in order:
 
 ```
-# Block A:
-write /shared/x {"v": 1}
-write /shared/y {"v": 2}
+// Block A:
+write("/shared/x", 1)
+write("/shared/y", 2)
 
-# Block B observes:
-# If it sees y=2, it must see x=1
-# But it might see x=1 without y=2
+// Block B:
+// If it sees y=2, it must see x=1
 ```
 
-## Error Types
+The consistency model is a property of the store, not the protocol.
+
+## Error Handling
 
 Errors fall into categories:
 
 ### Path Errors
 
-- `PathNotFound` — No store handles this path
-- `InvalidPath` — Path syntax is invalid
+- **PathNotFound** — No store handles this path
+- **InvalidPath** — Path syntax is invalid
 
 ### Permission Errors
 
-- `NotReadable` — Path exists but cannot be read
-- `NotWritable` — Path exists but cannot be written
-- `Forbidden` — Caller lacks capability for this operation
+- **NotReadable** — Path cannot be read
+- **NotWritable** — Path cannot be written
+- **Forbidden** — Caller lacks capability
 
 ### Store Errors
 
-- `StoreError(details)` — Store-specific error
-- `Timeout` — Operation timed out
-- `Unavailable` — Store temporarily unavailable
+- **StoreError(details)** — Store-specific error
+- **Timeout** — Operation timed out
+- **Unavailable** — Store temporarily unavailable
 
 ### Value Errors
 
-- `TypeMismatch` — Value type doesn't match expectation
-- `ValidationFailed` — Value failed schema validation
+- **TypeMismatch** — Value type doesn't match expectation
+- **ValidationFailed** — Value failed schema validation
 
-## Concurrency
+## References
 
-Multiple Blocks may read and write the same paths concurrently. The store
-determines how concurrent operations interact.
+Following StructFS patterns, values can contain references to other paths:
 
-### No Guarantees
-
-Concurrent writes may interleave arbitrarily:
-
-```
-# Block A: write /data {"a": 1}
-# Block B: write /data {"b": 2}
-# Result: {"a": 1} or {"b": 2} or (if store merges) {"a": 1, "b": 2}
+```json
+{
+    "user": {"path": "/users/123"},
+    "next_page": {"path": "/results/after/abc"}
+}
 ```
 
-### Last-Writer-Wins
+A reference is a map with a `path` key. Clients follow references to get the
+actual value. This enables:
 
-Most recent write overwrites previous:
+- Lazy loading
+- Pagination
+- HATEOAS-style navigation
 
-```
-# t=1: Block A writes {"a": 1}
-# t=2: Block B writes {"b": 2}
-# Result: {"b": 2}
-```
+See `docs/patterns/reference.md` for details.
 
-### Merge
+## Pagination
 
-Store merges concurrent writes:
-
-```
-# Block A: write /counter/increment {"by": 1}
-# Block B: write /counter/increment {"by": 2}
-# Result: counter increased by 3 (order doesn't matter)
-```
-
-### Transactions
-
-Some stores may support transactions (read-modify-write atomically):
+Collections use cursor-based pagination:
 
 ```
-write /ctx/iso/tx/begin {}
-→ {"tx": "abc123"}
-
-read /data/account {"tx": "abc123"}
-→ {"balance": 100}
-
-write /data/account {"balance": 90, "tx": "abc123"}
-
-write /ctx/iso/tx/commit {"tx": "abc123"}
-→ Ok if no conflict, Err if concurrent modification
+read("/users/limit/20")
+→ {
+    "items": [...],
+    "links": {
+        "next": {"path": "/users/after/abc123/limit/20"},
+        "self": {"path": "/users/limit/20"}
+    }
+}
 ```
 
-This is an extension, not a core requirement.
+Clients follow `links.next` to get subsequent pages. See
+`docs/patterns/pagination.md` for details.
 
-## Streaming
+## Meta Lens
 
-Some operations may return or accept streams:
-
-### Streaming Reads
-
-```
-read /logs/stream
-→ Stream of log records, potentially infinite
-```
-
-The Block consumes records from the stream until:
-- It's read enough
-- The stream ends
-- An error occurs
-
-### Streaming Writes
+The `meta/` prefix provides introspection:
 
 ```
-write /upload/file <stream of chunks>
+read("/services/cache/meta/users/123")
+→ {
+    "readable": true,
+    "writable": true,
+    "type": "cached_user"
+}
 ```
 
-The Block provides chunks until the upload is complete.
+Meta describes what you can do with a path. See `docs/patterns/meta.md`.
 
-Streaming semantics are an extension. The core protocol is request-response.
+## Request/Response in Isotope
 
-## Observation (Watch)
-
-Stores may support watching for changes:
-
-```
-watch(path) → Stream<Event>
-```
-
-Events include:
-- `Created(path, value)` — New value at path
-- `Updated(path, old, new)` — Value changed
-- `Deleted(path, old)` — Value removed
-
-Not all stores support watching. A store that doesn't support watch returns
-an error.
-
-## Request/Response Framing
-
-When store operations cross process or network boundaries, they must be
-serialized. Isotope does not mandate a wire format, but a request/response
-framing might look like:
+When a Block writes to another Block's store, the operation flows through
+the Server Protocol:
 
 ```
-Request:
-  id: unique request identifier
-  operation: "read" | "write"
-  path: string
-  record: (for write) serialized Record
-
-Response:
-  id: matching request identifier
-  result: "ok" | "error"
-  record: (for successful read) serialized Record
-  path: (for successful write) result path
-  error: (for error) error details
+Block A writes to /services/cache/users/123
+→ Runtime creates Request{op: write, path: users/123, data: ...}
+→ Request delivered to cache Block's /iso/server/requests
+→ Cache Block processes, writes Response
+→ Runtime delivers Response to Block A
+→ Block A's write returns
 ```
 
-The specific serialization (JSON, MessagePack, Protobuf, etc.) is an
-implementation concern.
+This is transparent to Block A—it just sees a write that eventually returns.
+The Server Protocol is the runtime's mechanism, detailed in `07-server-protocol.md`.
 
 ## Open Questions
 
-1. **Partial reads**: Should there be a way to read only part of a large
-   value (like HTTP Range requests)?
+1. **Partial reads**: Should there be a way to read only part of a large value
+   (like HTTP Range requests)?
 
 2. **Conditional operations**: Should there be compare-and-swap or
    if-not-modified semantics?
@@ -283,5 +241,5 @@ implementation concern.
 3. **Bulk operations**: Should there be a way to read/write multiple paths
    atomically?
 
-4. **Metadata**: Should operations support metadata (headers) separate from
-   the value, like HTTP?
+4. **Streaming**: How should streaming data (logs, events) be represented?
+   Infinite pagination? Special stream type?

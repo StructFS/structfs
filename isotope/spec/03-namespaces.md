@@ -11,11 +11,10 @@ handles the operation.
 
 ```
 Block's Namespace:
-  /              → root store (Assembly-provided)
-  /input         → input store (mounted by Assembly)
-  /output        → output store (mounted by Assembly)
-  /ctx/iso       → system context store (always present)
-  /services/db   → another Block's export (wired by Assembly)
+  /iso/           → Isotope system services (always present)
+  /services/cache → Another Block (wired by Assembly)
+  /services/db    → Another Block (wired by Assembly)
+  /config/        → Configuration store (provided by Assembly)
 ```
 
 ## Namespace Isolation
@@ -27,140 +26,171 @@ Each Block's namespace is completely isolated:
 - There is no "global" namespace
 
 This isolation is fundamental to Isotope's security model. A Block can only
-access paths that have been explicitly mounted into its namespace by its
+access paths that have been explicitly wired into its namespace by its
 containing Assembly.
 
-## Mount Points
+## The `/iso/` Root
 
-A mount point binds a path prefix to a store:
-
-```
-mount /services/cache → cache_store
-```
-
-After this mount:
-- `/services/cache` reads/writes go to `cache_store` at path `/`
-- `/services/cache/hot/key` goes to `cache_store` at path `/hot/key`
-
-### Mount Shadowing
-
-If a path matches multiple mounts, the longest (most specific) match wins:
+Every Block's namespace includes `/iso/`, the Isotope system namespace. This
+is provided by the runtime and contains:
 
 ```
-mount / → root_store
-mount /services → services_store
-mount /services/cache → cache_store
-
-Path /services/cache/key → cache_store:/key
-Path /services/db/query → services_store:/db/query
-Path /data → root_store:/data
+/iso/
+├── server/             # Server Protocol interface
+│   ├── requests        # Read incoming requests
+│   └── requests/pending # Read batch of pending requests
+├── self/               # Block identity
+│   ├── id              # Unique identifier
+│   ├── state           # Lifecycle state
+│   └── interface       # Write interface declaration
+├── shutdown/           # Lifecycle control
+│   ├── requested       # Check if shutdown requested
+│   └── complete        # Signal shutdown complete
+├── time/               # Time services
+│   ├── now             # Current time
+│   └── monotonic       # Monotonic counter
+├── random/             # Randomness
+│   ├── uuid            # Random UUID
+│   └── bytes/{n}       # Random bytes
+└── log/                # Logging
+    ├── debug
+    ├── info
+    ├── warn
+    └── error
 ```
 
-### Empty Mounts
+The `/iso/` prefix is **reserved**. Assemblies cannot wire paths under `/iso/`.
+This ensures every Block has reliable access to system services.
 
-A mount with no backing store returns "not found" for all reads and rejects
-all writes. This can be used to block access to a path subtree:
+## Wired Paths
+
+Everything outside `/iso/` is wired by the Assembly:
+
+```yaml
+# Assembly wiring
+wiring:
+  api:/services/cache -> cache
+  api:/services/db -> database
+  api:/config -> $config
+```
+
+The `api` Block's namespace becomes:
 
 ```
-mount /forbidden → (empty)
+/iso/           → runtime-provided
+/services/cache → cache Block
+/services/db    → database Block
+/config         → config store
 ```
 
-## The Root Mount
+## Path Rewriting
 
-Every namespace has a root mount at `/`. This is the "default" store that
-handles any path not matched by a more specific mount.
+When a path is wired to another Block, the mount prefix is stripped:
 
-The root mount is typically an overlay store that composes:
-- Input/output paths
-- Configuration
-- Context root
-- Wired services
+```
+Block A's perspective:     /services/cache/users/123
+Wiring:                    /services/cache -> cache Block
+Cache Block receives:      /users/123
+```
 
-## System Context Mount
+The target Block sees paths relative to its own root. It doesn't know where
+it's mounted in the caller's namespace.
 
-Every Block's namespace includes a mount at `/ctx/iso` (or similar conventional
-path) for system services. This is how Blocks access:
+This is essential for location transparency. A Block's code is the same
+regardless of where it's wired.
 
-- Process information (`/ctx/iso/proc`)
-- Time (`/ctx/iso/time`)
-- Random values (`/ctx/iso/random`)
-- Inter-Block messaging (`/ctx/iso/ipc`)
+## Mount Shadowing
 
-See `04-context.md` for details on the context root.
+If a path matches multiple wirings, the longest (most specific) match wins:
+
+```yaml
+wiring:
+  api:/services -> services_block
+  api:/services/cache -> cache_block
+```
+
+Resolution:
+- `/services/cache/key` → routes to `cache_block` (longer match)
+- `/services/db/query` → routes to `services_block` (falls through)
+
+## Empty Paths
+
+A path with no wiring returns "not found" for reads and rejects writes:
+
+```
+read("/nonexistent/path") → null (not found)
+write("/nonexistent/path", data) → error (no handler)
+```
 
 ## Namespace Operations
 
 ### List (Optional)
 
-Some namespaces support listing paths:
+Some stores support listing child paths:
 
 ```
-list("/services") → ["cache", "db", "auth"]
+read("/services/") → ["cache", "db"]
 ```
 
-Listing is optional. A namespace may:
-- Support listing at all paths
-- Support listing at some paths
-- Not support listing at all
+Whether a path is listable depends on the underlying store. Not all stores
+support listing.
 
-A namespace that doesn't support listing can still be read/written—the client
-just needs to know the paths in advance.
+### Meta Lens
 
-### Watch (Optional)
-
-Some namespaces support watching for changes:
+The StructFS meta lens pattern applies within namespaces:
 
 ```
-watch("/input/events") → stream of changes
+read("/services/cache/meta/users/123") → {
+  "readable": true,
+  "writable": true,
+  ...
+}
 ```
 
-This is how Blocks can react to new data without polling. Watch semantics
-are defined in `06-protocol.md`.
+This provides introspection about path capabilities.
 
 ## Namespace Manipulation
 
-A Block can manipulate its own namespace through the context root:
+Blocks cannot modify their own namespace. The namespace is fixed by the
+Assembly at startup.
 
-```
-# Mount a new store at /temp
-write /ctx/iso/ns/mount {"path": "/temp", "store": "memory://"}
+This is intentional: it prevents Blocks from escalating their own capabilities.
+A Block can only access what the Assembly explicitly grants.
 
-# Unmount
-write /ctx/iso/ns/unmount {"path": "/temp"}
-
-# List current mounts
-read /ctx/iso/ns/mounts
-```
-
-This allows Blocks to dynamically reconfigure their view of the world. An
-Assembly can restrict this capability by not wiring `/ctx/iso/ns` to the Block.
+Future extensions might allow controlled namespace manipulation (e.g., a Block
+requesting additional capabilities from the runtime), but this would require
+explicit permission from the Assembly.
 
 ## Plan 9 Comparison
 
-Isotope namespaces are directly inspired by Plan 9 per-process namespaces:
+Isotope namespaces are inspired by Plan 9 per-process namespaces:
 
 | Plan 9 | Isotope |
 |--------|---------|
 | Per-process namespace | Per-Block namespace |
-| `bind` / `mount` | Assembly wiring + dynamic mounts |
-| Union directories | Overlay stores |
-| `/dev`, `/proc`, `/net` | `/ctx/iso/*` |
+| `bind` / `mount` | Assembly wiring |
+| Union directories | Not supported (longest match) |
+| `/dev`, `/proc`, `/net` | `/iso/*` |
 | 9P file servers | StructFS stores |
 
-The key difference: Plan 9 namespaces are built from files. Isotope namespaces
-are built from stores, which are a superset (stores can represent things that
-don't map well to files).
+Key differences:
+
+1. **No dynamic binding**: In Plan 9, a process can modify its own namespace.
+   In Isotope, namespaces are fixed by the Assembly.
+
+2. **No union mounts**: Plan 9 allows multiple file servers at the same path.
+   Isotope uses longest-prefix matching instead.
+
+3. **Stores, not files**: Isotope routes to StructFS stores (which can represent
+   things beyond files), not file servers.
 
 ## Open Questions
 
-1. **Relative paths**: Should namespaces support relative paths, or only
-   absolute? If relative, what is the "current directory"?
+1. **Relative paths**: Should namespaces support relative paths (e.g., `./foo`),
+   or only absolute paths from root?
 
 2. **Symbolic links**: Should there be an equivalent to symlinks—paths that
-   redirect to other paths?
+   redirect to other paths within the same namespace?
 
-3. **Namespace inheritance**: When a Block spawns a child (if that's even
-   a concept), does the child inherit the parent's namespace?
-
-4. **Namespace inspection**: Can a Block inspect its own namespace structure,
-   or only access paths within it?
+3. **Namespace inspection**: Can a Block enumerate its own namespace structure,
+   or only access paths it already knows about?
