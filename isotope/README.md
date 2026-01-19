@@ -22,9 +22,11 @@ The normative specification of Isotope concepts:
 - [01-blocks.md](spec/01-blocks.md) — The Block execution primitive
 - [02-assemblies.md](spec/02-assemblies.md) — Composition of Blocks
 - [03-namespaces.md](spec/03-namespaces.md) — Per-Block path visibility
-- [04-context.md](spec/04-context.md) — System services at `/ctx/iso/`
+- [04-system-paths.md](spec/04-system-paths.md) — System services at `/iso/`
 - [05-lifecycle.md](spec/05-lifecycle.md) — Block states and transitions
 - [06-protocol.md](spec/06-protocol.md) — Store operation semantics
+- [07-server-protocol.md](spec/07-server-protocol.md) — How Blocks serve requests
+- [08-assembly-management.md](spec/08-assembly-management.md) — Deploying and updating Assemblies
 
 ### Rationale (`rationale/`)
 

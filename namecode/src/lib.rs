@@ -128,9 +128,8 @@ mod tests {
 
     #[test]
     fn test_encode_just_underscore() {
-        // Just "_" is not a valid identifier
-        let encoded = encode("_");
-        assert!(encoded.starts_with("_N_"));
+        // Single underscore is a valid identifier, passes through
+        assert_eq!(encode("_"), "_");
     }
 
     // ==================== Prefix/Delimiter Collision Tests ====================
@@ -144,11 +143,9 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_delimiter_collision() {
-        let encoded = encode("foo__bar");
-        assert!(encoded.starts_with("_N_"));
-        // Should not equal the input (would be ambiguous)
-        assert_ne!(encoded, "foo__bar");
+    fn test_encode_double_underscore_passthrough() {
+        // foo__bar is a valid XID and doesn't start with _N_, so it passes through
+        assert_eq!(encode("foo__bar"), "foo__bar");
     }
 
     // ==================== Roundtrip Tests ====================
@@ -279,12 +276,12 @@ mod tests {
         assert!(is_xid_identifier("foo123"));
         assert!(is_xid_identifier("café"));
         assert!(is_xid_identifier("名前"));
+        assert!(is_xid_identifier("_")); // Single underscore is valid
 
         assert!(!is_xid_identifier(""));
         assert!(!is_xid_identifier("123"));
         assert!(!is_xid_identifier("foo bar"));
         assert!(!is_xid_identifier("foo-bar"));
-        assert!(!is_xid_identifier("_"));
     }
 
     // ==================== is_encoded Tests ====================
@@ -330,11 +327,13 @@ mod tests {
     // ==================== Additional Edge Cases ====================
 
     #[test]
-    fn test_roundtrip_delimiter_collision() {
+    fn test_passthrough_double_underscore() {
+        // foo__bar passes through unchanged (valid XID, no _N_ prefix)
         let original = "foo__bar";
         let encoded = encode(original);
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded, original);
+        assert_eq!(encoded, original);
+        // decode fails since it's not encoded
+        assert!(decode(&encoded).is_err());
     }
 
     #[test]
@@ -346,19 +345,40 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_multiple_underscores() {
-        let cases = vec!["a__b", "a___b", "a____b", "__", "___", "____"];
+    fn test_multiple_underscores_passthrough() {
+        // All these are valid XID identifiers and don't start with _N_
+        let cases = vec!["a__b", "a___b", "a____b", "__a", "___a", "____a"];
 
         for original in cases {
             let encoded = encode(original);
-            let decoded = decode(&encoded)
-                .unwrap_or_else(|e| panic!("decode failed for {}: {:?}", original, e));
             assert_eq!(
-                decoded, original,
-                "roundtrip failed for: {} (encoded: {})",
-                original, encoded
+                encoded, original,
+                "should passthrough for: {}",
+                original
             );
         }
+    }
+
+    #[test]
+    fn test_just_underscores_passthrough() {
+        // Multiple underscores ARE valid XID identifiers (underscore followed by XID_Continue,
+        // and underscore IS XID_Continue). They pass through unchanged.
+        let cases = vec!["__", "___", "____"];
+
+        for original in cases {
+            let encoded = encode(original);
+            assert_eq!(
+                encoded, original,
+                "should passthrough: {}",
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn test_single_underscore_passthrough() {
+        // Single underscore is a valid identifier, passes through
+        assert_eq!(encode("_"), "_");
     }
 }
 
@@ -419,12 +439,12 @@ mod proptests {
             );
         }
 
-        /// XID passthrough: valid XID identifiers that don't conflict pass through
+        /// XID passthrough: valid XID identifiers that don't start with _N_ pass through
         #[test]
         fn prop_xid_passthrough(s in "[a-zA-Z][a-zA-Z0-9_]*") {
-            // Only test if it doesn't conflict with our encoding
-            // Note: exclude leading underscore as "_" alone is not valid
-            if !s.starts_with("_N_") && !s.contains("__") && is_xid_identifier(&s) {
+            // Valid XID identifiers that don't start with _N_ pass through unchanged
+            // (including those with __ in them)
+            if !s.starts_with("_N_") && is_xid_identifier(&s) {
                 let encoded = encode(&s);
                 prop_assert_eq!(&encoded, &s, "XID passthrough failed for: {}", &s);
             }
@@ -583,10 +603,10 @@ mod kani_proofs {
         assert!(!is_xid_identifier(""));
     }
 
-    /// Verify is_xid_identifier returns false for single underscore
+    /// Verify is_xid_identifier returns true for single underscore
     #[kani::proof]
     fn verify_is_xid_single_underscore() {
-        assert!(!is_xid_identifier("_"));
+        assert!(is_xid_identifier("_"));
     }
 
     // ==================== Encode/Decode Proofs ====================
@@ -636,16 +656,13 @@ mod kani_proofs {
         assert_eq!(decoded.unwrap(), input);
     }
 
-    /// Verify roundtrip for delimiter collision
+    /// Verify double underscore passes through (valid XID, no _N_ prefix)
     #[kani::proof]
-    fn verify_roundtrip_delimiter_collision() {
+    fn verify_double_underscore_passthrough() {
         let input = "a__b";
         let encoded = encode(input);
-        // Should be encoded (not just prefixed)
-        assert!(encoded.contains("__"));
-        let decoded = decode(&encoded);
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap(), input);
+        // Should pass through unchanged (valid XID, no prefix collision)
+        assert_eq!(encoded, input, "a__b should pass through");
     }
 
     /// Verify roundtrip for prefix collision

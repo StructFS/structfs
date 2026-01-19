@@ -180,12 +180,13 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_delimiter_collision() {
+    fn test_double_underscore_passthrough() {
+        // foo__bar is valid XID and doesn't start with _N_, so it passes through
         let original = "foo__bar";
         let encoded = encode(original);
-        assert!(encoded.starts_with(PREFIX));
-        let decoded = decode(&encoded);
-        assert_eq!(decoded, Ok(original.to_string()));
+        assert_eq!(encoded, original); // passthrough
+        // decode fails since it's not encoded
+        assert_eq!(decode(&encoded), Err(crate::DecodeError::NotEncoded));
     }
 
     #[test]

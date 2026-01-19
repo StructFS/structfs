@@ -15,3 +15,4 @@ cc 8e95fa43784eafad4ef0b73ed66ba39c236a37a91a41d63602445e0adcafd2cf # shrinks to
 cc fea69867621980427ae490bb3081183663a9e96279337f22c6752097fae8c258 # shrinks to s = "𞸤"
 cc add3a92710a498ca94423ac483a83a3ef8b3f60c247be329d870164896650b37 # shrinks to s = "_ "
 cc 1d36dce3b7b9e064254b8d09013f6c0ab641d956aab95b1181e0387501c43cf8 # shrinks to s = "_"
+cc 67702e610bc024bdbdce42d08927c83ecc1e068d681aa0c2fa99dcb3cdeedfb5 # shrinks to s = "_\u{b}_a"

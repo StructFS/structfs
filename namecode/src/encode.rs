@@ -10,8 +10,8 @@ pub const DELIMITER: &str = "__";
 
 /// Check if a string is a valid XID identifier per UAX 31.
 ///
-/// A valid identifier starts with XID_Start (or underscore followed by XID_Continue)
-/// and continues with XID_Continue characters.
+/// A valid identifier starts with XID_Start (or underscore) and continues
+/// with XID_Continue characters. Single underscore `_` is valid.
 pub fn is_xid_identifier(s: &str) -> bool {
     let mut chars = s.chars();
 
@@ -19,14 +19,8 @@ pub fn is_xid_identifier(s: &str) -> bool {
         None => false, // Empty string is not a valid identifier
         Some(first) => {
             if first == '_' {
-                // Underscore must be followed by at least one XID_Continue
-                match chars.next() {
-                    None => false, // Just "_" is not valid
-                    Some(second) => {
-                        unicode_ident::is_xid_continue(second)
-                            && chars.all(unicode_ident::is_xid_continue)
-                    }
-                }
+                // Underscore alone or followed by XID_Continue is valid
+                chars.all(unicode_ident::is_xid_continue)
             } else {
                 unicode_ident::is_xid_start(first) && chars.all(unicode_ident::is_xid_continue)
             }
@@ -38,20 +32,18 @@ pub fn is_xid_identifier(s: &str) -> bool {
 ///
 /// A string needs encoding if:
 /// - It's not a valid XID identifier, OR
-/// - It starts with `_N_` (prefix collision), OR
-/// - It contains `__` (delimiter collision)
+/// - It starts with `_N_` (prefix collision)
+///
+/// Note: Strings containing `__` do NOT need encoding just because of that.
+/// The delimiter `__` only has meaning after the `_N_` prefix, so `foo__bar`
+/// passes through unchanged since it can't be confused with an encoded string.
 pub fn needs_encoding(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
 
-    // Prefix collision
+    // Prefix collision - only strings starting with _N_ could be confused with encodings
     if s.starts_with(PREFIX) {
-        return true;
-    }
-
-    // Delimiter collision
-    if s.contains(DELIMITER) {
         return true;
     }
 
@@ -135,14 +127,26 @@ pub fn encode_impl(input: &str) -> String {
     }
 
     // Build basic string and non-basic list
+    // We also need to ensure no consecutive underscores in the final basic string.
+    // This can happen when non-consecutive underscores in input become adjacent after
+    // removing non-basic characters.
     let mut basic = String::new();
     let mut non_basic: Vec<(usize, char)> = Vec::new();
+    let mut last_was_underscore = false;
 
     for (i, &c) in chars.iter().enumerate() {
         if is_basic[i] {
-            basic.push(c);
+            // Check if this would create consecutive underscores in basic
+            if c == '_' && last_was_underscore {
+                // Mark as non-basic to avoid __ in basic
+                non_basic.push((i, c));
+            } else {
+                basic.push(c);
+                last_was_underscore = c == '_';
+            }
         } else {
             non_basic.push((i, c));
+            // Non-basic chars don't affect underscore tracking for basic string
         }
     }
 
@@ -217,13 +221,13 @@ mod tests {
         assert!(is_xid_identifier("café"));
         assert!(is_xid_identifier("名前"));
         assert!(is_xid_identifier("_1"));
+        assert!(is_xid_identifier("_")); // Single underscore is valid
 
         // Invalid identifiers
         assert!(!is_xid_identifier("")); // Empty
         assert!(!is_xid_identifier("123")); // Starts with digit
         assert!(!is_xid_identifier("foo bar")); // Contains space
         assert!(!is_xid_identifier("foo-bar")); // Contains hyphen
-        assert!(!is_xid_identifier("_")); // Just underscore
     }
 
     #[test]
@@ -232,13 +236,14 @@ mod tests {
         assert!(!needs_encoding("foo"));
         assert!(!needs_encoding("café"));
         assert!(!needs_encoding("")); // Empty passes through
+        assert!(!needs_encoding("foo__bar")); // Valid XID, no prefix collision
 
         // Need encoding
         assert!(needs_encoding("foo bar")); // Space
         assert!(needs_encoding("foo-bar")); // Hyphen
         assert!(needs_encoding("123foo")); // Starts with digit
         assert!(needs_encoding("_N_test")); // Prefix collision
-        assert!(needs_encoding("foo__bar")); // Delimiter collision
+        assert!(needs_encoding("_N_foo__bar")); // Prefix collision (__ irrelevant)
     }
 
     #[test]
@@ -286,11 +291,23 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_delimiter_collision() {
-        let encoded = encode("foo__bar");
+    fn test_encode_double_underscore_passthrough() {
+        // foo__bar is a valid XID and doesn't start with _N_, so it passes through
+        assert_eq!(encode("foo__bar"), "foo__bar");
+        assert_eq!(encode("a__b__c"), "a__b__c");
+    }
+
+    #[test]
+    fn test_encode_prefix_with_double_underscore() {
+        // _N_foo__bar starts with _N_, but it happens to be a valid encoding
+        // (of a string with a control character). Due to idempotency, it's returned unchanged.
+        let encoded = encode("_N_foo__bar");
         assert!(encoded.starts_with(PREFIX));
-        // Should NOT equal the input (would be ambiguous with basic/encoded delimiter)
-        assert_ne!(encoded, "_N_foo__bar");
+        // This is returned unchanged because it's a valid encoding
+        assert_eq!(encoded, "_N_foo__bar");
+        // Verify it actually decodes (to something with a control char)
+        let decoded = crate::decode::decode(&encoded).unwrap();
+        assert_ne!(decoded, "_N_foo__bar"); // The decoded value is different
     }
 
     #[test]

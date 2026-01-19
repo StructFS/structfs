@@ -13,6 +13,24 @@ An Assembly consists of:
 From outside, an Assembly looks exactly like a Block. You cannot tell whether
 you're talking to a leaf Block or an Assembly of hundreds of Blocks.
 
+## Immutability
+
+An Assembly definition is an **immutable value**. You don't "modify" a running
+Assembly—you create a new Assembly version and transition to it.
+
+This is fundamental:
+
+- An Assembly definition is a complete, self-contained specification
+- The definition can be serialized, stored, transmitted, and instantiated anywhere
+- "Updating" means creating a new version, not mutating in place
+- Rollback is just activating an old version
+
+The running state of an Assembly (which Blocks are running, request counts, etc.)
+is separate from its definition. State is ephemeral observation; definition is
+immutable truth.
+
+See `08-assembly-management.md` for how Assemblies are deployed and updated.
+
 ## The Fractal Property
 
 Assemblies are Blocks. This means:
@@ -86,20 +104,22 @@ Short form (defaults to `application/json` serialization):
 ```yaml
 blocks:
   api: ./api-block.wasm           # Local Wasm file
-  cache: registry:cache-block:1.2  # From a registry
+  cache: registry/cache-block/1.2  # From a registry
   database: ./database-block.wasm
 ```
 
-Expanded form with explicit serialization:
+Expanded form with explicit serialization and content hash:
 
 ```yaml
 blocks:
   api:
     wasm: ./api-block.wasm
+    hash: sha256/a1b2c3d4e5f6...
     serialization: application/json
 
   backend:
     wasm: ./backend-block.wasm
+    hash: sha256/f6e5d4c3b2a1...
     serialization: application/protobuf
 
   metrics:
@@ -111,9 +131,33 @@ The `serialization` field declares the encoding format for all communication
 with this Block. It must be set before the Block starts—all messages, including
 startup and shutdown, use this format. See `06-protocol.md` for details.
 
+#### Content-Addressed Blocks
+
+The `hash` field content-addresses the Block artifact. This is the canonical
+identity—the path is a hint for humans, the hash is the truth.
+
+```yaml
+blocks:
+  api:
+    wasm: ./api-block.wasm
+    hash: sha256/a1b2c3d4e5f6...
+```
+
+Two Assemblies referencing the same hash reference the same immutable artifact,
+regardless of the path. This enables:
+
+- **Deduplication**: Identical Blocks stored once
+- **Structural sharing**: New Assembly versions share unchanged Blocks
+- **Verification**: The runtime can verify artifacts match their declared hash
+- **Caching**: Content-addressed artifacts are safely cacheable forever
+
+When an Assembly is instantiated, the runtime resolves the path and verifies
+the hash. If the artifact at the path doesn't match the hash, instantiation
+fails.
+
 Block references can point to:
 - Local Wasm files
-- Registry artifacts
+- Registry artifacts (namecode paths like `registry/cache-block/1.2`)
 - Other Assembly definitions (since Assemblies are Blocks)
 
 ### Public Block
@@ -360,16 +404,130 @@ External requests hit `gateway`. `gateway` routes to `auth` for authentication,
 then to `api` for business logic. `api` uses `cache` and `database`. All of
 this is invisible from outside—they just see the `gateway` Block's store.
 
+## Derived Assemblies
+
+An Assembly can extend another Assembly, inheriting its structure and overriding
+specific parts. This enables variants without duplicating the entire definition.
+
+```yaml
+assembly: user-service-canary
+extends: user-service/versions/2024.01.15
+
+blocks:
+  api:
+    wasm: ./api-canary.wasm
+    hash: sha256/newversion...
+    # Overrides the api block; other blocks inherited
+
+config:
+  api:
+    feature_flags:
+      new_algorithm: true
+    # Overrides api config; other config inherited
+```
+
+Inheritance rules:
+
+- `blocks`: Parent blocks are inherited; child can override by name
+- `wiring`: Parent wiring is inherited; child can add or override
+- `config`: Deep-merged; child values override parent values at each key
+- `public`: Inherited unless explicitly overridden
+- `imports`: Merged; child can add new imports
+- `failure`: Inherited unless explicitly overridden
+
+This is like prototype inheritance for configurations. The child Assembly is
+still a complete, self-contained value once resolved—the `extends` is evaluated
+at definition time, not runtime.
+
+### Common Patterns
+
+**Environment variants:**
+
+```yaml
+# Base
+assembly: user-service
+version: 2024.01.15
+# ... full definition ...
+
+# Development
+assembly: user-service-dev
+extends: user-service/versions/2024.01.15
+config:
+  gateway:
+    port: 3000
+  database:
+    connection: postgres/localhost/dev
+
+# Production
+assembly: user-service-prod
+extends: user-service/versions/2024.01.15
+config:
+  gateway:
+    port: 8080
+    tls:
+      cert: /secrets/cert.pem
+  database:
+    connection: postgres/prod-cluster/main
+    pool_size: 50
+```
+
+**Canary deployments:**
+
+```yaml
+assembly: user-service-canary
+extends: user-service/versions/2024.01.15
+blocks:
+  api:
+    wasm: ./api-block.wasm
+    hash: sha256/experimental...   # New version under test
+```
+
+## Scaling via Composition
+
+Scaling is not a runtime feature—it's expressed through Assembly composition.
+
+To run multiple instances of a Block with load balancing:
+
+```yaml
+assembly: gateway-pool
+
+blocks:
+  router: stdlib/round-robin-router
+  worker-0: ./gateway-block.wasm
+  worker-1: ./gateway-block.wasm
+  worker-2: ./gateway-block.wasm
+
+public: router
+
+wiring:
+  router:/backends/0 -> worker-0
+  router:/backends/1 -> worker-1
+  router:/backends/2 -> worker-2
+```
+
+The router Block (from a standard library) implements load balancing. From
+outside, `gateway-pool` is just a Block—callers don't know it's actually
+three workers behind a router.
+
+For different routing strategies, use different router Blocks:
+
+- `stdlib/round-robin-router` — Distribute requests evenly
+- `stdlib/hash-router` — Route by path hash (for cache affinity)
+- `stdlib/least-pending-router` — Route to least-busy worker
+- Custom routers for application-specific logic
+
+This keeps the runtime simple. The runtime spawns Blocks and routes by wiring.
+Load balancing, sharding, and failover are Blocks you compose, not runtime
+features.
+
 ## Open Questions
 
-1. **Hot reloading**: Can a Block be replaced in a running Assembly? What
-   happens to in-flight operations and state?
-
-2. **Versioning**: How do Assemblies handle version compatibility between
-   Blocks? Is there a mechanism for version constraints in wiring?
-
-3. **Observability**: Should there be standard paths for Assembly-level
+1. **Observability**: Should there be standard paths for Assembly-level
    metrics (Block states, request routing, etc.)?
 
-4. **Dynamic wiring**: Can wiring change at runtime, or is it fixed at
-   Assembly startup?
+2. **Instance pooling**: Should there be sugar for "N instances of the same
+   Block" to avoid repetitive definitions, or is that a tooling concern?
+
+3. **Autoscaling**: How does dynamic scaling work if Assemblies are immutable?
+   Is it a higher-level system that creates new Assembly versions, or something
+   else?

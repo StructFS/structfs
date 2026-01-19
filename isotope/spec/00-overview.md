@@ -97,6 +97,7 @@ The Isotope specification defines:
 5. **Lifecycle** — Block states and transitions (see `05-lifecycle.md`)
 6. **Protocol** — StructFS operation semantics (see `06-protocol.md`)
 7. **Server Protocol** — How Blocks serve StructFS requests (see `07-server-protocol.md`)
+8. **Assembly Management** — Deploying and updating Assemblies (see `08-assembly-management.md`)
 
 ## Non-Goals
 
