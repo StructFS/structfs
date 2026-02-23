@@ -8,6 +8,8 @@ members = [
     "packages/http",
     "packages/repl",
     "packages/sys",
+    "packages/structfs",
+    "featherweight",
     "featherweight/runtime",
     "featherweight/guest",
     "namecode",
@@ -23,6 +25,8 @@ default-members = [
     "packages/http",
     "packages/repl",
     "packages/sys",
+    "packages/structfs",
+    "featherweight",
     "featherweight/runtime",
     "namecode",
 ]
