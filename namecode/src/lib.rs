@@ -366,6 +366,98 @@ mod tests {
     }
 }
 
+/// Test vectors from SPEC.md. If any of these break, the spec examples are stale.
+#[cfg(test)]
+mod spec_vectors {
+    use super::*;
+
+    // SPEC.md § Test Vectors > Passthrough Cases
+    #[test]
+    fn passthrough() {
+        let cases: &[(&str, &str)] = &[
+            ("foo", "foo"),
+            ("_private", "_private"),
+            ("café", "café"),
+            ("名前", "名前"),
+            ("CamelCase", "CamelCase"),
+        ];
+        for &(input, expected) in cases {
+            assert_eq!(encode(input), expected, "passthrough: {:?}", input);
+        }
+    }
+
+    // SPEC.md § Test Vectors > Encoding Cases
+    #[test]
+    fn encoding() {
+        let cases: &[(&str, &str)] = &[
+            ("hello world", "_N_helloworld__fa0b"),
+            ("foo-bar", "_N_foobar__da1d"),
+            ("a b c", "_N_abc__ba0bb0b"),
+            ("123", "_N_123"),
+            ("   ", "_N___a0ba0ba0b"),
+        ];
+        for &(input, expected) in cases {
+            let encoded = encode(input);
+            assert_eq!(encoded, expected, "encode: {:?}", input);
+            // Verify roundtrip
+            if encoded.starts_with("_N_") {
+                assert_eq!(decode(&encoded).unwrap(), input, "roundtrip: {:?}", input);
+            }
+        }
+    }
+
+    // SPEC.md § Test Vectors > Edge Cases
+    #[test]
+    fn edge_cases() {
+        let cases: &[(&str, &str)] = &[
+            ("", ""),
+            (" ", "_N___a0b"),
+            ("a", "a"),
+            ("_", "_"),
+            ("_a", "_a"),
+            ("__", "__"),
+            ("___", "___"),
+            ("foo__bar", "foo__bar"),
+            ("_N_test", "_N__N_test"),
+            ("__ _x", "_N__x__ba3la0ba3l"),
+        ];
+        for &(input, expected) in cases {
+            let encoded = encode(input);
+            assert_eq!(encoded, expected, "edge case: {:?}", input);
+            // Verify roundtrip for encoded strings
+            if encoded.starts_with("_N_") {
+                assert_eq!(decode(&encoded).unwrap(), input, "roundtrip: {:?}", input);
+            }
+        }
+    }
+
+    // SPEC.md § Examples table
+    #[test]
+    fn decision_tree_examples() {
+        assert_eq!(encode("foo"), "foo");
+        assert_eq!(encode("cafe"), "cafe");
+        assert_eq!(encode("café"), "café");
+        assert_eq!(encode("名前"), "名前");
+        assert_eq!(encode("foo__bar"), "foo__bar");
+        assert_eq!(encode("hello world"), "_N_helloworld__fa0b");
+        assert_eq!(encode("foo-bar"), "_N_foobar__da1d");
+        assert_eq!(encode("123foo"), "_N_123foo");
+        assert_eq!(encode("_N_test"), "_N__N_test");
+        assert_eq!(encode("_"), "_");
+        assert_eq!(encode(""), "");
+    }
+
+    // SPEC.md § Collision Handling examples
+    #[test]
+    fn collision_handling() {
+        assert_eq!(encode("_N_test"), "_N__N_test");
+        assert_eq!(decode("_N__N_test").unwrap(), "_N_test");
+
+        assert_eq!(encode("foo__bar"), "foo__bar");
+        assert_eq!(encode("__"), "__");
+    }
+}
+
 #[cfg(test)]
 mod proptests {
     use super::*;

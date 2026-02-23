@@ -1,7 +1,7 @@
 # Namecode Specification
 
-**Version:** 1.0
-**Status:** Stable
+**Version:** 0.1
+**Status:** Draft
 
 ## Abstract
 
