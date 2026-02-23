@@ -6,7 +6,19 @@ use crate::DecodeError;
 
 /// Decode a Namecode string back to Unicode.
 ///
-/// Returns `Err(NotEncoded)` if input doesn't have the _N_ prefix.
+/// Returns `Err(NotEncoded)` if input doesn't have the `_N_` prefix.
+///
+/// # Examples
+///
+/// ```
+/// use namecode::{decode, DecodeError};
+///
+/// assert_eq!(decode("_N_helloworld__fa0b").unwrap(), "hello world");
+/// assert_eq!(decode("_N_foobar__da1d").unwrap(), "foo-bar");
+///
+/// // Strings without the _N_ prefix are not valid encodings
+/// assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
+/// ```
 pub fn decode(input: &str) -> Result<String, DecodeError> {
     // Check for prefix
     if !input.starts_with(PREFIX) {

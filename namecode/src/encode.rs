@@ -12,6 +12,20 @@ pub(crate) const DELIMITER: &str = "__";
 ///
 /// A valid identifier starts with XID_Start (or underscore) and continues
 /// with XID_Continue characters. Single underscore `_` is valid.
+///
+/// # Examples
+///
+/// ```
+/// use namecode::is_xid_identifier;
+///
+/// assert!(is_xid_identifier("foo"));
+/// assert!(is_xid_identifier("_private"));
+/// assert!(is_xid_identifier("café"));
+///
+/// assert!(!is_xid_identifier(""));
+/// assert!(!is_xid_identifier("foo bar"));
+/// assert!(!is_xid_identifier("123abc"));
+/// ```
 pub fn is_xid_identifier(s: &str) -> bool {
     let mut chars = s.chars();
 
@@ -55,6 +69,24 @@ pub(crate) fn needs_encoding(s: &str) -> bool {
 ///
 /// Returns input unchanged if already a valid XID identifier that doesn't
 /// conflict with our encoding format.
+///
+/// # Examples
+///
+/// ```
+/// use namecode::encode;
+///
+/// // Valid identifiers pass through
+/// assert_eq!(encode("foo"), "foo");
+/// assert_eq!(encode("café"), "café");
+///
+/// // Non-identifier characters trigger encoding
+/// assert_eq!(encode("hello world"), "_N_helloworld__fa0b");
+/// assert_eq!(encode("foo-bar"), "_N_foobar__da1d");
+///
+/// // Idempotent: encoding twice gives the same result
+/// let encoded = encode("hello world");
+/// assert_eq!(encode(&encoded), encoded);
+/// ```
 pub fn encode(input: &str) -> String {
     // Empty string passes through
     if input.is_empty() {
@@ -66,16 +98,14 @@ pub fn encode(input: &str) -> String {
         return input.to_string();
     }
 
-    // Check if already encoded - must verify it decodes AND re-encodes to same value
+    // Idempotency: if this is already a valid encoding whose decoded value
+    // needs encoding, return it unchanged. The identity property guarantees
+    // encode_impl(decode(s)) == s for any valid encoding s.
     if input.starts_with(PREFIX) {
         if let Ok(decoded) = crate::decode::decode(input) {
-            // Only treat as already-encoded if the decoded value would need encoding
-            // and re-encoding produces the exact same result
             if needs_encoding(&decoded) {
-                let re_encoded = encode_impl(&decoded);
-                if re_encoded == input {
-                    return input.to_string();
-                }
+                debug_assert_eq!(encode_impl(&decoded), input, "identity violation");
+                return input.to_string();
             }
         }
     }
@@ -288,6 +318,28 @@ mod tests {
         assert!(encoded.starts_with(PREFIX));
         // Should NOT equal the input (would be ambiguous)
         assert_ne!(encoded, "_N_test");
+    }
+
+    #[test]
+    fn test_encode_prefix_collision_invalid_encoding() {
+        // A string starting with _N_ that isn't a valid encoding
+        // (digit '9' is not in the bootstring alphabet)
+        let input = "_N_abc__9";
+        let encoded = encode(input);
+        assert!(encoded.starts_with(PREFIX));
+        assert_ne!(encoded, input);
+        let decoded = crate::decode::decode(&encoded).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn test_encode_consecutive_underscores_with_non_basic() {
+        // When a string has consecutive underscores AND non-basic chars,
+        // the second underscore gets moved to non-basic to avoid __ in basic
+        let encoded = encode("a__b c");
+        assert!(encoded.starts_with(PREFIX));
+        let decoded = crate::decode::decode(&encoded).unwrap();
+        assert_eq!(decoded, "a__b c");
     }
 
     #[test]

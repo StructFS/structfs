@@ -249,9 +249,6 @@ pub fn encode(input: &str) -> String;
 /// Decode a Namecode string back to Unicode.
 pub fn decode(input: &str) -> Result<String, DecodeError>;
 
-/// Quick check if a string appears to be Namecode-encoded.
-pub fn is_encoded(input: &str) -> bool;
-
 /// Check if a string is a valid XID identifier (UAX 31).
 pub fn is_xid_identifier(input: &str) -> bool;
 ```

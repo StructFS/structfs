@@ -1,0 +1,1631 @@
+/Users/akesling/Devel/AdjectiveNoun/structfs/namecode/src/bootstring.rs:
+    1|       |//! Bootstring algorithm constants and helpers.
+    2|       |//!
+    3|       |//! This is an adaptation of the Bootstring algorithm (RFC 3492) for encoding
+    4|       |//! Unicode strings as valid identifiers. We use base 32 with the alphabet
+    5|       |//! a-z (26) + 0-5 (6) = 32 characters, all valid in identifiers.
+    6|       |
+    7|       |/// Base for variable-length integer encoding.
+    8|       |pub(crate) const BASE: u32 = 32;
+    9|       |
+   10|       |/// Minimum threshold value.
+   11|       |pub(crate) const T_MIN: u32 = 1;
+   12|       |
+   13|       |/// Maximum threshold value.
+   14|       |pub(crate) const T_MAX: u32 = 26;
+   15|       |
+   16|       |/// Skew factor for bias adaptation.
+   17|       |pub(crate) const SKEW: u32 = 38;
+   18|       |
+   19|       |/// Damping factor for first adaptation.
+   20|       |pub(crate) const DAMP: u32 = 700;
+   21|       |
+   22|       |/// Initial bias value.
+   23|       |pub(crate) const INITIAL_BIAS: u32 = 72;
+   24|       |
+   25|       |/// The encoding alphabet: a-z (0-25) + 0-5 (26-31).
+   26|       |const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz012345";
+   27|       |
+   28|       |/// Adapt bias after encoding/decoding a delta.
+   29|       |///
+   30|       |/// This function implements the bias adaptation algorithm from RFC 3492.
+   31|       |/// It adjusts the bias to improve encoding efficiency based on:
+   32|       |/// - delta: the delta value just processed
+   33|       |/// - num_points: number of code points handled so far
+   34|       |/// - first_time: whether this is the first adaptation
+   35|  79.4k|pub(crate) fn adapt_bias(mut delta: u32, num_points: u32, first_time: bool) -> u32 {
+   36|       |    // Scale delta down
+   37|  79.4k|    delta = if first_time { delta / DAMP } else { delta / 2 };
+                                          ^3.34k                ^76.1k
+   38|       |
+   39|       |    // Compensate for the length of the string
+   40|  79.4k|    delta += delta / num_points;
+   41|       |
+   42|       |    // Find the number of divisions needed
+   43|  79.4k|    let mut k = 0u32;
+   44|  79.4k|    let base_minus_tmin = BASE - T_MIN;
+   45|  79.4k|    let threshold = (base_minus_tmin * T_MAX) / 2;
+   46|       |
+   47|   102k|    while delta > threshold {
+   48|  23.5k|        delta /= base_minus_tmin;
+   49|  23.5k|        k += BASE;
+   50|  23.5k|    }
+   51|       |
+   52|  79.4k|    k + ((base_minus_tmin + 1) * delta) / (delta + SKEW)
+   53|  79.4k|}
+   54|       |
+   55|       |/// Encode a digit value (0-31) to its character representation.
+   56|       |///
+   57|       |/// Returns `None` if the digit is out of range.
+   58|   106k|pub(crate) fn encode_digit(d: u32) -> Option<char> {
+   59|   106k|    if d < 32 {
+   60|   106k|        Some(ALPHABET[d as usize] as char)
+   61|       |    } else {
+   62|      1|        None
+   63|       |    }
+   64|   106k|}
+   65|       |
+   66|       |/// Decode a character to its digit value (0-31).
+   67|       |///
+   68|       |/// Returns `None` if the character is not in the alphabet.
+   69|  59.4k|pub(crate) fn decode_digit(c: char) -> Option<u32> {
+   70|  59.4k|    match c {
+   71|  30.4k|        'a'..='z' => Some(c as u32 - 'a' as u32),
+   72|      2|        'A'..='Z' => Some(c as u32 - 'A' as u32), // Case insensitive
+   73|  29.0k|        '0'..='5' => Some(c as u32 - '0' as u32 + 26),
+                                   ^29.0k
+   74|      3|        _ => None,
+   75|       |    }
+   76|  59.4k|}
+   77|       |
+   78|       |/// Calculate the threshold for a given position k and bias.
+   79|   165k|pub(crate) fn threshold(k: u32, bias: u32) -> u32 {
+   80|   165k|    if k <= bias + T_MIN {
+   81|  15.9k|        T_MIN
+   82|   149k|    } else if k >= bias + T_MAX {
+   83|   126k|        T_MAX
+   84|       |    } else {
+   85|  22.6k|        k - bias
+   86|       |    }
+   87|   165k|}
+   88|       |
+   89|       |#[cfg(test)]
+   90|       |mod tests {
+   91|       |    use super::*;
+   92|       |
+   93|       |    #[test]
+   94|      1|    fn test_encode_digit() {
+   95|       |        // a-z maps to 0-25
+   96|      1|        assert_eq!(encode_digit(0), Some('a'));
+   97|      1|        assert_eq!(encode_digit(25), Some('z'));
+   98|       |
+   99|       |        // 0-5 maps to 26-31
+  100|      1|        assert_eq!(encode_digit(26), Some('0'));
+  101|      1|        assert_eq!(encode_digit(31), Some('5'));
+  102|       |
+  103|       |        // Out of range
+  104|      1|        assert_eq!(encode_digit(32), None);
+  105|      1|    }
+  106|       |
+  107|       |    #[test]
+  108|      1|    fn test_decode_digit() {
+  109|       |        // a-z maps to 0-25
+  110|      1|        assert_eq!(decode_digit('a'), Some(0));
+  111|      1|        assert_eq!(decode_digit('z'), Some(25));
+  112|       |
+  113|       |        // Case insensitive
+  114|      1|        assert_eq!(decode_digit('A'), Some(0));
+  115|      1|        assert_eq!(decode_digit('Z'), Some(25));
+  116|       |
+  117|       |        // 0-5 maps to 26-31
+  118|      1|        assert_eq!(decode_digit('0'), Some(26));
+  119|      1|        assert_eq!(decode_digit('5'), Some(31));
+  120|       |
+  121|       |        // Invalid
+  122|      1|        assert_eq!(decode_digit('6'), None);
+  123|      1|        assert_eq!(decode_digit('-'), None);
+  124|      1|    }
+  125|       |
+  126|       |    #[test]
+  127|      1|    fn test_roundtrip() {
+  128|     33|        for d in 0..32 {
+                          ^32
+  129|     32|            let c = encode_digit(d).unwrap();
+  130|     32|            assert_eq!(decode_digit(c), Some(d));
+  131|       |        }
+  132|      1|    }
+  133|       |
+  134|       |    #[test]
+  135|      1|    fn test_threshold() {
+  136|       |        // k <= bias + T_MIN => T_MIN
+  137|      1|        assert_eq!(threshold(1, 72), T_MIN);
+  138|      1|        assert_eq!(threshold(73, 72), T_MIN);
+  139|       |
+  140|       |        // k >= bias + T_MAX => T_MAX
+  141|      1|        assert_eq!(threshold(100, 72), T_MAX);
+  142|       |
+  143|       |        // Otherwise k - bias
+  144|      1|        assert_eq!(threshold(80, 72), 8);
+  145|      1|    }
+  146|       |
+  147|       |    #[test]
+  148|      1|    fn test_adapt_bias() {
+  149|       |        // Test with some known values
+  150|      1|        let bias = adapt_bias(0, 1, true);
+  151|      1|        assert!(bias < BASE);
+  152|       |
+  153|       |        // First time should divide by DAMP
+  154|      1|        let bias1 = adapt_bias(1000, 1, true);
+  155|      1|        let bias2 = adapt_bias(1000, 1, false);
+  156|       |        // First time adaptation produces different result
+  157|      1|        assert_ne!(bias1, bias2);
+  158|      1|    }
+  159|       |}
+
+/Users/akesling/Devel/AdjectiveNoun/structfs/namecode/src/decode.rs:
+    1|       |//! Namecode decoding implementation.
+    2|       |
+    3|       |use crate::bootstring::{adapt_bias, decode_digit, threshold, BASE, INITIAL_BIAS};
+    4|       |use crate::encode::{DELIMITER, PREFIX};
+    5|       |use crate::DecodeError;
+    6|       |
+    7|       |/// Decode a Namecode string back to Unicode.
+    8|       |///
+    9|       |/// Returns `Err(NotEncoded)` if input doesn't have the `_N_` prefix.
+   10|       |///
+   11|       |/// # Examples
+   12|       |///
+   13|       |/// ```
+   14|       |/// use namecode::{decode, DecodeError};
+   15|       |///
+   16|       |/// assert_eq!(decode("_N_helloworld__fa0b").unwrap(), "hello world");
+   17|       |/// assert_eq!(decode("_N_foobar__da1d").unwrap(), "foo-bar");
+   18|       |///
+   19|       |/// // Strings without the _N_ prefix are not valid encodings
+   20|       |/// assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
+   21|       |/// ```
+   22|  1.29k|pub fn decode(input: &str) -> Result<String, DecodeError> {
+   23|       |    // Check for prefix
+   24|  1.29k|    if !input.starts_with(PREFIX) {
+   25|      6|        return Err(DecodeError::NotEncoded);
+   26|  1.29k|    }
+   27|       |
+   28|  1.29k|    let without_prefix = &input[PREFIX.len()..];
+   29|       |
+   30|       |    // Check if there's a delimiter
+   31|  1.29k|    if let Some(delim_pos) = without_prefix.find(DELIMITER) {
+                              ^1.28k
+   32|  1.28k|        let basic = &without_prefix[..delim_pos];
+   33|  1.28k|        let encoded = &without_prefix[delim_pos + DELIMITER.len()..];
+   34|       |
+   35|       |        // Decode the insertions
+   36|  1.28k|        let insertions = decode_insertions(encoded)?;
+                          ^1.28k                                 ^2
+   37|       |
+   38|       |        // Reconstruct the original string
+   39|  1.28k|        reconstruct(basic, &insertions)
+   40|       |    } else {
+   41|       |        // No delimiter - just basic chars (encoded because of prefix collision or digit start)
+   42|      8|        Ok(without_prefix.to_string())
+   43|       |    }
+   44|  1.29k|}
+   45|       |
+   46|       |/// Decode the encoded insertions.
+   47|       |///
+   48|       |/// Each insertion is encoded as: position_delta (varint), codepoint (varint)
+   49|  1.28k|fn decode_insertions(encoded: &str) -> Result<Vec<(usize, char)>, DecodeError> {
+   50|  1.28k|    if encoded.is_empty() {
+   51|      1|        return Ok(Vec::new());
+   52|  1.28k|    }
+   53|       |
+   54|  1.28k|    let mut insertions: Vec<(usize, char)> = Vec::new();
+   55|  1.28k|    let mut chars = encoded.chars().peekable();
+   56|  1.28k|    let mut bias: u32 = INITIAL_BIAS;
+   57|  1.28k|    let mut prev_pos: usize = 0;
+   58|  1.28k|    let mut idx: usize = 0;
+   59|       |
+   60|  15.9k|    while chars.peek().is_some() {
+   61|       |        // Decode position delta
+   62|  14.6k|        let pos_delta = decode_varint(&mut chars, bias)?;
+                          ^14.6k                                     ^2
+   63|  14.6k|        bias = adapt_bias(pos_delta, (idx + 1) as u32, idx == 0);
+   64|       |
+   65|       |        // Calculate actual position
+   66|  14.6k|        let pos = if idx == 0 {
+   67|  1.28k|            pos_delta as usize
+   68|       |        } else {
+   69|  13.3k|            prev_pos
+   70|  13.3k|                .checked_add(1)
+   71|  13.3k|                .and_then(|p| p.checked_add(pos_delta as usize))
+   72|  13.3k|                .ok_or(DecodeError::Overflow)?
+                                                           ^0
+   73|       |        };
+   74|       |
+   75|       |        // Decode codepoint
+   76|  14.6k|        let cp = decode_varint(&mut chars, bias)?;
+                                                              ^0
+   77|  14.6k|        bias = adapt_bias(cp, (idx + 2) as u32, false);
+   78|       |
+   79|  14.6k|        let c = char::from_u32(cp).ok_or(DecodeError::InvalidCodepoint(cp))?;
+                                                                                         ^0
+   80|  14.6k|        insertions.push((pos, c));
+   81|       |
+   82|  14.6k|        prev_pos = pos;
+   83|  14.6k|        idx += 1;
+   84|       |    }
+   85|       |
+   86|  1.28k|    Ok(insertions)
+   87|  1.28k|}
+   88|       |
+   89|       |/// Decode a variable-length integer from the character iterator.
+   90|  29.2k|fn decode_varint(
+   91|  29.2k|    chars: &mut std::iter::Peekable<std::str::Chars>,
+   92|  29.2k|    bias: u32,
+   93|  29.2k|) -> Result<u32, DecodeError> {
+   94|  29.2k|    let mut result: u32 = 0;
+   95|  29.2k|    let mut w: u32 = 1;
+   96|  29.2k|    let mut k: u32 = BASE;
+   97|       |
+   98|       |    loop {
+   99|  59.4k|        let c = chars.next().ok_or(DecodeError::UnexpectedEnd)?;
+                          ^59.4k                                            ^1
+  100|  59.4k|        let digit = decode_digit(c).ok_or(DecodeError::InvalidDigit(c))?;
+                          ^59.4k                                                     ^1
+  101|       |
+  102|  59.4k|        let t = threshold(k, bias);
+  103|       |
+  104|       |        // result += digit * w
+  105|  59.4k|        result = result
+  106|  59.4k|            .checked_add(digit.checked_mul(w).ok_or(DecodeError::Overflow)?)
+                                                                                        ^0
+  107|  59.4k|            .ok_or(DecodeError::Overflow)?;
+                                                       ^0
+  108|       |
+  109|  59.4k|        if digit < t {
+  110|  29.2k|            break;
+  111|  30.1k|        }
+  112|       |
+  113|       |        // w *= (BASE - t)
+  114|  30.1k|        w = w.checked_mul(BASE - t).ok_or(DecodeError::Overflow)?;
+                                                                              ^0
+  115|  30.1k|        k = k.checked_add(BASE).ok_or(DecodeError::Overflow)?;
+                                                                          ^0
+  116|       |    }
+  117|       |
+  118|  29.2k|    Ok(result)
+  119|  29.2k|}
+  120|       |
+  121|       |/// Reconstruct the original string from basic chars and insertions.
+  122|  1.28k|fn reconstruct(basic: &str, insertions: &[(usize, char)]) -> Result<String, DecodeError> {
+  123|  1.28k|    let basic_chars: Vec<char> = basic.chars().collect();
+  124|  1.28k|    let total_len = basic_chars.len() + insertions.len();
+  125|       |
+  126|  1.28k|    let mut result = String::with_capacity(total_len * 4); // Estimate for Unicode
+  127|  1.28k|    let mut basic_idx = 0;
+  128|  1.28k|    let mut insert_idx = 0;
+  129|       |
+  130|  21.9k|    for pos in 0..total_len {
+                                ^1.28k
+  131|  21.9k|        if insert_idx < insertions.len() && insertions[insert_idx].0 == pos {
+                                                          ^21.2k
+  132|  14.6k|            result.push(insertions[insert_idx].1);
+  133|  14.6k|            insert_idx += 1;
+  134|  14.6k|        } else if basic_idx < basic_chars.len() {
+                                ^7.30k
+  135|  7.30k|            result.push(basic_chars[basic_idx]);
+  136|  7.30k|            basic_idx += 1;
+  137|  7.30k|        } else {
+  138|      2|            return Err(DecodeError::Overflow);
+  139|       |        }
+  140|       |    }
+  141|       |
+  142|  1.28k|    Ok(result)
+  143|  1.28k|}
+  144|       |
+  145|       |#[cfg(test)]
+  146|       |mod tests {
+  147|       |    use super::*;
+  148|       |    use crate::encode::encode;
+  149|       |
+  150|       |    #[test]
+  151|      1|    fn test_decode_not_encoded() {
+  152|      1|        assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
+  153|      1|        assert_eq!(decode("hello world"), Err(DecodeError::NotEncoded));
+  154|      1|    }
+  155|       |
+  156|       |    #[test]
+  157|      1|    fn test_decode_simple_prefix() {
+  158|       |        // Just prefix, no delimiter
+  159|      1|        assert_eq!(decode("_N_foo"), Ok("foo".to_string()));
+  160|      1|    }
+  161|       |
+  162|       |    #[test]
+  163|      1|    fn test_decode_empty_basic_with_delimiter() {
+  164|       |        // Prefix with delimiter but empty basic portion
+  165|      1|        let result = decode("_N___");
+  166|       |        // Should decode to whatever the encoded portion represents
+  167|      1|        assert!(result.is_ok() || matches!(result, Err(DecodeError::UnexpectedEnd)));
+                                                ^0       ^0
+  168|      1|    }
+  169|       |
+  170|       |    #[test]
+  171|      1|    fn test_roundtrip_simple() {
+  172|      1|        let original = "hello world";
+  173|      1|        let encoded = encode(original);
+  174|      1|        let decoded = decode(&encoded);
+  175|      1|        assert_eq!(decoded, Ok(original.to_string()));
+  176|      1|    }
+  177|       |
+  178|       |    #[test]
+  179|      1|    fn test_roundtrip_hyphen() {
+  180|      1|        let original = "foo-bar";
+  181|      1|        let encoded = encode(original);
+  182|      1|        let decoded = decode(&encoded);
+  183|      1|        assert_eq!(decoded, Ok(original.to_string()));
+  184|      1|    }
+  185|       |
+  186|       |    #[test]
+  187|      1|    fn test_roundtrip_multiple_non_basic() {
+  188|      1|        let original = "a b-c";
+  189|      1|        let encoded = encode(original);
+  190|      1|        let decoded = decode(&encoded);
+  191|      1|        assert_eq!(decoded, Ok(original.to_string()));
+  192|      1|    }
+  193|       |
+  194|       |    #[test]
+  195|      1|    fn test_double_underscore_passthrough() {
+  196|       |        // foo__bar is valid XID and doesn't start with _N_, so it passes through
+  197|      1|        let original = "foo__bar";
+  198|      1|        let encoded = encode(original);
+  199|      1|        assert_eq!(encoded, original); // passthrough
+  200|       |                                       // decode fails since it's not encoded
+  201|      1|        assert_eq!(decode(&encoded), Err(crate::DecodeError::NotEncoded));
+  202|      1|    }
+  203|       |
+  204|       |    #[test]
+  205|      1|    fn test_roundtrip_prefix_collision() {
+  206|      1|        let original = "_N_test";
+  207|      1|        let encoded = encode(original);
+  208|      1|        assert!(encoded.starts_with(PREFIX));
+  209|      1|        assert_ne!(encoded, original);
+  210|      1|        let decoded = decode(&encoded);
+  211|      1|        assert_eq!(decoded, Ok(original.to_string()));
+  212|      1|    }
+  213|       |
+  214|       |    #[test]
+  215|      1|    fn test_reconstruct_overflow() {
+  216|       |        // Test the overflow error in reconstruct when positions are malformed
+  217|       |        // Create a case where insertion position is beyond the expected range
+  218|      1|        let basic = "ab";
+  219|       |        // Insertion at position 5 when total_len = 2 + 1 = 3
+  220|      1|        let insertions = vec![(5, ' ')];
+  221|      1|        let result = reconstruct(basic, &insertions);
+  222|      1|        assert_eq!(result, Err(crate::DecodeError::Overflow));
+  223|      1|    }
+  224|       |
+  225|       |    #[test]
+  226|      1|    fn test_reconstruct_overlapping_positions() {
+  227|       |        // Test when insertions have the same position (causes basic to run out)
+  228|      1|        let basic = "ab";
+  229|       |        // Two insertions at position 0 - after handling first, second won't match
+  230|       |        // and basic will run out at position 2
+  231|      1|        let insertions = vec![(0, ' '), (0, '-')];
+  232|      1|        let result = reconstruct(basic, &insertions);
+  233|       |        // Position 2 won't match insertion (0), and basic is exhausted
+  234|      1|        assert_eq!(result, Err(crate::DecodeError::Overflow));
+  235|      1|    }
+  236|       |}
+
+/Users/akesling/Devel/AdjectiveNoun/structfs/namecode/src/encode.rs:
+    1|       |//! Namecode encoding implementation.
+    2|       |
+    3|       |use crate::bootstring::{adapt_bias, encode_digit, threshold, BASE, INITIAL_BIAS};
+    4|       |
+    5|       |/// The prefix marking encoded strings.
+    6|       |pub(crate) const PREFIX: &str = "_N_";
+    7|       |
+    8|       |/// The delimiter between basic chars and encoded portion.
+    9|       |pub(crate) const DELIMITER: &str = "__";
+   10|       |
+   11|       |/// Check if a string is a valid XID identifier per UAX 31.
+   12|       |///
+   13|       |/// A valid identifier starts with XID_Start (or underscore) and continues
+   14|       |/// with XID_Continue characters. Single underscore `_` is valid.
+   15|       |///
+   16|       |/// # Examples
+   17|       |///
+   18|       |/// ```
+   19|       |/// use namecode::is_xid_identifier;
+   20|       |///
+   21|       |/// assert!(is_xid_identifier("foo"));
+   22|       |/// assert!(is_xid_identifier("_private"));
+   23|       |/// assert!(is_xid_identifier("café"));
+   24|       |///
+   25|       |/// assert!(!is_xid_identifier(""));
+   26|       |/// assert!(!is_xid_identifier("foo bar"));
+   27|       |/// assert!(!is_xid_identifier("123abc"));
+   28|       |/// ```
+   29|  2.95k|pub fn is_xid_identifier(s: &str) -> bool {
+   30|  2.95k|    let mut chars = s.chars();
+   31|       |
+   32|  2.95k|    match chars.next() {
+   33|      2|        None => false, // Empty string is not a valid identifier
+   34|  2.95k|        Some(first) => {
+   35|  2.95k|            if first == '_' {
+   36|       |                // Underscore alone or followed by XID_Continue is valid
+   37|    278|                chars.all(unicode_ident::is_xid_continue)
+   38|       |            } else {
+   39|  2.67k|                unicode_ident::is_xid_start(first) && chars.all(unicode_ident::is_xid_continue)
+                                                                    ^1.18k^1.18k
+   40|       |            }
+   41|       |        }
+   42|       |    }
+   43|  2.95k|}
+   44|       |
+   45|       |/// Check if a string needs encoding.
+   46|       |///
+   47|       |/// A string needs encoding if:
+   48|       |/// - It's not a valid XID identifier, OR
+   49|       |/// - It starts with `_N_` (prefix collision)
+   50|       |///
+   51|       |/// Note: Strings containing `__` do NOT need encoding just because of that.
+   52|       |/// The delimiter `__` only has meaning after the `_N_` prefix, so `foo__bar`
+   53|       |/// passes through unchanged since it can't be confused with an encoded string.
+   54|  2.66k|pub(crate) fn needs_encoding(s: &str) -> bool {
+   55|  2.66k|    if s.is_empty() {
+   56|      1|        return false;
+   57|  2.66k|    }
+   58|       |
+   59|       |    // Prefix collision - only strings starting with _N_ could be confused with encodings
+   60|  2.66k|    if s.starts_with(PREFIX) {
+   61|    264|        return true;
+   62|  2.40k|    }
+   63|       |
+   64|       |    // Not a valid XID identifier
+   65|  2.40k|    !is_xid_identifier(s)
+   66|  2.66k|}
+   67|       |
+   68|       |/// Encode a Unicode string into a valid UAX 31 identifier.
+   69|       |///
+   70|       |/// Returns input unchanged if already a valid XID identifier that doesn't
+   71|       |/// conflict with our encoding format.
+   72|       |///
+   73|       |/// # Examples
+   74|       |///
+   75|       |/// ```
+   76|       |/// use namecode::encode;
+   77|       |///
+   78|       |/// // Valid identifiers pass through
+   79|       |/// assert_eq!(encode("foo"), "foo");
+   80|       |/// assert_eq!(encode("café"), "café");
+   81|       |///
+   82|       |/// // Non-identifier characters trigger encoding
+   83|       |/// assert_eq!(encode("hello world"), "_N_helloworld__fa0b");
+   84|       |/// assert_eq!(encode("foo-bar"), "_N_foobar__da1d");
+   85|       |///
+   86|       |/// // Idempotent: encoding twice gives the same result
+   87|       |/// let encoded = encode("hello world");
+   88|       |/// assert_eq!(encode(&encoded), encoded);
+   89|       |/// ```
+   90|  2.40k|pub fn encode(input: &str) -> String {
+   91|       |    // Empty string passes through
+   92|  2.40k|    if input.is_empty() {
+   93|     12|        return String::new();
+   94|  2.39k|    }
+   95|       |
+   96|       |    // Check if encoding is needed
+   97|  2.39k|    if !needs_encoding(input) {
+   98|    327|        return input.to_string();
+   99|  2.06k|    }
+  100|       |
+  101|       |    // Check if already encoded - must verify it decodes AND re-encodes to same value
+  102|  2.06k|    if input.starts_with(PREFIX) {
+  103|    262|        if let Ok(decoded) = crate::decode::decode(input) {
+  104|       |            // Only treat as already-encoded if the decoded value would need encoding
+  105|       |            // and re-encoding produces the exact same result
+  106|    262|            if needs_encoding(&decoded) {
+  107|    258|                let re_encoded = encode_impl(&decoded);
+  108|    258|                if re_encoded == input {
+  109|    258|                    return input.to_string();
+  110|      0|                }
+  111|      4|            }
+  112|      0|        }
+  113|  1.80k|    }
+  114|       |
+  115|  1.81k|    encode_impl(input)
+  116|  2.40k|}
+  117|       |
+  118|       |/// Internal encoding implementation.
+  119|  2.06k|pub(crate) fn encode_impl(input: &str) -> String {
+  120|  2.06k|    let chars: Vec<char> = input.chars().collect();
+  121|       |
+  122|       |    // First pass: identify which characters are basic vs non-basic
+  123|       |    // A character is non-basic if:
+  124|       |    // 1. It's not XID_Continue, OR
+  125|       |    // 2. It's an underscore following another underscore (to avoid __ in basic)
+  126|  2.06k|    let mut is_basic: Vec<bool> = vec![true; chars.len()];
+  127|  2.06k|    let mut consecutive_underscores = 0;
+  128|       |
+  129|  35.5k|    for (i, &c) in chars.iter().enumerate() {
+                                 ^2.06k       ^2.06k
+  130|  35.5k|        if !unicode_ident::is_xid_continue(c) {
+  131|  25.0k|            is_basic[i] = false;
+  132|  25.0k|            consecutive_underscores = 0;
+  133|  25.0k|        } else if c == '_' {
+                                ^10.4k
+  134|     83|            consecutive_underscores += 1;
+  135|     83|            if consecutive_underscores >= 2 {
+  136|      0|                is_basic[i] = false;
+  137|     83|            }
+  138|  10.3k|        } else {
+  139|  10.3k|            consecutive_underscores = 0;
+  140|  10.3k|        }
+  141|       |    }
+  142|       |
+  143|       |    // Count non-basic characters
+  144|  35.5k|    let non_basic_count = is_basic.iter().filter(|&&b| !b).count();
+                      ^2.06k            ^2.06k          ^2.06k           ^2.06k
+  145|       |
+  146|       |    // If there are non-basic chars, ensure basic doesn't end with underscore
+  147|       |    // (to avoid ambiguity with delimiter __)
+  148|  2.06k|    if non_basic_count > 0 {
+  149|       |        // Find the last basic character index
+  150|  7.05k|        for i in (0..chars.len()).rev() {
+                               ^2.06k           ^2.06k
+  151|  7.05k|            if is_basic[i] {
+  152|  1.93k|                if chars[i] == '_' {
+  153|     21|                    is_basic[i] = false;
+  154|     21|                } else {
+  155|  1.91k|                    break;
+  156|       |                }
+  157|  5.12k|            }
+  158|       |        }
+  159|      8|    }
+  160|       |
+  161|       |    // Build basic string and non-basic list
+  162|       |    // We also need to ensure no consecutive underscores in the final basic string.
+  163|       |    // This can happen when non-consecutive underscores in input become adjacent after
+  164|       |    // removing non-basic characters.
+  165|  2.06k|    let mut basic = String::new();
+  166|  2.06k|    let mut non_basic: Vec<(usize, char)> = Vec::new();
+  167|  2.06k|    let mut last_was_underscore = false;
+  168|       |
+  169|  35.5k|    for (i, &c) in chars.iter().enumerate() {
+                                 ^2.06k       ^2.06k
+  170|  35.5k|        if is_basic[i] {
+  171|       |            // Check if this would create consecutive underscores in basic
+  172|  10.4k|            if c == '_' && last_was_underscore {
+                                         ^62
+  173|      6|                // Mark as non-basic to avoid __ in basic
+  174|      6|                non_basic.push((i, c));
+  175|  10.4k|            } else {
+  176|  10.4k|                basic.push(c);
+  177|  10.4k|                last_was_underscore = c == '_';
+  178|  10.4k|            }
+  179|  25.0k|        } else {
+  180|  25.0k|            non_basic.push((i, c));
+  181|  25.0k|            // Non-basic chars don't affect underscore tracking for basic string
+  182|  25.0k|        }
+  183|       |    }
+  184|       |
+  185|       |    // If no non-basic chars, we still need the prefix (for prefix collision or digit start)
+  186|  2.06k|    if non_basic.is_empty() {
+  187|      8|        return format!("{}{}", PREFIX, basic);
+  188|  2.06k|    }
+  189|       |
+  190|       |    // Encode non-basic chars
+  191|  2.06k|    let encoded = encode_insertions(&non_basic);
+  192|       |
+  193|  2.06k|    format!("{}{}{}{}", PREFIX, basic, DELIMITER, encoded)
+  194|  2.06k|}
+  195|       |
+  196|       |/// Encode non-basic character insertions.
+  197|       |///
+  198|       |/// Uses a simple encoding: for each insertion, encode position delta and codepoint
+  199|       |/// as variable-length integers using bias adaptation.
+  200|  2.06k|fn encode_insertions(insertions: &[(usize, char)]) -> String {
+  201|  2.06k|    let mut output = String::new();
+  202|  2.06k|    let mut bias: u32 = INITIAL_BIAS;
+  203|  2.06k|    let mut prev_pos: usize = 0;
+  204|       |
+  205|  25.0k|    for (idx, &(pos, c)) in insertions.iter().enumerate() {
+                                          ^2.06k     ^2.06k ^2.06k
+  206|       |        // Encode position delta (from previous position)
+  207|  25.0k|        let pos_delta = if idx == 0 { pos } else { pos - prev_pos - 1 };
+                                                    ^2.06k       ^23.0k
+  208|       |
+  209|  25.0k|        encode_varint(&mut output, pos_delta as u32, bias);
+  210|  25.0k|        bias = adapt_bias(pos_delta as u32, (idx + 1) as u32, idx == 0);
+  211|       |
+  212|       |        // Encode codepoint
+  213|  25.0k|        let cp = c as u32;
+  214|  25.0k|        encode_varint(&mut output, cp, bias);
+  215|  25.0k|        bias = adapt_bias(cp, (idx + 2) as u32, false);
+  216|       |
+  217|  25.0k|        prev_pos = pos;
+  218|       |    }
+  219|       |
+  220|  2.06k|    output
+  221|  2.06k|}
+  222|       |
+  223|       |/// Encode a value as a variable-length integer using bootstring encoding.
+  224|  50.1k|fn encode_varint(output: &mut String, mut value: u32, bias: u32) {
+  225|  50.1k|    let mut k: u32 = BASE;
+  226|       |
+  227|       |    loop {
+  228|   105k|        let t = threshold(k, bias);
+  229|       |
+  230|   105k|        if value < t {
+  231|  50.1k|            output.push(encode_digit(value).expect("value should be < BASE"));
+  232|  50.1k|            break;
+  233|  55.8k|        }
+  234|       |
+  235|  55.8k|        let digit = t + (value - t) % (BASE - t);
+  236|  55.8k|        output.push(encode_digit(digit).expect("digit should be < BASE"));
+  237|       |
+  238|  55.8k|        value = (value - t) / (BASE - t);
+  239|  55.8k|        k += BASE;
+  240|       |    }
+  241|  50.1k|}
+  242|       |
+  243|       |#[cfg(test)]
+  244|       |mod tests {
+  245|       |    use super::*;
+  246|       |
+  247|       |    #[test]
+  248|      1|    fn test_is_xid_identifier() {
+  249|       |        // Valid identifiers
+  250|      1|        assert!(is_xid_identifier("foo"));
+  251|      1|        assert!(is_xid_identifier("_foo"));
+  252|      1|        assert!(is_xid_identifier("foo123"));
+  253|      1|        assert!(is_xid_identifier("café"));
+  254|      1|        assert!(is_xid_identifier("名前"));
+  255|      1|        assert!(is_xid_identifier("_1"));
+  256|      1|        assert!(is_xid_identifier("_")); // Single underscore is valid
+  257|       |
+  258|       |        // Invalid identifiers
+  259|      1|        assert!(!is_xid_identifier("")); // Empty
+  260|      1|        assert!(!is_xid_identifier("123")); // Starts with digit
+  261|      1|        assert!(!is_xid_identifier("foo bar")); // Contains space
+  262|      1|        assert!(!is_xid_identifier("foo-bar")); // Contains hyphen
+  263|      1|    }
+  264|       |
+  265|       |    #[test]
+  266|      1|    fn test_needs_encoding() {
+  267|       |        // Don't need encoding
+  268|      1|        assert!(!needs_encoding("foo"));
+  269|      1|        assert!(!needs_encoding("café"));
+  270|      1|        assert!(!needs_encoding("")); // Empty passes through
+  271|      1|        assert!(!needs_encoding("foo__bar")); // Valid XID, no prefix collision
+  272|       |
+  273|       |        // Need encoding
+  274|      1|        assert!(needs_encoding("foo bar")); // Space
+  275|      1|        assert!(needs_encoding("foo-bar")); // Hyphen
+  276|      1|        assert!(needs_encoding("123foo")); // Starts with digit
+  277|      1|        assert!(needs_encoding("_N_test")); // Prefix collision
+  278|      1|        assert!(needs_encoding("_N_foo__bar")); // Prefix collision (__ irrelevant)
+  279|      1|    }
+  280|       |
+  281|       |    #[test]
+  282|      1|    fn test_encode_valid_xid() {
+  283|       |        // Valid XID identifiers pass through unchanged
+  284|      1|        assert_eq!(encode("foo"), "foo");
+  285|      1|        assert_eq!(encode("café"), "café");
+  286|      1|        assert_eq!(encode("名前"), "名前");
+  287|      1|        assert_eq!(encode("foo123"), "foo123");
+  288|      1|    }
+  289|       |
+  290|       |    #[test]
+  291|      1|    fn test_encode_empty() {
+  292|      1|        assert_eq!(encode(""), "");
+  293|      1|    }
+  294|       |
+  295|       |    #[test]
+  296|      1|    fn test_encode_with_space() {
+  297|      1|        let encoded = encode("hello world");
+  298|      1|        assert!(encoded.starts_with(PREFIX));
+  299|      1|        assert!(encoded.contains(DELIMITER));
+  300|       |        // Basic chars should be extracted
+  301|      1|        assert!(encoded.contains("helloworld"));
+  302|      1|    }
+  303|       |
+  304|       |    #[test]
+  305|      1|    fn test_encode_with_hyphen() {
+  306|      1|        let encoded = encode("foo-bar");
+  307|      1|        assert!(encoded.starts_with(PREFIX));
+  308|      1|        assert!(encoded.contains("foobar"));
+  309|      1|    }
+  310|       |
+  311|       |    #[test]
+  312|      1|    fn test_encode_starts_with_digit() {
+  313|      1|        let encoded = encode("123foo");
+  314|      1|        assert!(encoded.starts_with(PREFIX));
+  315|      1|    }
+  316|       |
+  317|       |    #[test]
+  318|      1|    fn test_encode_prefix_collision() {
+  319|      1|        let encoded = encode("_N_test");
+  320|      1|        assert!(encoded.starts_with(PREFIX));
+  321|       |        // Should NOT equal the input (would be ambiguous)
+  322|      1|        assert_ne!(encoded, "_N_test");
+  323|      1|    }
+  324|       |
+  325|       |    #[test]
+  326|      1|    fn test_encode_double_underscore_passthrough() {
+  327|       |        // foo__bar is a valid XID and doesn't start with _N_, so it passes through
+  328|      1|        assert_eq!(encode("foo__bar"), "foo__bar");
+  329|      1|        assert_eq!(encode("a__b__c"), "a__b__c");
+  330|      1|    }
+  331|       |
+  332|       |    #[test]
+  333|      1|    fn test_encode_prefix_with_double_underscore() {
+  334|       |        // _N_foo__bar starts with _N_, but it happens to be a valid encoding
+  335|       |        // (of a string with a control character). Due to idempotency, it's returned unchanged.
+  336|      1|        let encoded = encode("_N_foo__bar");
+  337|      1|        assert!(encoded.starts_with(PREFIX));
+  338|       |        // This is returned unchanged because it's a valid encoding
+  339|      1|        assert_eq!(encoded, "_N_foo__bar");
+  340|       |        // Verify it actually decodes (to something with a control char)
+  341|      1|        let decoded = crate::decode::decode(&encoded).unwrap();
+  342|      1|        assert_ne!(decoded, "_N_foo__bar"); // The decoded value is different
+  343|      1|    }
+  344|       |
+  345|       |    #[test]
+  346|      1|    fn test_encode_trailing_underscore() {
+  347|       |        // "_ " should encode without trailing underscore in basic
+  348|      1|        let encoded = encode("_ ");
+  349|      1|        assert!(encoded.starts_with(PREFIX));
+  350|       |        // Should have delimiter since there are non-basic chars
+  351|      1|        assert!(encoded.contains(DELIMITER));
+  352|       |        // The basic part (between _N_ and __) should not end with underscore
+  353|      1|        let after_prefix = &encoded[PREFIX.len()..];
+  354|      1|        let delim_pos = after_prefix.find(DELIMITER).unwrap();
+  355|      1|        let basic = &after_prefix[..delim_pos];
+  356|      1|        assert!(
+  357|      1|            !basic.ends_with('_'),
+  358|      0|            "basic '{}' ends with underscore",
+  359|       |            basic
+  360|       |        );
+  361|      1|    }
+  362|       |}
+
+/Users/akesling/Devel/AdjectiveNoun/structfs/namecode/src/lib.rs:
+    1|       |//! Namecode: Encode Unicode strings as valid programming language identifiers.
+    2|       |//!
+    3|       |//! Namecode encodes arbitrary Unicode strings into valid programming language
+    4|       |//! identifiers that work across Rust, Go, JavaScript, and Python. Think
+    5|       |//! "Punycode for variable names".
+    6|       |//!
+    7|       |//! # Key Properties
+    8|       |//!
+    9|       |//! - Encode/decode in O(n) time
+   10|       |//! - Idempotent: `encode(encode(x)) == encode(x)`
+   11|       |//! - Strict roundtrip: `encode(decode(s)) == s` for valid encodings
+   12|       |//!
+   13|       |//! # Examples
+   14|       |//!
+   15|       |//! ```
+   16|       |//! use namecode::{encode, decode};
+   17|       |//!
+   18|       |//! // Valid XID identifiers pass through unchanged
+   19|       |//! assert_eq!(encode("foo"), "foo");
+   20|       |//! assert_eq!(encode("café"), "café");
+   21|       |//! assert_eq!(encode("名前"), "名前");
+   22|       |//!
+   23|       |//! // Non-XID characters get encoded
+   24|       |//! let encoded = encode("hello world");
+   25|       |//! assert!(encoded.starts_with("_N_"));
+   26|       |//! assert_eq!(decode(&encoded).unwrap(), "hello world");
+   27|       |//!
+   28|       |//! // Roundtrip property
+   29|       |//! let original = "foo-bar";
+   30|       |//! let encoded = encode(original);
+   31|       |//! assert_eq!(decode(&encoded).unwrap(), original);
+   32|       |//! ```
+   33|       |
+   34|       |#![warn(missing_docs)]
+   35|       |
+   36|       |mod bootstring;
+   37|       |mod decode;
+   38|       |mod encode;
+   39|       |
+   40|       |pub use decode::decode;
+   41|       |pub use encode::{encode, is_xid_identifier};
+   42|       |
+   43|       |/// Errors that can occur during Namecode decoding.
+   44|       |///
+   45|       |/// # Examples
+   46|       |///
+   47|       |/// ```
+   48|       |/// use namecode::{decode, DecodeError};
+   49|       |///
+   50|       |/// match decode("not_encoded") {
+   51|       |///     Err(DecodeError::NotEncoded) => { /* expected */ }
+   52|       |///     other => panic!("unexpected: {:?}", other),
+   53|       |/// }
+   54|       |/// ```
+   55|       |#[derive(Debug, Clone, PartialEq, Eq)]
+   56|       |pub enum DecodeError {
+   57|       |    /// Input doesn't have the _N_ prefix.
+   58|       |    NotEncoded,
+   59|       |    /// Invalid character in encoded portion.
+   60|       |    InvalidDigit(char),
+   61|       |    /// Encoded data ended unexpectedly.
+   62|       |    UnexpectedEnd,
+   63|       |    /// Decoded to invalid Unicode codepoint.
+   64|       |    InvalidCodepoint(u32),
+   65|       |    /// Overflow during delta calculation.
+   66|       |    Overflow,
+   67|       |}
+   68|       |
+   69|       |impl std::fmt::Display for DecodeError {
+   70|      5|    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   71|      5|        match self {
+   72|      1|            DecodeError::NotEncoded => write!(f, "input is not a namecode-encoded string"),
+   73|      1|            DecodeError::InvalidDigit(c) => write!(f, "invalid digit in encoded portion: '{}'", c),
+   74|      1|            DecodeError::UnexpectedEnd => write!(f, "encoded data ended unexpectedly"),
+   75|      1|            DecodeError::InvalidCodepoint(cp) => write!(f, "invalid Unicode codepoint: {}", cp),
+   76|      1|            DecodeError::Overflow => write!(f, "overflow during decoding"),
+   77|       |        }
+   78|      5|    }
+   79|       |}
+   80|       |
+   81|       |impl std::error::Error for DecodeError {}
+   82|       |
+   83|       |#[cfg(test)]
+   84|       |mod tests {
+   85|       |    use super::*;
+   86|       |
+   87|       |    // ==================== Basic Encoding Tests ====================
+   88|       |
+   89|       |    #[test]
+   90|      1|    fn test_encode_valid_xid_ascii() {
+   91|      1|        assert_eq!(encode("foo"), "foo");
+   92|      1|        assert_eq!(encode("bar123"), "bar123");
+   93|      1|        assert_eq!(encode("_private"), "_private");
+   94|      1|        assert_eq!(encode("CamelCase"), "CamelCase");
+   95|      1|    }
+   96|       |
+   97|       |    #[test]
+   98|      1|    fn test_encode_valid_xid_unicode() {
+   99|      1|        assert_eq!(encode("café"), "café");
+  100|      1|        assert_eq!(encode("名前"), "名前");
+  101|      1|        assert_eq!(encode("привет"), "привет");
+  102|      1|    }
+  103|       |
+  104|       |    #[test]
+  105|      1|    fn test_encode_empty() {
+  106|      1|        assert_eq!(encode(""), "");
+  107|      1|    }
+  108|       |
+  109|       |    #[test]
+  110|      1|    fn test_encode_with_space() {
+  111|      1|        let encoded = encode("hello world");
+  112|      1|        assert!(encoded.starts_with("_N_"));
+  113|      1|    }
+  114|       |
+  115|       |    #[test]
+  116|      1|    fn test_encode_with_hyphen() {
+  117|      1|        let encoded = encode("foo-bar");
+  118|      1|        assert!(encoded.starts_with("_N_"));
+  119|      1|    }
+  120|       |
+  121|       |    #[test]
+  122|      1|    fn test_encode_with_multiple_non_basic() {
+  123|      1|        let encoded = encode("a b-c");
+  124|      1|        assert!(encoded.starts_with("_N_"));
+  125|      1|    }
+  126|       |
+  127|       |    #[test]
+  128|      1|    fn test_encode_starts_with_digit() {
+  129|      1|        let encoded = encode("123foo");
+  130|      1|        assert!(encoded.starts_with("_N_"));
+  131|      1|    }
+  132|       |
+  133|       |    #[test]
+  134|      1|    fn test_encode_just_underscore() {
+  135|       |        // Single underscore is a valid identifier, passes through
+  136|      1|        assert_eq!(encode("_"), "_");
+  137|      1|    }
+  138|       |
+  139|       |    // ==================== Prefix/Delimiter Collision Tests ====================
+  140|       |
+  141|       |    #[test]
+  142|      1|    fn test_encode_prefix_collision() {
+  143|      1|        let encoded = encode("_N_test");
+  144|      1|        assert!(encoded.starts_with("_N_"));
+  145|       |        // Should not equal the input (would be ambiguous)
+  146|      1|        assert_ne!(encoded, "_N_test");
+  147|      1|    }
+  148|       |
+  149|       |    #[test]
+  150|      1|    fn test_encode_double_underscore_passthrough() {
+  151|       |        // foo__bar is a valid XID and doesn't start with _N_, so it passes through
+  152|      1|        assert_eq!(encode("foo__bar"), "foo__bar");
+  153|      1|    }
+  154|       |
+  155|       |    // ==================== Roundtrip Tests ====================
+  156|       |
+  157|       |    #[test]
+  158|      1|    fn test_roundtrip_simple() {
+  159|      1|        let cases = vec![
+  160|       |            "hello world",
+  161|      1|            "foo-bar",
+  162|      1|            "a b-c",
+  163|      1|            "test@example",
+  164|      1|            "with\ttab",
+  165|      1|            "new\nline",
+  166|       |        ];
+  167|       |
+  168|      7|        for original in cases {
+                          ^6
+  169|      6|            let encoded = encode(original);
+  170|      6|            let decoded = decode(&encoded)
+  171|      6|                .unwrap_or_else(|e| panic!("decode failed for {}: {:?}", original, e));
+                                                  ^0     ^0
+  172|      6|            assert_eq!(
+  173|       |                decoded, original,
+  174|      0|                "roundtrip failed for: {} (encoded: {})",
+  175|       |                original, encoded
+  176|       |            );
+  177|       |        }
+  178|      1|    }
+  179|       |
+  180|       |    #[test]
+  181|      1|    fn test_roundtrip_unicode_non_xid() {
+  182|      1|        let cases = vec!["hello→world", "price: $100", "50% off"];
+  183|       |
+  184|      4|        for original in cases {
+                          ^3
+  185|      3|            let encoded = encode(original);
+  186|      3|            let decoded = decode(&encoded)
+  187|      3|                .unwrap_or_else(|e| panic!("decode failed for {}: {:?}", original, e));
+                                                  ^0     ^0
+  188|      3|            assert_eq!(decoded, original);
+  189|       |        }
+  190|      1|    }
+  191|       |
+  192|       |    // ==================== Idempotency Tests ====================
+  193|       |
+  194|       |    #[test]
+  195|      1|    fn test_idempotent_valid_xid() {
+  196|      1|        let s = "foo";
+  197|      1|        assert_eq!(encode(&encode(s)), encode(s));
+  198|      1|    }
+  199|       |
+  200|       |    #[test]
+  201|      1|    fn test_idempotent_encoded() {
+  202|      1|        let s = "hello world";
+  203|      1|        let once = encode(s);
+  204|      1|        let twice = encode(&once);
+  205|      1|        assert_eq!(once, twice);
+  206|      1|    }
+  207|       |
+  208|       |    // ==================== Identity Tests ====================
+  209|       |
+  210|       |    #[test]
+  211|      1|    fn test_identity_encode_decode() {
+  212|       |        // For valid encodings: encode(decode(s)) == s
+  213|      1|        let original = "hello world";
+  214|      1|        let encoded = encode(original);
+  215|      1|        let decoded = decode(&encoded).unwrap();
+  216|      1|        let re_encoded = encode(&decoded);
+  217|      1|        assert_eq!(re_encoded, encoded);
+  218|      1|    }
+  219|       |
+  220|       |    // ==================== Decode Error Tests ====================
+  221|       |
+  222|       |    #[test]
+  223|      1|    fn test_decode_not_encoded() {
+  224|      1|        assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
+  225|      1|        assert_eq!(decode("hello world"), Err(DecodeError::NotEncoded));
+  226|      1|    }
+  227|       |
+  228|       |    #[test]
+  229|      1|    fn test_decode_error_display() {
+  230|       |        // Test Display implementation for all error variants
+  231|      1|        assert_eq!(
+  232|      1|            DecodeError::NotEncoded.to_string(),
+  233|       |            "input is not a namecode-encoded string"
+  234|       |        );
+  235|      1|        assert_eq!(
+  236|      1|            DecodeError::InvalidDigit('X').to_string(),
+  237|       |            "invalid digit in encoded portion: 'X'"
+  238|       |        );
+  239|      1|        assert_eq!(
+  240|      1|            DecodeError::UnexpectedEnd.to_string(),
+  241|       |            "encoded data ended unexpectedly"
+  242|       |        );
+  243|      1|        assert_eq!(
+  244|      1|            DecodeError::InvalidCodepoint(0xFFFFFFFF).to_string(),
+  245|       |            "invalid Unicode codepoint: 4294967295"
+  246|       |        );
+  247|      1|        assert_eq!(
+  248|      1|            DecodeError::Overflow.to_string(),
+  249|       |            "overflow during decoding"
+  250|       |        );
+  251|      1|    }
+  252|       |
+  253|       |    #[test]
+  254|      1|    fn test_decode_invalid_digit() {
+  255|       |        // The encoded portion contains invalid characters (6-9, symbols)
+  256|       |        // Note: uppercase letters are treated as lowercase in decode_digit
+  257|      1|        let result = decode("_N_abc__6");
+  258|      1|        assert!(
+  259|      1|            matches!(result, Err(DecodeError::InvalidDigit(_))),
+                          ^0
+  260|      0|            "expected InvalidDigit, got {:?}",
+  261|       |            result
+  262|       |        );
+  263|      1|    }
+  264|       |
+  265|       |    #[test]
+  266|      1|    fn test_decode_unexpected_end() {
+  267|       |        // Create a malformed encoding where the varint is incomplete
+  268|       |        // A digit >= threshold signals "more digits coming", but then we end
+  269|       |        // With initial bias of 72, threshold(32, 72) = 1, so any digit >= 1 needs more
+  270|      1|        let result = decode("_N_abc__z"); // 'z' = 25, which is >= threshold
+  271|      1|        assert!(matches!(result, Err(DecodeError::UnexpectedEnd)));
+                              ^0
+  272|      1|    }
+  273|       |
+  274|       |    // ==================== is_xid_identifier Tests ====================
+  275|       |
+  276|       |    #[test]
+  277|      1|    fn test_is_xid_identifier() {
+  278|      1|        assert!(is_xid_identifier("foo"));
+  279|      1|        assert!(is_xid_identifier("_foo"));
+  280|      1|        assert!(is_xid_identifier("foo123"));
+  281|      1|        assert!(is_xid_identifier("café"));
+  282|      1|        assert!(is_xid_identifier("名前"));
+  283|      1|        assert!(is_xid_identifier("_")); // Single underscore is valid
+  284|       |
+  285|      1|        assert!(!is_xid_identifier(""));
+  286|      1|        assert!(!is_xid_identifier("123"));
+  287|      1|        assert!(!is_xid_identifier("foo bar"));
+  288|      1|        assert!(!is_xid_identifier("foo-bar"));
+  289|      1|    }
+  290|       |
+  291|       |    // ==================== Edge Cases ====================
+  292|       |
+  293|       |    #[test]
+  294|      1|    fn test_all_non_basic() {
+  295|      1|        let original = "   "; // All spaces
+  296|      1|        let encoded = encode(original);
+  297|      1|        assert!(encoded.starts_with("_N_"));
+  298|      1|        let decoded = decode(&encoded).expect("decode failed");
+  299|      1|        assert_eq!(decoded, original);
+  300|      1|    }
+  301|       |
+  302|       |    #[test]
+  303|      1|    fn test_single_char() {
+  304|       |        // Single basic char
+  305|      1|        assert_eq!(encode("a"), "a");
+  306|       |
+  307|       |        // Single non-basic char
+  308|      1|        let encoded = encode(" ");
+  309|      1|        assert!(encoded.starts_with("_N_"));
+  310|      1|        assert_eq!(decode(&encoded).unwrap(), " ");
+  311|      1|    }
+  312|       |
+  313|       |    #[test]
+  314|      1|    fn test_very_long_basic() {
+  315|      1|        let long = "a".repeat(1000);
+  316|      1|        assert_eq!(encode(&long), long);
+  317|      1|    }
+  318|       |
+  319|       |    // ==================== Additional Edge Cases ====================
+  320|       |
+  321|       |    #[test]
+  322|      1|    fn test_passthrough_double_underscore() {
+  323|       |        // foo__bar passes through unchanged (valid XID, no _N_ prefix)
+  324|      1|        let original = "foo__bar";
+  325|      1|        let encoded = encode(original);
+  326|      1|        assert_eq!(encoded, original);
+  327|       |        // decode fails since it's not encoded
+  328|      1|        assert!(decode(&encoded).is_err());
+  329|      1|    }
+  330|       |
+  331|       |    #[test]
+  332|      1|    fn test_roundtrip_prefix_collision() {
+  333|      1|        let original = "_N_test";
+  334|      1|        let encoded = encode(original);
+  335|      1|        let decoded = decode(&encoded).unwrap();
+  336|      1|        assert_eq!(decoded, original);
+  337|      1|    }
+  338|       |
+  339|       |    #[test]
+  340|      1|    fn test_multiple_underscores_passthrough() {
+  341|       |        // All these are valid XID identifiers and don't start with _N_
+  342|      1|        let cases = vec!["a__b", "a___b", "a____b", "__a", "___a", "____a"];
+  343|       |
+  344|      7|        for original in cases {
+                          ^6
+  345|      6|            let encoded = encode(original);
+  346|      6|            assert_eq!(encoded, original, "should passthrough for: {}", original);
+                                                        ^0
+  347|       |        }
+  348|      1|    }
+  349|       |
+  350|       |    #[test]
+  351|      1|    fn test_just_underscores_passthrough() {
+  352|       |        // Multiple underscores ARE valid XID identifiers (underscore followed by XID_Continue,
+  353|       |        // and underscore IS XID_Continue). They pass through unchanged.
+  354|      1|        let cases = vec!["__", "___", "____"];
+  355|       |
+  356|      4|        for original in cases {
+                          ^3
+  357|      3|            let encoded = encode(original);
+  358|      3|            assert_eq!(encoded, original, "should passthrough: {}", original);
+                                                        ^0
+  359|       |        }
+  360|      1|    }
+  361|       |
+  362|       |    #[test]
+  363|      1|    fn test_single_underscore_passthrough() {
+  364|       |        // Single underscore is a valid identifier, passes through
+  365|      1|        assert_eq!(encode("_"), "_");
+  366|      1|    }
+  367|       |}
+  368|       |
+  369|       |#[cfg(test)]
+  370|       |mod proptests {
+  371|       |    use super::*;
+  372|       |    use proptest::prelude::*;
+  373|       |
+  374|       |    proptest! {
+  375|       |        /// Roundtrip property: for strings that need encoding, decode(encode(s)) == s
+  376|       |        #[test]
+  377|       |        fn prop_roundtrip(s in ".*") {
+  378|       |            if !s.is_empty() {
+  379|       |                let encoded = encode(&s);
+  380|       |                // Only try to decode if it was actually encoded (has prefix)
+  381|       |                if encoded.starts_with("_N_") {
+  382|      0|                    let decoded = decode(&encoded).unwrap_or_else(|e| {
+  383|      0|                        panic!("decode failed for input '{}' with encoding '{}': {:?}", &s, &encoded, e)
+  384|       |                    });
+  385|       |                    prop_assert_eq!(&decoded, &s, "roundtrip failed for: {}", &s);
+  386|       |                } else {
+  387|       |                    // If not encoded, the output should equal input (passthrough)
+  388|       |                    prop_assert_eq!(&encoded, &s, "passthrough failed for: {}", &s);
+  389|       |                }
+  390|       |            }
+  391|       |        }
+  392|       |
+  393|       |        /// Idempotency: encode(encode(x)) == encode(x)
+  394|       |        #[test]
+  395|       |        fn prop_idempotent(s in ".*") {
+  396|       |            let once = encode(&s);
+  397|       |            let twice = encode(&once);
+  398|       |            prop_assert_eq!(&once, &twice, "idempotency failed for: {}", &s);
+  399|       |        }
+  400|       |
+  401|       |        /// Identity: for encoded strings, encode(decode(s)) == s
+  402|       |        #[test]
+  403|       |        fn prop_identity(s in ".*") {
+  404|       |            if !s.is_empty() {
+  405|       |                let encoded = encode(&s);
+  406|       |                // Only test identity for actually encoded strings
+  407|       |                if encoded.starts_with("_N_") {
+  408|       |                    let decoded = decode(&encoded).unwrap();
+  409|       |                    let re_encoded = encode(&decoded);
+  410|       |                    prop_assert_eq!(&re_encoded, &encoded, "identity failed for: {}", &s);
+  411|       |                }
+  412|       |            }
+  413|       |        }
+  414|       |
+  415|       |        /// Valid output: encode produces valid XID identifiers (for non-empty)
+  416|       |        #[test]
+  417|       |        fn prop_valid_output(s in ".+") {
+  418|       |            let encoded = encode(&s);
+  419|       |            prop_assert!(
+  420|       |                is_xid_identifier(&encoded),
+  421|       |                "encode('{}') = '{}' is not a valid XID identifier",
+  422|       |                &s, &encoded
+  423|       |            );
+  424|       |        }
+  425|       |
+  426|       |        /// XID passthrough: valid XID identifiers that don't start with _N_ pass through
+  427|       |        #[test]
+  428|       |        fn prop_xid_passthrough(s in "[a-zA-Z][a-zA-Z0-9_]*") {
+  429|       |            // Valid XID identifiers that don't start with _N_ pass through unchanged
+  430|       |            // (including those with __ in them)
+  431|       |            if !s.starts_with("_N_") && is_xid_identifier(&s) {
+  432|       |                let encoded = encode(&s);
+  433|       |                prop_assert_eq!(&encoded, &s, "XID passthrough failed for: {}", &s);
+  434|       |            }
+  435|       |        }
+  436|       |
+  437|       |        /// Roundtrip with various character classes (strings that need encoding)
+  438|       |        #[test]
+  439|       |        fn prop_roundtrip_mixed(s in "[a-zA-Z0-9 \\-\\.,!@#$%^&*()]{1,50}") {
+  440|       |            // Ensure string contains at least one non-XID char
+  441|    558|            if s.chars().any(|c| !unicode_ident::is_xid_continue(c)) {
+  442|       |                let encoded = encode(&s);
+  443|       |                prop_assert!(encoded.starts_with("_N_"), "expected encoding for: {}", &s);
+  444|       |                let decoded =
+  445|      0|                    decode(&encoded).unwrap_or_else(|e| panic!("decode failed for {}: {:?}", &s, e));
+  446|       |                prop_assert_eq!(&decoded, &s);
+  447|       |            }
+  448|       |        }
+  449|       |
+  450|       |        /// Roundtrip with Unicode (strings that need encoding due to non-XID chars)
+  451|       |        #[test]
+  452|       |        fn prop_roundtrip_unicode(s in "[a-z ]{1,10}") {
+  453|       |            // Use a simple pattern with spaces to ensure encoding happens
+  454|       |            if !s.is_empty() && s.contains(' ') {
+  455|       |                let encoded = encode(&s);
+  456|       |                prop_assert!(encoded.starts_with("_N_"));
+  457|       |                let decoded =
+  458|      0|                    decode(&encoded).unwrap_or_else(|e| panic!("decode failed for {}: {:?}", &s, e));
+  459|       |                prop_assert_eq!(&decoded, &s);
+  460|       |            }
+  461|       |        }
+  462|       |    }
+  463|       |}
+  464|       |
+  465|       |/// Kani verification harnesses for formal verification of namecode properties.
+  466|       |///
+  467|       |/// Run with: `cargo kani --package namecode`
+  468|       |#[cfg(kani)]
+  469|       |mod kani_proofs {
+  470|       |    use super::*;
+  471|       |    use crate::bootstring::{
+  472|       |        adapt_bias, decode_digit, encode_digit, threshold, BASE, T_MAX, T_MIN,
+  473|       |    };
+  474|       |
+  475|       |    // ==================== Bootstring Function Proofs ====================
+  476|       |
+  477|       |    /// Verify encode_digit returns Some for valid inputs (0..32) and None otherwise
+  478|       |    #[kani::proof]
+  479|       |    fn verify_encode_digit_valid_range() {
+  480|       |        let digit: u32 = kani::any();
+  481|       |
+  482|       |        let result = encode_digit(digit);
+  483|       |
+  484|       |        if digit < 32 {
+  485|       |            assert!(
+  486|       |                result.is_some(),
+  487|       |                "encode_digit should return Some for digit < 32"
+  488|       |            );
+  489|       |            let c = result.unwrap();
+  490|       |            // Verify the character is in expected range
+  491|       |            assert!(
+  492|       |                ('a'..='z').contains(&c) || ('0'..='5').contains(&c),
+  493|       |                "encoded digit should be a-z or 0-5"
+  494|       |            );
+  495|       |        } else {
+  496|       |            assert!(
+  497|       |                result.is_none(),
+  498|       |                "encode_digit should return None for digit >= 32"
+  499|       |            );
+  500|       |        }
+  501|       |    }
+  502|       |
+  503|       |    /// Verify decode_digit returns correct values for valid inputs
+  504|       |    #[kani::proof]
+  505|       |    fn verify_decode_digit_valid_range() {
+  506|       |        let c: char = kani::any();
+  507|       |
+  508|       |        let result = decode_digit(c);
+  509|       |
+  510|       |        match c {
+  511|       |            'a'..='z' => {
+  512|       |                assert!(result.is_some());
+  513|       |                assert!(result.unwrap() < 26);
+  514|       |            }
+  515|       |            'A'..='Z' => {
+  516|       |                // Case insensitive
+  517|       |                assert!(result.is_some());
+  518|       |                assert!(result.unwrap() < 26);
+  519|       |            }
+  520|       |            '0'..='5' => {
+  521|       |                assert!(result.is_some());
+  522|       |                let d = result.unwrap();
+  523|       |                assert!(d >= 26 && d < 32);
+  524|       |            }
+  525|       |            _ => {
+  526|       |                assert!(result.is_none());
+  527|       |            }
+  528|       |        }
+  529|       |    }
+  530|       |
+  531|       |    /// Verify encode_digit and decode_digit are inverses
+  532|       |    #[kani::proof]
+  533|       |    fn verify_digit_roundtrip() {
+  534|       |        let digit: u32 = kani::any();
+  535|       |        kani::assume(digit < 32);
+  536|       |
+  537|       |        let encoded = encode_digit(digit);
+  538|       |        assert!(encoded.is_some());
+  539|       |
+  540|       |        let decoded = decode_digit(encoded.unwrap());
+  541|       |        assert!(decoded.is_some());
+  542|       |        assert_eq!(
+  543|       |            decoded.unwrap(),
+  544|       |            digit,
+  545|       |            "digit roundtrip should be identity"
+  546|       |        );
+  547|       |    }
+  548|       |
+  549|       |    /// Verify threshold returns values in expected range
+  550|       |    #[kani::proof]
+  551|       |    fn verify_threshold_bounds() {
+  552|       |        let k: u32 = kani::any();
+  553|       |        let bias: u32 = kani::any();
+  554|       |
+  555|       |        // Avoid overflow in threshold calculation
+  556|       |        kani::assume(k <= 10000);
+  557|       |        kani::assume(bias <= 10000);
+  558|       |
+  559|       |        let t = threshold(k, bias);
+  560|       |
+  561|       |        assert!(t >= T_MIN, "threshold should be >= T_MIN");
+  562|       |        assert!(t <= T_MAX, "threshold should be <= T_MAX");
+  563|       |    }
+  564|       |
+  565|       |    /// Verify adapt_bias doesn't overflow and returns reasonable values
+  566|       |    #[kani::proof]
+  567|       |    fn verify_adapt_bias_no_overflow() {
+  568|       |        let delta: u32 = kani::any();
+  569|       |        let num_points: u32 = kani::any();
+  570|       |        let first_time: bool = kani::any();
+  571|       |
+  572|       |        // Constrain to reasonable values to avoid very long verification
+  573|       |        kani::assume(delta <= 1_000_000);
+  574|       |        kani::assume(num_points > 0 && num_points <= 10000);
+  575|       |
+  576|       |        let bias = adapt_bias(delta, num_points, first_time);
+  577|       |
+  578|       |        // Bias should be a reasonable value (not overflowed)
+  579|       |        assert!(bias < 1_000_000, "bias should be bounded");
+  580|       |    }
+  581|       |
+  582|       |    // ==================== XID Identifier Proofs ====================
+  583|       |
+  584|       |    /// Verify is_xid_identifier returns false for empty string
+  585|       |    #[kani::proof]
+  586|       |    fn verify_is_xid_empty() {
+  587|       |        assert!(!is_xid_identifier(""));
+  588|       |    }
+  589|       |
+  590|       |    /// Verify is_xid_identifier returns true for single underscore
+  591|       |    #[kani::proof]
+  592|       |    fn verify_is_xid_single_underscore() {
+  593|       |        assert!(is_xid_identifier("_"));
+  594|       |    }
+  595|       |
+  596|       |    // ==================== Encode/Decode Proofs ====================
+  597|       |
+  598|       |    /// Verify encode returns empty for empty input
+  599|       |    #[kani::proof]
+  600|       |    fn verify_encode_empty() {
+  601|       |        let result = encode("");
+  602|       |        assert!(result.is_empty());
+  603|       |    }
+  604|       |
+  605|       |    /// Verify decode fails for non-encoded strings
+  606|       |    #[kani::proof]
+  607|       |    fn verify_decode_requires_prefix() {
+  608|       |        // Any string not starting with _N_ should fail
+  609|       |        let result = decode("abc");
+  610|       |        assert!(matches!(result, Err(DecodeError::NotEncoded)));
+  611|       |    }
+  612|       |
+  613|       |    /// Verify idempotency for simple ASCII
+  614|       |    #[kani::proof]
+  615|       |    fn verify_idempotent_ascii() {
+  616|       |        // Test with a simple string that needs encoding
+  617|       |        let input = "a b";
+  618|       |        let once = encode(input);
+  619|       |        let twice = encode(&once);
+  620|       |        assert_eq!(once, twice, "encode should be idempotent");
+  621|       |    }
+  622|       |
+  623|       |    /// Verify roundtrip for simple ASCII with space
+  624|       |    #[kani::proof]
+  625|       |    fn verify_roundtrip_simple() {
+  626|       |        let input = "hello world";
+  627|       |        let encoded = encode(input);
+  628|       |        let decoded = decode(&encoded);
+  629|       |        assert!(decoded.is_ok());
+  630|       |        assert_eq!(decoded.unwrap(), input);
+  631|       |    }
+  632|       |
+  633|       |    /// Verify roundtrip for string with hyphen
+  634|       |    #[kani::proof]
+  635|       |    fn verify_roundtrip_hyphen() {
+  636|       |        let input = "foo-bar";
+  637|       |        let encoded = encode(input);
+  638|       |        let decoded = decode(&encoded);
+  639|       |        assert!(decoded.is_ok());
+  640|       |        assert_eq!(decoded.unwrap(), input);
+  641|       |    }
+  642|       |
+  643|       |    /// Verify double underscore passes through (valid XID, no _N_ prefix)
+  644|       |    #[kani::proof]
+  645|       |    fn verify_double_underscore_passthrough() {
+  646|       |        let input = "a__b";
+  647|       |        let encoded = encode(input);
+  648|       |        // Should pass through unchanged (valid XID, no prefix collision)
+  649|       |        assert_eq!(encoded, input, "a__b should pass through");
+  650|       |    }
+  651|       |
+  652|       |    /// Verify roundtrip for prefix collision
+  653|       |    #[kani::proof]
+  654|       |    fn verify_roundtrip_prefix_collision() {
+  655|       |        let input = "_N_x";
+  656|       |        let encoded = encode(input);
+  657|       |        // Should NOT equal the input
+  658|       |        assert_ne!(encoded, input);
+  659|       |        let decoded = decode(&encoded);
+  660|       |        assert!(decoded.is_ok());
+  661|       |        assert_eq!(decoded.unwrap(), input);
+  662|       |    }
+  663|       |
+  664|       |    /// Verify valid XID identifiers pass through unchanged
+  665|       |    #[kani::proof]
+  666|       |    fn verify_xid_passthrough() {
+  667|       |        let input = "validIdentifier";
+  668|       |        let encoded = encode(input);
+  669|       |        assert_eq!(encoded, input, "valid XID should pass through");
+  670|       |    }
+  671|       |
+  672|       |    /// Verify encode output is always valid XID (for non-empty input)
+  673|       |    #[kani::proof]
+  674|       |    fn verify_encode_produces_valid_xid() {
+  675|       |        let input = "test with spaces";
+  676|       |        let encoded = encode(input);
+  677|       |        assert!(
+  678|       |            is_xid_identifier(&encoded),
+  679|       |            "encode should produce valid XID"
+  680|       |        );
+  681|       |    }
+  682|       |
+  683|       |    // ==================== Bounded Input Proofs ====================
+  684|       |
+  685|       |    /// Verify encode doesn't panic for any single ASCII character
+  686|       |    #[kani::proof]
+  687|       |    fn verify_encode_single_ascii_no_panic() {
+  688|       |        let byte: u8 = kani::any();
+  689|       |        kani::assume(byte < 128); // ASCII only
+  690|       |
+  691|       |        let s = String::from(byte as char);
+  692|       |        let _ = encode(&s); // Should not panic
+  693|       |    }
+  694|       |
+  695|       |    /// Verify encode doesn't panic for two ASCII characters
+  696|       |    #[kani::proof]
+  697|       |    fn verify_encode_two_ascii_no_panic() {
+  698|       |        let b1: u8 = kani::any();
+  699|       |        let b2: u8 = kani::any();
+  700|       |        kani::assume(b1 < 128 && b2 < 128);
+  701|       |
+  702|       |        let mut s = String::new();
+  703|       |        s.push(b1 as char);
+  704|       |        s.push(b2 as char);
+  705|       |        let _ = encode(&s); // Should not panic
+  706|       |    }
+  707|       |
+  708|       |    /// Verify roundtrip for any single printable ASCII
+  709|       |    #[kani::proof]
+  710|       |    fn verify_roundtrip_single_printable() {
+  711|       |        let byte: u8 = kani::any();
+  712|       |        kani::assume(byte >= 32 && byte < 127); // Printable ASCII
+  713|       |
+  714|       |        let input = String::from(byte as char);
+  715|       |        let encoded = encode(&input);
+  716|       |
+  717|       |        if encoded.starts_with("_N_") {
+  718|       |            let decoded = decode(&encoded);
+  719|       |            assert!(decoded.is_ok());
+  720|       |            assert_eq!(decoded.unwrap(), input);
+  721|       |        } else {
+  722|       |            // Passed through unchanged (valid XID)
+  723|       |            assert_eq!(encoded, input);
+  724|       |        }
+  725|       |    }
+  726|       |}
+
+/Users/akesling/Devel/AdjectiveNoun/structfs/namecode/src/main.rs:
+    1|       |//! Command-line interface for namecode encoding/decoding.
+    2|       |
+    3|       |use std::io::{self, BufRead, Write};
+    4|       |
+    5|      0|fn print_usage() {
+    6|      0|    eprintln!("namecode - Encode Unicode strings as valid programming identifiers");
+    7|      0|    eprintln!();
+    8|      0|    eprintln!("Usage:");
+    9|      0|    eprintln!("  namecode encode <string>     Encode a string");
+   10|      0|    eprintln!("  namecode decode <string>     Decode a namecode string");
+   11|      0|    eprintln!("  namecode encode              Read strings from stdin, one per line");
+   12|      0|    eprintln!("  namecode decode              Read encoded strings from stdin");
+   13|      0|    eprintln!();
+   14|      0|    eprintln!("Examples:");
+   15|      0|    eprintln!("  namecode encode 'hello world'");
+   16|      0|    eprintln!("  namecode decode '_N_helloworld__fa0b'");
+   17|      0|    eprintln!("  echo 'foo-bar' | namecode encode");
+   18|      0|}
+   19|       |
+   20|      0|fn main() {
+   21|      0|    let args: Vec<String> = std::env::args().collect();
+   22|       |
+   23|      0|    if args.len() < 2 {
+   24|      0|        print_usage();
+   25|      0|        std::process::exit(1);
+   26|      0|    }
+   27|       |
+   28|      0|    match args[1].as_str() {
+   29|      0|        "encode" => {
+   30|      0|            if args.len() > 2 {
+   31|       |                // Encode arguments
+   32|      0|                for arg in &args[2..] {
+   33|      0|                    println!("{}", namecode::encode(arg));
+   34|      0|                }
+   35|       |            } else {
+   36|       |                // Read from stdin
+   37|      0|                let stdin = io::stdin();
+   38|      0|                let stdout = io::stdout();
+   39|      0|                let mut stdout = stdout.lock();
+   40|       |
+   41|      0|                for line in stdin.lock().lines() {
+   42|      0|                    match line {
+   43|      0|                        Ok(s) => {
+   44|      0|                            let _ = writeln!(stdout, "{}", namecode::encode(&s));
+   45|      0|                        }
+   46|      0|                        Err(e) => {
+   47|      0|                            eprintln!("Error reading input: {}", e);
+   48|      0|                            std::process::exit(1);
+   49|       |                        }
+   50|       |                    }
+   51|       |                }
+   52|       |            }
+   53|       |        }
+   54|      0|        "decode" => {
+   55|      0|            if args.len() > 2 {
+   56|       |                // Decode arguments
+   57|      0|                for arg in &args[2..] {
+   58|      0|                    match namecode::decode(arg) {
+   59|      0|                        Ok(decoded) => println!("{}", decoded),
+   60|      0|                        Err(e) => {
+   61|      0|                            eprintln!("Error decoding '{}': {}", arg, e);
+   62|      0|                            std::process::exit(1);
+   63|       |                        }
+   64|       |                    }
+   65|       |                }
+   66|       |            } else {
+   67|       |                // Read from stdin
+   68|      0|                let stdin = io::stdin();
+   69|      0|                let stdout = io::stdout();
+   70|      0|                let mut stdout = stdout.lock();
+   71|       |
+   72|      0|                for line in stdin.lock().lines() {
+   73|      0|                    match line {
+   74|      0|                        Ok(s) => match namecode::decode(&s) {
+   75|      0|                            Ok(decoded) => {
+   76|      0|                                let _ = writeln!(stdout, "{}", decoded);
+   77|      0|                            }
+   78|      0|                            Err(e) => {
+   79|      0|                                eprintln!("Error decoding '{}': {}", s, e);
+   80|      0|                                std::process::exit(1);
+   81|       |                            }
+   82|       |                        },
+   83|      0|                        Err(e) => {
+   84|      0|                            eprintln!("Error reading input: {}", e);
+   85|      0|                            std::process::exit(1);
+   86|       |                        }
+   87|       |                    }
+   88|       |                }
+   89|       |            }
+   90|       |        }
+   91|      0|        "help" | "--help" | "-h" => {
+   92|      0|            print_usage();
+   93|      0|        }
+   94|       |        _ => {
+   95|      0|            eprintln!("Unknown command: {}", args[1]);
+   96|      0|            print_usage();
+   97|      0|            std::process::exit(1);
+   98|       |        }
+   99|       |    }
+  100|      0|}
+

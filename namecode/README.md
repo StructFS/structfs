@@ -13,8 +13,8 @@ use namecode::{encode, decode};
 
 // Valid XID identifiers pass through unchanged
 assert_eq!(encode("foo"), "foo");
-assert_eq!(encode("cafe\u{0301}"), "cafe\u{0301}");
-assert_eq!(encode("\u{540D}\u{524D}"), "\u{540D}\u{524D}");
+assert_eq!(encode("café"), "café");
+assert_eq!(encode("名前"), "名前");
 
 // Non-XID characters get encoded
 let encoded = encode("hello world");

@@ -31,6 +31,8 @@
 //! assert_eq!(decode(&encoded).unwrap(), original);
 //! ```
 
+#![warn(missing_docs)]
+
 mod bootstring;
 mod decode;
 mod encode;
@@ -39,6 +41,17 @@ pub use decode::decode;
 pub use encode::{encode, is_xid_identifier};
 
 /// Errors that can occur during Namecode decoding.
+///
+/// # Examples
+///
+/// ```
+/// use namecode::{decode, DecodeError};
+///
+/// match decode("not_encoded") {
+///     Err(DecodeError::NotEncoded) => { /* expected */ }
+///     other => panic!("unexpected: {:?}", other),
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     /// Input doesn't have the _N_ prefix.
@@ -66,14 +79,6 @@ impl std::fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
-
-/// Quick check if a string appears to be Namecode-encoded.
-///
-/// This checks if the string starts with the `_N_` prefix.
-/// Note: This doesn't validate that the encoding is well-formed.
-pub fn is_encoded(input: &str) -> bool {
-    input.starts_with(encode::PREFIX)
-}
 
 #[cfg(test)]
 mod tests {
@@ -105,7 +110,6 @@ mod tests {
     fn test_encode_with_space() {
         let encoded = encode("hello world");
         assert!(encoded.starts_with("_N_"));
-        assert!(is_encoded(&encoded));
     }
 
     #[test]
@@ -282,18 +286,6 @@ mod tests {
         assert!(!is_xid_identifier("123"));
         assert!(!is_xid_identifier("foo bar"));
         assert!(!is_xid_identifier("foo-bar"));
-    }
-
-    // ==================== is_encoded Tests ====================
-
-    #[test]
-    fn test_is_encoded() {
-        assert!(is_encoded("_N_foo"));
-        assert!(is_encoded("_N_test__abc"));
-
-        assert!(!is_encoded("foo"));
-        assert!(!is_encoded("_foo"));
-        assert!(!is_encoded("N_foo"));
     }
 
     // ==================== Edge Cases ====================

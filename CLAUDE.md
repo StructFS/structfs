@@ -40,6 +40,12 @@ cargo test --workspace
 
 # Run the REPL
 cargo run -p structfs-repl
+
+# Test coverage (requires cargo-llvm-cov)
+./scripts/coverage.sh              # Summary with top 10 gaps
+./scripts/coverage.sh gaps         # All files below 95%
+./scripts/coverage.sh file src/foo.rs  # Uncovered lines in a file
+./scripts/coverage.sh html         # HTML report in browser
 ```
 
 ## Code Style
