@@ -5,22 +5,22 @@
 //! a-z (26) + 0-5 (6) = 32 characters, all valid in identifiers.
 
 /// Base for variable-length integer encoding.
-pub const BASE: u32 = 32;
+pub(crate) const BASE: u32 = 32;
 
 /// Minimum threshold value.
-pub const T_MIN: u32 = 1;
+pub(crate) const T_MIN: u32 = 1;
 
 /// Maximum threshold value.
-pub const T_MAX: u32 = 26;
+pub(crate) const T_MAX: u32 = 26;
 
 /// Skew factor for bias adaptation.
-pub const SKEW: u32 = 38;
+pub(crate) const SKEW: u32 = 38;
 
 /// Damping factor for first adaptation.
-pub const DAMP: u32 = 700;
+pub(crate) const DAMP: u32 = 700;
 
 /// Initial bias value.
-pub const INITIAL_BIAS: u32 = 72;
+pub(crate) const INITIAL_BIAS: u32 = 72;
 
 /// The encoding alphabet: a-z (0-25) + 0-5 (26-31).
 const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz012345";
@@ -32,7 +32,7 @@ const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz012345";
 /// - delta: the delta value just processed
 /// - num_points: number of code points handled so far
 /// - first_time: whether this is the first adaptation
-pub fn adapt_bias(mut delta: u32, num_points: u32, first_time: bool) -> u32 {
+pub(crate) fn adapt_bias(mut delta: u32, num_points: u32, first_time: bool) -> u32 {
     // Scale delta down
     delta = if first_time { delta / DAMP } else { delta / 2 };
 
@@ -55,7 +55,7 @@ pub fn adapt_bias(mut delta: u32, num_points: u32, first_time: bool) -> u32 {
 /// Encode a digit value (0-31) to its character representation.
 ///
 /// Returns `None` if the digit is out of range.
-pub fn encode_digit(d: u32) -> Option<char> {
+pub(crate) fn encode_digit(d: u32) -> Option<char> {
     if d < 32 {
         Some(ALPHABET[d as usize] as char)
     } else {
@@ -66,7 +66,7 @@ pub fn encode_digit(d: u32) -> Option<char> {
 /// Decode a character to its digit value (0-31).
 ///
 /// Returns `None` if the character is not in the alphabet.
-pub fn decode_digit(c: char) -> Option<u32> {
+pub(crate) fn decode_digit(c: char) -> Option<u32> {
     match c {
         'a'..='z' => Some(c as u32 - 'a' as u32),
         'A'..='Z' => Some(c as u32 - 'A' as u32), // Case insensitive
@@ -76,7 +76,7 @@ pub fn decode_digit(c: char) -> Option<u32> {
 }
 
 /// Calculate the threshold for a given position k and bias.
-pub fn threshold(k: u32, bias: u32) -> u32 {
+pub(crate) fn threshold(k: u32, bias: u32) -> u32 {
     if k <= bias + T_MIN {
         T_MIN
     } else if k >= bias + T_MAX {

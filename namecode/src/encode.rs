@@ -3,10 +3,10 @@
 use crate::bootstring::{adapt_bias, encode_digit, threshold, BASE, INITIAL_BIAS};
 
 /// The prefix marking encoded strings.
-pub const PREFIX: &str = "_N_";
+pub(crate) const PREFIX: &str = "_N_";
 
 /// The delimiter between basic chars and encoded portion.
-pub const DELIMITER: &str = "__";
+pub(crate) const DELIMITER: &str = "__";
 
 /// Check if a string is a valid XID identifier per UAX 31.
 ///
@@ -37,7 +37,7 @@ pub fn is_xid_identifier(s: &str) -> bool {
 /// Note: Strings containing `__` do NOT need encoding just because of that.
 /// The delimiter `__` only has meaning after the `_N_` prefix, so `foo__bar`
 /// passes through unchanged since it can't be confused with an encoded string.
-pub fn needs_encoding(s: &str) -> bool {
+pub(crate) fn needs_encoding(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
@@ -84,7 +84,7 @@ pub fn encode(input: &str) -> String {
 }
 
 /// Internal encoding implementation.
-pub fn encode_impl(input: &str) -> String {
+pub(crate) fn encode_impl(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
 
     // First pass: identify which characters are basic vs non-basic

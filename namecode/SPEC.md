@@ -69,7 +69,7 @@ Is input empty?
   └─ Yes → return ""
   └─ No  ↓
 
-Is input a valid XID identifier AND doesn't start with "_N_" AND doesn't contain "__"?
+Is input a valid XID identifier AND doesn't start with "_N_"?
   └─ Yes → return input unchanged (passthrough)
   └─ No  ↓
 

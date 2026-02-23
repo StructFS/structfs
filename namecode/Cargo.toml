@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Encode Unicode strings as valid programming language identifiers"
+readme = "README.md"
+keywords = ["unicode", "identifier", "encoding", "punycode", "uax31"]
+categories = ["encoding", "text-processing"]
+rust-version = "1.56"
 
 [dependencies]
 unicode-ident = "1.0"

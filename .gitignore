@@ -23,3 +23,6 @@ target/
 node_modules/
 *.swp
 *.swo
+
+# Local development things
+/local

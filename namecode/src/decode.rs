@@ -185,7 +185,7 @@ mod tests {
         let original = "foo__bar";
         let encoded = encode(original);
         assert_eq!(encoded, original); // passthrough
-        // decode fails since it's not encoded
+                                       // decode fails since it's not encoded
         assert_eq!(decode(&encoded), Err(crate::DecodeError::NotEncoded));
     }
 

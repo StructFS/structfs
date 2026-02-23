@@ -351,11 +351,7 @@ mod tests {
 
         for original in cases {
             let encoded = encode(original);
-            assert_eq!(
-                encoded, original,
-                "should passthrough for: {}",
-                original
-            );
+            assert_eq!(encoded, original, "should passthrough for: {}", original);
         }
     }
 
@@ -367,11 +363,7 @@ mod tests {
 
         for original in cases {
             let encoded = encode(original);
-            assert_eq!(
-                encoded, original,
-                "should passthrough: {}",
-                original
-            );
+            assert_eq!(encoded, original, "should passthrough: {}", original);
         }
     }
 
