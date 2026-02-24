@@ -26,6 +26,12 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -37,15 +43,16 @@ jobs:
 
       - name: Install dependencies
         working-directory: namecode/site
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build site
         working-directory: namecode/site
-        run: npx eleventy
+        run: pnpm exec eleventy
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy namecode/site/_site --project-name=namecode-dev
+          packageManager: pnpm
+          command: pages deploy namecode/site/_site --project-name=namecode
