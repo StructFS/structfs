@@ -5,63 +5,61 @@ layout: base.njk
 <section class="hero">
   <h1>namecode</h1>
   <p class="tagline">Punycode for variable names</p>
-  <p class="subtitle">Encode any Unicode string into a valid programming language identifier. Reversible, deterministic, O(n).</p>
+  <p class="subtitle">Reversible encoding from arbitrary Unicode to valid identifiers. O(n). No dependencies beyond <a href="https://crates.io/crates/unicode-ident"><code>unicode-ident</code></a>.</p>
   <div class="hero-actions">
-    <a href="/playground/" class="btn btn-primary">Try it live</a>
-    <a href="/spec/" class="btn btn-secondary">Read the spec</a>
+    <a href="/playground/" class="btn btn-primary">Playground</a>
+    <a href="/spec/" class="btn btn-secondary">Spec</a>
   </div>
 </section>
 
 <section class="example-section">
-  <h2>How it works</h2>
   <div class="example-table">
     <table>
       <thead>
-        <tr><th>Input</th><th>Output</th><th>Why</th></tr>
+        <tr><th>Input</th><th>encode()</th><th></th></tr>
       </thead>
       <tbody>
-        <tr><td><code>foo</code></td><td><code>foo</code></td><td>Valid identifier — passes through</td></tr>
-        <tr><td><code>café</code></td><td><code>café</code></td><td>Valid Unicode identifier — passes through</td></tr>
-        <tr><td><code>hello world</code></td><td><code>_N_helloworld__fa0b</code></td><td>Space is not allowed in identifiers</td></tr>
-        <tr><td><code>foo-bar</code></td><td><code>_N_foobar__da1d</code></td><td>Hyphen is not allowed in identifiers</td></tr>
-        <tr><td><code>123foo</code></td><td><code>_N_123foo</code></td><td>Identifiers can't start with a digit</td></tr>
+        <tr><td><code>foo</code></td><td><code>foo</code></td><td>Already valid — identity</td></tr>
+        <tr><td><code>café</code></td><td><code>café</code></td><td>Valid Unicode identifier — identity</td></tr>
+        <tr><td><code>hello world</code></td><td><code>_N_helloworld__fa0b</code></td><td>Space is not <a href="/identifiers/#xid_start-and-xid_continue"><code>XID_Continue</code></a></td></tr>
+        <tr><td><code>foo-bar</code></td><td><code>_N_foobar__da1d</code></td><td>Hyphen is not <a href="/identifiers/#xid_start-and-xid_continue"><code>XID_Continue</code></a></td></tr>
+        <tr><td><code>123foo</code></td><td><code>_N_123foo</code></td><td>Digit is not <a href="/identifiers/#xid_start-and-xid_continue"><code>XID_Start</code></a></td></tr>
+        <tr><td><code>_N_test</code></td><td><code>_N__N_test</code></td><td>Prefix collision</td></tr>
       </tbody>
     </table>
   </div>
 </section>
 
 <section class="features">
-  <h2>Properties</h2>
   <div class="feature-grid">
     <div class="feature-card">
-      <h3>Passthrough</h3>
-      <p>Valid identifiers pass through unchanged. Your already-valid names stay exactly as they are.</p>
+      <h3>Identity</h3>
+      <p>Valid identifiers pass through unchanged. <code><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span> <span class="token operator">==</span> s</code> when <code>s</code> is already UAX&nbsp;31.</p>
     </div>
     <div class="feature-card">
       <h3>Roundtrip</h3>
-      <p>Every encoded string decodes back to the original. <code>decode(encode(s)) == s</code>, always.</p>
+      <p><code><span class="token function">decode</span><span class="token punctuation">(</span><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> s</code> for all strings. <code><span class="token function">encode</span><span class="token punctuation">(</span><span class="token function">decode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> s</code> for all valid encodings.</p>
     </div>
     <div class="feature-card">
-      <h3>O(n) complexity</h3>
-      <p>Both encode and decode run in linear time. No hidden quadratic behavior.</p>
+      <h3>Idempotent</h3>
+      <p><code><span class="token function">encode</span><span class="token punctuation">(</span><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> <span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span></code>. Encoding an already-encoded string is a no-op.</p>
     </div>
     <div class="feature-card">
       <h3>Cross-language</h3>
-      <p>Output is valid in Rust, Go, JavaScript, and Python. Uses the UAX 31 identifier standard.</p>
+      <p>Output conforms to UAX&nbsp;31. Valid in Rust, Go, Python, and JavaScript.</p>
     </div>
   </div>
 </section>
 
 <section class="install-section">
-  <h2>Install</h2>
   <div class="install-block">
-    <pre><code>cargo add namecode</code></pre>
+    {% highlight "bash" %}cargo add namecode{% endhighlight %}
   </div>
   <div class="install-example">
-    <pre><code>use namecode::{encode, decode};
+    {% highlight "rust" %}use namecode::{encode, decode};
 
 let encoded = encode("hello world");
 assert_eq!(encoded, "_N_helloworld__fa0b");
-assert_eq!(decode(&encoded).unwrap(), "hello world");</code></pre>
+assert_eq!(decode(&encoded).unwrap(), "hello world");{% endhighlight %}
   </div>
 </section>

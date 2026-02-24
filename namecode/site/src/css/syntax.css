@@ -1,0 +1,85 @@
+/* Syntax highlighting — light */
+:root {
+  --syn-keyword: #7c3aed;
+  --syn-string: #166534;
+  --syn-comment: #9ca3af;
+  --syn-function: #1d4ed8;
+  --syn-number: #b45309;
+  --syn-operator: #6b7280;
+  --syn-punctuation: #4b5563;
+  --syn-type: #0e7490;
+  --syn-attr: #9333ea;
+  --syn-variable: #1c1917;
+}
+
+/* Syntax highlighting — dark forest */
+[data-theme="dark"] {
+  --syn-keyword: #c084fc;
+  --syn-string: #4ade80;
+  --syn-comment: #5c7a68;
+  --syn-function: #7dd3fc;
+  --syn-number: #fbbf24;
+  --syn-operator: #7d9485;
+  --syn-punctuation: #a3c4b0;
+  --syn-type: #67e8f9;
+  --syn-attr: #d8b4fe;
+  --syn-variable: #dce5df;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --syn-keyword: #c084fc;
+    --syn-string: #4ade80;
+    --syn-comment: #5c7a68;
+    --syn-function: #7dd3fc;
+    --syn-number: #fbbf24;
+    --syn-operator: #7d9485;
+    --syn-punctuation: #a3c4b0;
+    --syn-type: #67e8f9;
+    --syn-attr: #d8b4fe;
+    --syn-variable: #dce5df;
+  }
+}
+
+/* Prism token styles */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata { color: var(--syn-comment); font-style: italic; }
+
+.token.keyword,
+.token.tag,
+.token.boolean,
+.token.constant { color: var(--syn-keyword); }
+
+.token.string,
+.token.char,
+.token.attr-value { color: var(--syn-string); }
+
+.token.function { color: var(--syn-function); }
+
+.token.number { color: var(--syn-number); }
+
+.token.operator,
+.token.entity,
+.token.url { color: var(--syn-operator); }
+
+.token.punctuation { color: var(--syn-punctuation); }
+
+.token.class-name,
+.token.builtin { color: var(--syn-type); }
+
+.token.attr-name,
+.token.symbol { color: var(--syn-attr); }
+
+.token.variable { color: var(--syn-variable); }
+
+.token.macro,
+.token.annotation { color: var(--syn-attr); }
+
+.token.namespace { opacity: 0.8; }
+
+.token.important,
+.token.bold { font-weight: bold; }
+
+.token.italic { font-style: italic; }

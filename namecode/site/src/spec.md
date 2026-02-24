@@ -60,7 +60,7 @@ Note: Strings that are already valid XID identifiers (and don't conflict with th
 
 ### Grammar
 
-```
+```ebnf
 namecode    = passthrough | encoded
 passthrough = xid_identifier   ; if no collisions
 encoded     = "_N_" basic "__" insertions
@@ -72,25 +72,23 @@ insertions  = { position_delta codepoint }
 
 ### Decision Tree
 
-```
-Is input empty?
-  └─ Yes → return ""
-  └─ No  ↓
+<pre class="decision-tree"><span class="dt-question">Is input empty?</span>
+  └─ <span class="dt-yes">Yes</span> → return <span class="dt-string">""</span>
+  └─ <span class="dt-no">No</span>  ↓
 
-Is input a valid XID identifier AND doesn't start with "_N_"?
-  └─ Yes → return input unchanged (passthrough)
-  └─ No  ↓
+<span class="dt-question">Is input a valid XID identifier AND doesn't start with "_N_"?</span>
+  └─ <span class="dt-yes">Yes</span> → return input unchanged <span class="dt-note">(passthrough)</span>
+  └─ <span class="dt-no">No</span>  ↓
 
-Is input already a valid Namecode encoding?
-  └─ Yes → return input unchanged (idempotency)
-  └─ No  ↓
+<span class="dt-question">Is input already a valid Namecode encoding?</span>
+  └─ <span class="dt-yes">Yes</span> → return input unchanged <span class="dt-note">(idempotency)</span>
+  └─ <span class="dt-no">No</span>  ↓
 
-Encode the input:
+<span class="dt-question">Encode the input:</span>
   1. Extract basic characters (XID_Continue, avoiding __ and trailing _)
   2. Record positions and codepoints of non-basic characters
   3. Encode insertions using Bootstring
-  4. Return "_N_" + basic + "__" + encoded_insertions
-```
+  4. Return <span class="dt-string">"_N_"</span> + basic + <span class="dt-string">"__"</span> + encoded_insertions</pre>
 
 ### Examples
 
@@ -115,7 +113,7 @@ The encoded portion uses a variant of the Bootstring algorithm (RFC 3492), adapt
 ### Alphabet
 
 32 characters, all valid in identifiers:
-```
+```text
 a-z (0-25) + 0-5 (26-31) = 32 characters
 ```
 
@@ -136,7 +134,7 @@ Characters `6-9` are NOT used (reserved for future extensions).
 
 Each value is encoded as a sequence of digits. The threshold function determines when the sequence terminates:
 
-```
+```python
 threshold(k, bias) =
     T_MIN           if k <= bias + T_MIN
     T_MAX           if k >= bias + T_MAX
@@ -144,7 +142,7 @@ threshold(k, bias) =
 ```
 
 **Encoding a value:**
-```
+```python
 k = BASE
 while true:
     t = threshold(k, bias)
@@ -158,7 +156,7 @@ while true:
 ```
 
 **Decoding a value:**
-```
+```python
 result = 0, w = 1, k = BASE
 while true:
     digit = decode_digit(next_char())
@@ -174,7 +172,7 @@ while true:
 
 After encoding/decoding each value, the bias is adapted:
 
-```
+```python
 adapt_bias(delta, num_points, first_time):
     delta = delta / DAMP   if first_time else delta / 2
     delta += delta / num_points
@@ -203,7 +201,7 @@ Both are encoded as variable-length integers with bias adaptation between each v
 
 Strings starting with `_N_` are always encoded, even if otherwise valid XID. This prevents ambiguity between literal `_N_test` and an encoded string.
 
-```
+```text
 encode("_N_test") → "_N__N_test" (not "_N_test")
 decode("_N__N_test") → "_N_test"
 ```
@@ -214,7 +212,7 @@ Note: If a string starting with `_N_` happens to be a valid Namecode encoding of
 
 Strings containing `__` but NOT starting with `_N_` pass through unchanged:
 
-```
+```text
 encode("foo__bar") → "foo__bar" (valid XID, passes through)
 encode("__") → "__" (valid XID: underscore followed by XID_Continue)
 ```
@@ -229,7 +227,7 @@ When constructing the basic portion during encoding:
 
 2. **No consecutive underscores:** Underscores that would become consecutive in the basic portion (after removing non-basic characters) are moved to non-basic.
 
-```
+```text
 encode("test_ ") → "_N_test__..." (trailing _ encoded with space)
 encode("__ _x") → "_N__x__..." (middle _ encoded to avoid __ in basic)
 ```

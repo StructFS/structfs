@@ -588,15 +588,54 @@ h1, h2, h3, h4 {
 .doc-page h4 a.header-anchor {
   color: var(--text-muted);
   text-decoration: none;
+  margin-left: 0.35em;
   opacity: 0;
-  margin-left: 0.25em;
+  font-weight: 400;
   transition: opacity 0.15s;
 }
 
 .doc-page h2:hover a.header-anchor,
 .doc-page h3:hover a.header-anchor,
 .doc-page h4:hover a.header-anchor {
+  opacity: 0.6;
+}
+
+.doc-page h2 a.header-anchor:hover,
+.doc-page h3 a.header-anchor:hover,
+.doc-page h4 a.header-anchor:hover {
   opacity: 1;
+  color: var(--accent);
+}
+
+/* === Decision Tree === */
+.decision-tree {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.8;
+}
+
+.dt-question {
+  color: var(--syn-function);
+  font-weight: 600;
+}
+
+.dt-yes {
+  color: var(--green);
+  font-weight: 600;
+}
+
+.dt-no {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.dt-string {
+  color: var(--syn-string);
+}
+
+.dt-note {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* === Responsive === */
