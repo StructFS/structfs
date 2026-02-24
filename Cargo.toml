@@ -14,6 +14,9 @@ members = [
     "featherweight/guest",
     "namecode",
 ]
+exclude = [
+    "namecode/site/wasm",
+]
 
 # Exclude WASM-only crates from default builds
 # Build featherweight/guest with: cargo component build -p featherweight-guest

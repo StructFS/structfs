@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% if title %}{{ title }} — {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
+  <meta name="description" content="{{ description or site.description }}">
+  <script>
+    (function() {
+      var t = localStorage.getItem("theme");
+      if (t === "light" || t === "dark") {
+        document.documentElement.setAttribute("data-theme", t);
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="nav-inner">
+      <a href="/" class="nav-logo">namecode</a>
+      <div class="nav-right">
+        <div class="nav-links">
+          <a href="/playground/">Playground</a>
+          <a href="/spec/">Spec</a>
+          <a href="https://crates.io/crates/namecode">Crates.io</a>
+          <a href="https://docs.rs/namecode">Docs</a>
+          <a href="https://github.com/structfs/structfs/tree/main/namecode">GitHub</a>
+        </div>
+        <div class="theme-switcher" role="radiogroup" aria-label="Theme">
+          <button class="theme-btn" data-theme="light" title="Light" aria-label="Light theme">&#9788;</button>
+          <button class="theme-btn" data-theme="system" title="System" aria-label="System theme">&#9680;</button>
+          <button class="theme-btn" data-theme="dark" title="Dark" aria-label="Dark theme">&#9790;</button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    {{ content | safe }}
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <p>&copy; 2023 Adjective Noun, LLC. Open source under the Apache-2.0 license.</p>
+    </div>
+  </footer>
+
+  <script>
+    (function() {
+      var btns = document.querySelectorAll(".theme-btn");
+
+      function current() {
+        return localStorage.getItem("theme") || "system";
+      }
+
+      function apply(mode) {
+        if (mode === "system") {
+          document.documentElement.removeAttribute("data-theme");
+          localStorage.removeItem("theme");
+        } else {
+          document.documentElement.setAttribute("data-theme", mode);
+          localStorage.setItem("theme", mode);
+        }
+        btns.forEach(function(b) {
+          b.classList.toggle("active", b.getAttribute("data-theme") === mode);
+        });
+      }
+
+      btns.forEach(function(b) {
+        b.addEventListener("click", function() {
+          apply(b.getAttribute("data-theme"));
+        });
+      });
+
+      apply(current());
+    })();
+  </script>
+</body>
+</html>

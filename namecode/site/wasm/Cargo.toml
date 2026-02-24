@@ -1,0 +1,14 @@
+[package]
+name = "namecode-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+namecode = { path = "../.." }
+wasm-bindgen = "0.2"

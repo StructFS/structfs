@@ -1,0 +1,67 @@
+---
+layout: base.njk
+---
+
+<section class="hero">
+  <h1>namecode</h1>
+  <p class="tagline">Punycode for variable names</p>
+  <p class="subtitle">Encode any Unicode string into a valid programming language identifier. Reversible, deterministic, O(n).</p>
+  <div class="hero-actions">
+    <a href="/playground/" class="btn btn-primary">Try it live</a>
+    <a href="/spec/" class="btn btn-secondary">Read the spec</a>
+  </div>
+</section>
+
+<section class="example-section">
+  <h2>How it works</h2>
+  <div class="example-table">
+    <table>
+      <thead>
+        <tr><th>Input</th><th>Output</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>foo</code></td><td><code>foo</code></td><td>Valid identifier — passes through</td></tr>
+        <tr><td><code>café</code></td><td><code>café</code></td><td>Valid Unicode identifier — passes through</td></tr>
+        <tr><td><code>hello world</code></td><td><code>_N_helloworld__fa0b</code></td><td>Space is not allowed in identifiers</td></tr>
+        <tr><td><code>foo-bar</code></td><td><code>_N_foobar__da1d</code></td><td>Hyphen is not allowed in identifiers</td></tr>
+        <tr><td><code>123foo</code></td><td><code>_N_123foo</code></td><td>Identifiers can't start with a digit</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="features">
+  <h2>Properties</h2>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <h3>Passthrough</h3>
+      <p>Valid identifiers pass through unchanged. Your already-valid names stay exactly as they are.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Roundtrip</h3>
+      <p>Every encoded string decodes back to the original. <code>decode(encode(s)) == s</code>, always.</p>
+    </div>
+    <div class="feature-card">
+      <h3>O(n) complexity</h3>
+      <p>Both encode and decode run in linear time. No hidden quadratic behavior.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Cross-language</h3>
+      <p>Output is valid in Rust, Go, JavaScript, and Python. Uses the UAX 31 identifier standard.</p>
+    </div>
+  </div>
+</section>
+
+<section class="install-section">
+  <h2>Install</h2>
+  <div class="install-block">
+    <pre><code>cargo add namecode</code></pre>
+  </div>
+  <div class="install-example">
+    <pre><code>use namecode::{encode, decode};
+
+let encoded = encode("hello world");
+assert_eq!(encoded, "_N_helloworld__fa0b");
+assert_eq!(decode(&encoded).unwrap(), "hello world");</code></pre>
+  </div>
+</section>

@@ -1,0 +1,15 @@
+{
+  "name": "namecode-site",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "./build.sh",
+    "clean": "./clean.sh",
+    "serve": "eleventy --serve",
+    "dev": "eleventy --serve --watch"
+  },
+  "devDependencies": {
+    "@11ty/eleventy": "^3.0.0",
+    "markdown-it-anchor": "^9.0.0"
+  }
+}

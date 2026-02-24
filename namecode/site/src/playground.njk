@@ -1,0 +1,43 @@
+---
+layout: base.njk
+title: Playground
+---
+
+<section class="playground-section">
+  <h1>Playground</h1>
+  <p>Type any string and see the encoded and decoded forms update live. Runs entirely in your browser via WebAssembly.</p>
+
+  <div id="wasm-status" class="wasm-loading">Loading WASM module...</div>
+
+  <div id="playground" style="display: none;">
+    <div class="playground-input">
+      <label for="input-text">Input</label>
+      <textarea id="input-text" placeholder="Type any Unicode string..." rows="3" spellcheck="false">hello world</textarea>
+      <div class="input-props">
+        <span class="prop">Valid XID: <span class="prop-val" id="prop-xid">--</span></span>
+      </div>
+    </div>
+
+    <div class="playground-outputs">
+      <div class="playground-pane">
+        <div class="pane-header">
+          <label for="output-encoded">Encoded</label>
+          <button class="use-as-input" id="use-encoded" title="Use as input">Use as input</button>
+        </div>
+        <textarea id="output-encoded" readonly rows="3"></textarea>
+      </div>
+      <div class="playground-pane" id="decode-pane">
+        <div class="pane-header">
+          <label for="output-decoded">Decoded</label>
+          <button class="use-as-input" id="use-decoded" title="Use as input">Use as input</button>
+        </div>
+        <div class="pane-body">
+          <textarea id="output-decoded" readonly rows="3"></textarea>
+          <div class="pane-overlay" id="decode-overlay">Input is not valid namecode</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script type="module" src="/js/playground.js"></script>
