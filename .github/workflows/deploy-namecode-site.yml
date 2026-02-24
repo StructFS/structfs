@@ -31,22 +31,17 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
       - name: Build WASM
         working-directory: namecode/site/wasm
         run: wasm-pack build --target web --out-dir ../src/wasm/pkg
 
       - name: Install dependencies
         working-directory: namecode/site
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       - name: Build site
         working-directory: namecode/site
-        run: pnpm exec eleventy
+        run: npx eleventy
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
