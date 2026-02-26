@@ -456,6 +456,45 @@ mod spec_vectors {
         assert_eq!(encode("foo__bar"), "foo__bar");
         assert_eq!(encode("__"), "__");
     }
+
+    // Prefix collision with non-basic characters: _N_ prefix AND non-XID chars
+    #[test]
+    fn prefix_collision_with_non_basic() {
+        let cases = vec![
+            "_N_fgyd#",
+            "_N_ ",
+            "_N_hello world",
+            "_N_foo-bar",
+            "_N_test!",
+            "_N_a@b",
+            "_N_#",
+            "_N_123#abc",
+        ];
+        for input in cases {
+            let encoded = encode(input);
+            assert!(
+                encoded.starts_with("_N_"),
+                "expected _N_ prefix for {:?}, got {:?}",
+                input,
+                encoded
+            );
+            assert_ne!(encoded, input, "should not pass through: {:?}", input);
+            let decoded = decode(&encoded).unwrap_or_else(|e| {
+                panic!(
+                    "decode failed for {:?} (encoded: {:?}): {:?}",
+                    input, encoded, e
+                )
+            });
+            assert_eq!(decoded, input, "roundtrip failed for {:?}", input);
+            // Idempotency
+            assert_eq!(
+                encode(&encoded),
+                encoded,
+                "idempotency failed for {:?}",
+                input
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -38,7 +38,13 @@ pub fn decode(input: &str) -> Result<String, DecodeError> {
         // Reconstruct the original string
         reconstruct(basic, &insertions)
     } else {
-        // No delimiter - just basic chars (encoded because of prefix collision or digit start)
+        // No delimiter - just basic chars (encoded because of prefix collision or digit start).
+        // All characters must be XID_Continue since encode_impl only puts XID_Continue
+        // characters in the basic portion.
+        if without_prefix.is_empty() || !without_prefix.chars().all(unicode_ident::is_xid_continue)
+        {
+            return Err(DecodeError::NotEncoded);
+        }
         Ok(without_prefix.to_string())
     }
 }
