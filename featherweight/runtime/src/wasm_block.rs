@@ -2,10 +2,18 @@
 //!
 //! This module provides the ability to load and run Blocks compiled to
 //! WebAssembly components.
+//!
+//! The WASM boundary is an LL-store boundary: the WIT interface speaks raw
+//! bytes (`list<u8>` for data, `list<list<u8>>` for paths). The runtime wraps
+//! the Block's root store in a `CoreToLL` bridge with the Block's declared
+//! codec and format, so the host implementation is a thin forward to
+//! `ll_read`/`ll_write`.
 
 use std::sync::{Arc, Mutex};
 
-use structfs_core_store::{Error as StoreError, NoCodec, Path, Reader, Record, Value, Writer};
+use bytes::Bytes;
+use structfs_core_store::{Codec, CoreToLL, Error as StoreError, Format, Reader, Writer};
+use structfs_ll_store::{LLReader, LLWriter};
 use wasmtime::component::{bindgen, Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 
@@ -19,97 +27,84 @@ bindgen!({
 });
 
 /// State held by the Wasmtime store for each Block.
-pub struct WasmBlockState<S> {
+pub struct WasmBlockState<S, C> {
     /// The Block's unique identifier.
     pub id: BlockId,
 
-    /// The Block's root store.
-    pub root: Arc<Mutex<S>>,
+    /// The Block's root store, wrapped in a CoreToLL bridge.
+    pub root: Arc<Mutex<CoreToLL<S, C>>>,
 
     /// Resource table for component model.
     pub table: ResourceTable,
 }
 
-impl<S> WasmBlockState<S> {
+impl<S, C> WasmBlockState<S, C> {
     /// Create a new WasmBlockState.
-    pub fn new(id: BlockId, root: S) -> Self {
+    pub fn new(id: BlockId, root: S, codec: C, format: Format) -> Self {
         Self {
             id,
-            root: Arc::new(Mutex::new(root)),
+            root: Arc::new(Mutex::new(CoreToLL::new(root, codec, format))),
             table: ResourceTable::new(),
         }
     }
 }
 
-/// Convert a StructFS Value to a WIT Value.
-fn value_to_wit(val: &Value) -> featherweight::block::store::Value {
-    use featherweight::block::store::Value as WitValue;
-    match val {
-        Value::Null => WitValue::ValNull,
-        Value::Bool(b) => WitValue::ValBool(*b),
-        Value::Integer(i) => WitValue::ValInteger(*i),
-        Value::Float(f) => WitValue::ValFloat(*f),
-        Value::String(s) => WitValue::ValText(s.clone()),
-        // For now, convert complex types to their string representation
-        Value::Bytes(b) => WitValue::ValText(format!("<bytes: {} bytes>", b.len())),
-        Value::Array(a) => WitValue::ValText(format!("<array: {} items>", a.len())),
-        Value::Map(m) => WitValue::ValText(format!("<map: {} keys>", m.len())),
-    }
-}
-
-/// Convert a WIT Value to a StructFS Value.
-fn wit_to_value(val: featherweight::block::store::Value) -> Value {
-    use featherweight::block::store::Value as WitValue;
-    match val {
-        WitValue::ValNull => Value::Null,
-        WitValue::ValBool(b) => Value::Bool(b),
-        WitValue::ValInteger(i) => Value::Integer(i),
-        WitValue::ValFloat(f) => Value::Float(f),
-        WitValue::ValText(s) => Value::String(s),
-    }
-}
-
-/// Implementation of the store interface for WASM Blocks.
-impl<S: Reader + Writer + Send + 'static> featherweight::block::store::Host for WasmBlockState<S> {
-    fn read(&mut self, path: String) -> featherweight::block::store::ReadResult {
-        use featherweight::block::store::ReadResult;
-
-        let path = match Path::parse(&path) {
-            Ok(p) => p,
-            Err(e) => return ReadResult::ReadError(format!("invalid path: {}", e)),
-        };
+/// Implementation of the ll-store interface for WASM Blocks.
+impl<S: Reader + Writer + Send + 'static, C: Codec + Send + Sync + 'static>
+    featherweight::block::ll_store::Host for WasmBlockState<S, C>
+{
+    fn read(&mut self, path: Vec<Vec<u8>>) -> std::result::Result<Option<Vec<u8>>, String> {
+        let path_refs: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
 
         let mut root = self.root.lock().unwrap();
-        match root.read(&path) {
-            Ok(Some(record)) => match record.into_value(&NoCodec) {
-                Ok(value) => ReadResult::Found(value_to_wit(&value)),
-                Err(e) => ReadResult::ReadError(e.to_string()),
-            },
-            Ok(None) => ReadResult::NotFound,
-            Err(e) => ReadResult::ReadError(e.to_string()),
+        match root.ll_read(&path_refs) {
+            Ok(Some(bytes)) => Ok(Some(bytes.to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
         }
     }
 
     fn write(
         &mut self,
-        path: String,
-        val: featherweight::block::store::Value,
-    ) -> featherweight::block::store::WriteResult {
-        use featherweight::block::store::WriteResult;
-
-        let parsed_path = match Path::parse(&path) {
-            Ok(p) => p,
-            Err(e) => return WriteResult::WriteError(format!("invalid path: {}", e)),
-        };
-
-        let value = wit_to_value(val);
-        let record = Record::parsed(value);
+        path: Vec<Vec<u8>>,
+        data: Vec<u8>,
+    ) -> std::result::Result<Vec<Vec<u8>>, String> {
+        let path_refs: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
 
         let mut root = self.root.lock().unwrap();
-        match root.write(&parsed_path, record) {
-            Ok(result_path) => WriteResult::Written(result_path.to_string()),
-            Err(e) => WriteResult::WriteError(e.to_string()),
+        match root.ll_write(&path_refs, Bytes::from(data)) {
+            Ok(result_path) => {
+                let components: Vec<Vec<u8>> =
+                    result_path.into_iter().map(|b| b.to_vec()).collect();
+                Ok(components)
+            }
+            Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+/// A no-op store for use during manifest retrieval.
+///
+/// Returns `None` for all reads and echoes the path back for writes.
+/// The guest's `manifest()` function should not need store access.
+struct NoOpStore;
+
+impl Reader for NoOpStore {
+    fn read(
+        &mut self,
+        _path: &structfs_core_store::Path,
+    ) -> std::result::Result<Option<structfs_core_store::Record>, StoreError> {
+        Ok(None)
+    }
+}
+
+impl Writer for NoOpStore {
+    fn write(
+        &mut self,
+        path: &structfs_core_store::Path,
+        _record: structfs_core_store::Record,
+    ) -> std::result::Result<structfs_core_store::Path, StoreError> {
+        Ok(path.clone())
     }
 }
 
@@ -131,8 +126,58 @@ impl WasmBlock {
         Ok(Self::new(bytes))
     }
 
-    /// Run this WASM Block with the given root store.
-    pub fn run<S: Reader + Writer + Send + 'static>(&self, id: BlockId, root: S) -> Result<()> {
+    /// Retrieve the manifest from this WASM Block.
+    ///
+    /// Creates a minimal Wasmtime environment with a no-op store,
+    /// instantiates the component, and calls the guest's `manifest()` export.
+    /// Returns the raw JSON bytes describing the block's capabilities.
+    pub fn manifest(&self) -> Result<Vec<u8>> {
+        use structfs_core_store::NoCodec;
+
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config).map_err(|e| {
+            RuntimeError::Store(StoreError::store("wasmtime", "engine", e.to_string()))
+        })?;
+
+        let component = Component::new(&engine, &self.component_bytes).map_err(|e| {
+            RuntimeError::Store(StoreError::store("wasmtime", "component", e.to_string()))
+        })?;
+
+        let mut linker = Linker::<WasmBlockState<NoOpStore, NoCodec>>::new(&engine);
+        BlockWorld::add_to_linker::<
+            WasmBlockState<NoOpStore, NoCodec>,
+            wasmtime::component::HasSelf<WasmBlockState<NoOpStore, NoCodec>>,
+        >(&mut linker, |state: &mut WasmBlockState<NoOpStore, NoCodec>| state)
+        .map_err(|e| RuntimeError::Store(StoreError::store("wasmtime", "linker", e.to_string())))?;
+
+        let state = WasmBlockState::new(BlockId::new(), NoOpStore, NoCodec, Format::OCTET_STREAM);
+        let mut store = Store::new(&engine, state);
+
+        let instance = BlockWorld::instantiate(&mut store, &component, &linker).map_err(|e| {
+            RuntimeError::Store(StoreError::store("wasmtime", "instantiate", e.to_string()))
+        })?;
+
+        let manifest_bytes = instance
+            .featherweight_block_block()
+            .call_manifest(&mut store)
+            .map_err(|e| {
+                RuntimeError::Store(StoreError::store("wasmtime", "call_manifest", e.to_string()))
+            })?;
+
+        Ok(manifest_bytes)
+    }
+
+    /// Run this WASM Block with the given root store, codec, and format.
+    ///
+    /// The runtime wraps `root` in a `CoreToLL` bridge using the provided
+    /// `codec` and `format`, so the WASM guest sees raw bytes in the
+    /// declared serialization format.
+    pub fn run<S, C>(&self, id: BlockId, root: S, codec: C, format: Format) -> Result<()>
+    where
+        S: Reader + Writer + Send + 'static,
+        C: Codec + Send + Sync + 'static,
+    {
         // Create the Wasmtime engine with component model support
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -145,16 +190,16 @@ impl WasmBlock {
             RuntimeError::Store(StoreError::store("wasmtime", "component", e.to_string()))
         })?;
 
-        // Create the linker and add the store interface
-        let mut linker = Linker::<WasmBlockState<S>>::new(&engine);
+        // Create the linker and add the ll-store interface
+        let mut linker = Linker::<WasmBlockState<S, C>>::new(&engine);
         BlockWorld::add_to_linker::<
-            WasmBlockState<S>,
-            wasmtime::component::HasSelf<WasmBlockState<S>>,
-        >(&mut linker, |state: &mut WasmBlockState<S>| state)
+            WasmBlockState<S, C>,
+            wasmtime::component::HasSelf<WasmBlockState<S, C>>,
+        >(&mut linker, |state: &mut WasmBlockState<S, C>| state)
         .map_err(|e| RuntimeError::Store(StoreError::store("wasmtime", "linker", e.to_string())))?;
 
         // Create the store with our state
-        let state = WasmBlockState::new(id, root);
+        let state = WasmBlockState::new(id, root, codec, format);
         let mut store = Store::new(&engine, state);
 
         // Instantiate the component
@@ -184,55 +229,7 @@ impl WasmBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collection_literals::btree;
-
-    #[test]
-    fn value_conversion_roundtrip() {
-        let values = vec![
-            Value::Null,
-            Value::Bool(true),
-            Value::Integer(42),
-            Value::Float(1.5),
-            Value::String("hello".to_string()),
-        ];
-
-        for val in values {
-            let wit = value_to_wit(&val);
-            let back = wit_to_value(wit);
-            assert_eq!(val, back);
-        }
-    }
-
-    #[test]
-    fn value_conversion_complex_types() {
-        // Bytes get converted to descriptive text
-        let bytes = Value::Bytes(vec![1, 2, 3, 4, 5]);
-        let wit = value_to_wit(&bytes);
-        assert!(matches!(
-            wit,
-            featherweight::block::store::Value::ValText(s) if s.contains("5 bytes")
-        ));
-
-        // Array gets converted to descriptive text
-        let array = Value::Array(vec![Value::Integer(1), Value::Integer(2)]);
-        let wit = value_to_wit(&array);
-        assert!(matches!(
-            wit,
-            featherweight::block::store::Value::ValText(s) if s.contains("2 items")
-        ));
-
-        // Map gets converted to descriptive text
-        let map = Value::Map(btree! {
-            "a".to_string() => Value::Integer(1),
-            "b".to_string() => Value::Integer(2),
-            "c".to_string() => Value::Integer(3),
-        });
-        let wit = value_to_wit(&map);
-        assert!(matches!(
-            wit,
-            featherweight::block::store::Value::ValText(s) if s.contains("3 keys")
-        ));
-    }
+    use structfs_core_store::{Format, NoCodec, Path, Record};
 
     #[test]
     fn wasm_block_state_new() {
@@ -257,7 +254,7 @@ mod tests {
         }
 
         let id = BlockId::new();
-        let state = WasmBlockState::new(id, TestStore);
+        let state = WasmBlockState::new(id, TestStore, NoCodec, Format::OCTET_STREAM);
         assert_eq!(state.id, id);
     }
 
@@ -282,13 +279,11 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), TestStore);
-        let result = state.read("some/path".to_string());
-        assert!(matches!(
-            result,
-            featherweight::block::store::ReadResult::NotFound
-        ));
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), TestStore, NoCodec, Format::OCTET_STREAM);
+        let result = state.read(vec![b"some".to_vec(), b"path".to_vec()]);
+        assert_eq!(result, Ok(None));
     }
 
     #[test]
@@ -299,9 +294,10 @@ mod tests {
                 &mut self,
                 _path: &Path,
             ) -> std::result::Result<Option<Record>, structfs_core_store::Error> {
-                Ok(Some(Record::parsed(Value::String(
-                    "test value".to_string(),
-                ))))
+                Ok(Some(Record::raw(
+                    Bytes::from_static(b"test value"),
+                    Format::OCTET_STREAM,
+                )))
             }
         }
         impl Writer for TestStore {
@@ -314,13 +310,11 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), TestStore);
-        let result = state.read("some/path".to_string());
-        assert!(matches!(
-            result,
-            featherweight::block::store::ReadResult::Found(featherweight::block::store::Value::ValText(s)) if s == "test value"
-        ));
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), TestStore, NoCodec, Format::OCTET_STREAM);
+        let result = state.read(vec![b"some".to_vec(), b"path".to_vec()]);
+        assert_eq!(result, Ok(Some(b"test value".to_vec())));
     }
 
     #[test]
@@ -344,14 +338,12 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), TestStore);
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), TestStore, NoCodec, Format::OCTET_STREAM);
         // Path with hyphen is invalid
-        let result = state.read("foo/bar-baz".to_string());
-        assert!(matches!(
-            result,
-            featherweight::block::store::ReadResult::ReadError(_)
-        ));
+        let result = state.read(vec![b"foo".to_vec(), b"bar-baz".to_vec()]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -375,16 +367,17 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), TestStore);
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), TestStore, NoCodec, Format::OCTET_STREAM);
         let result = state.write(
-            "output/test".to_string(),
-            featherweight::block::store::Value::ValText("hello".to_string()),
+            vec![b"output".to_vec(), b"test".to_vec()],
+            b"hello".to_vec(),
         );
-        assert!(matches!(
+        assert_eq!(
             result,
-            featherweight::block::store::WriteResult::Written(p) if p == "output/test"
-        ));
+            Ok(vec![b"output".to_vec(), b"test".to_vec()])
+        );
     }
 
     #[test]
@@ -408,17 +401,12 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), TestStore);
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), TestStore, NoCodec, Format::OCTET_STREAM);
         // Path with hyphen is invalid
-        let result = state.write(
-            "foo/bar-baz".to_string(),
-            featherweight::block::store::Value::ValNull,
-        );
-        assert!(matches!(
-            result,
-            featherweight::block::store::WriteResult::WriteError(_)
-        ));
+        let result = state.write(vec![b"foo".to_vec(), b"bar-baz".to_vec()], b"data".to_vec());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -471,13 +459,11 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), FailingStore);
-        let result = state.read("some/path".to_string());
-        assert!(matches!(
-            result,
-            featherweight::block::store::ReadResult::ReadError(_)
-        ));
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), FailingStore, NoCodec, Format::OCTET_STREAM);
+        let result = state.read(vec![b"some".to_vec(), b"path".to_vec()]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -505,30 +491,30 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), FailingStore);
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), FailingStore, NoCodec, Format::OCTET_STREAM);
         let result = state.write(
-            "output/test".to_string(),
-            featherweight::block::store::Value::ValText("hello".to_string()),
+            vec![b"output".to_vec(), b"test".to_vec()],
+            b"hello".to_vec(),
         );
-        assert!(matches!(
-            result,
-            featherweight::block::store::WriteResult::WriteError(_)
-        ));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn wasm_block_state_host_read_decode_error() {
-        use structfs_core_store::Format;
-
+    fn wasm_block_state_host_read_codec_error() {
         struct RawBytesStore;
         impl Reader for RawBytesStore {
             fn read(
                 &mut self,
                 _path: &Path,
             ) -> std::result::Result<Option<Record>, structfs_core_store::Error> {
-                // Return a Record with raw bytes that can't be decoded without a codec
-                Ok(Some(Record::raw(vec![0xFF, 0xFE], Format::OCTET_STREAM)))
+                // Return a Record with raw bytes in a different format than the bridge expects.
+                // NoCodec can't transcode, so CoreToLL will fail.
+                Ok(Some(Record::raw(
+                    Bytes::from_static(b"\xff\xfe"),
+                    Format::JSON,
+                )))
             }
         }
         impl Writer for RawBytesStore {
@@ -541,12 +527,26 @@ mod tests {
             }
         }
 
-        use featherweight::block::store::Host;
-        let mut state = WasmBlockState::new(BlockId::new(), RawBytesStore);
-        let result = state.read("some/path".to_string());
-        assert!(matches!(
-            result,
-            featherweight::block::store::ReadResult::ReadError(_)
-        ));
+        use featherweight::block::ll_store::Host;
+        let mut state =
+            WasmBlockState::new(BlockId::new(), RawBytesStore, NoCodec, Format::OCTET_STREAM);
+        let result = state.read(vec![b"some".to_vec(), b"path".to_vec()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn no_op_store_read_returns_none() {
+        let mut store = NoOpStore;
+        let path = Path::parse("some/path").unwrap();
+        assert!(store.read(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn no_op_store_write_echoes_path() {
+        let mut store = NoOpStore;
+        let path = Path::parse("some/path").unwrap();
+        let record = Record::raw(Bytes::from_static(b"data"), Format::OCTET_STREAM);
+        let result = store.write(&path, record).unwrap();
+        assert_eq!(result, path);
     }
 }

@@ -7,16 +7,20 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use featherweight_runtime::{BlockId, Result, WasmBlock};
-use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
+use structfs_core_store::{Bytes, Error, Format, NoCodec, Path, Reader, Record, Writer};
 
 /// Simple in-memory store for testing WASM Blocks.
+///
+/// Stores raw bytes keyed by path strings. Used with `Format::JSON` so the
+/// WASM guest can parse/produce JSON-encoded data.
 struct InMemoryStore {
-    data: Arc<StdMutex<BTreeMap<String, Value>>>,
+    data: Arc<StdMutex<BTreeMap<String, Vec<u8>>>>,
+    format: Format,
 }
 
 impl InMemoryStore {
-    fn shared(data: Arc<StdMutex<BTreeMap<String, Value>>>) -> Self {
-        Self { data }
+    fn shared(data: Arc<StdMutex<BTreeMap<String, Vec<u8>>>>, format: Format) -> Self {
+        Self { data, format }
     }
 }
 
@@ -24,16 +28,17 @@ impl Reader for InMemoryStore {
     fn read(&mut self, path: &Path) -> std::result::Result<Option<Record>, Error> {
         let path_str = path.to_string();
         let data = self.data.lock().unwrap();
-        Ok(data.get(&path_str).cloned().map(Record::parsed))
+        Ok(data
+            .get(&path_str)
+            .map(|b| Record::raw(Bytes::from(b.clone()), self.format.clone())))
     }
 }
 
 impl Writer for InMemoryStore {
     fn write(&mut self, path: &Path, record: Record) -> std::result::Result<Path, Error> {
-        let path_str = path.to_string();
-        let value = record.into_value(&NoCodec)?;
+        let bytes = record.into_bytes(&NoCodec, &self.format)?;
         let mut data = self.data.lock().unwrap();
-        data.insert(path_str, value);
+        data.insert(path.to_string(), bytes.to_vec());
         Ok(path.clone())
     }
 }
@@ -57,31 +62,33 @@ fn main() -> Result<()> {
     let block = WasmBlock::from_file(wasm_path)?;
 
     // Create shared storage
-    let shared_data: Arc<StdMutex<BTreeMap<String, Value>>> =
+    let shared_data: Arc<StdMutex<BTreeMap<String, Vec<u8>>>> =
         Arc::new(StdMutex::new(BTreeMap::new()));
 
-    // Pre-populate some data for the Block to read
+    // Pre-populate some data for the Block to read (as JSON bytes)
     {
         let mut data = shared_data.lock().unwrap();
         data.insert(
             "input/name".to_string(),
-            Value::String("WASM World".to_string()),
+            serde_json::to_vec(&"WASM World").unwrap(),
         );
     }
 
     // Create a store for the Block
-    let store = InMemoryStore::shared(shared_data.clone());
+    let format = Format::JSON;
+    let store = InMemoryStore::shared(shared_data.clone(), format.clone());
 
-    // Run the WASM Block
+    // Run the WASM Block with NoCodec (data is already in JSON format)
     println!("\nRunning WASM Block...\n");
     let id = BlockId::new();
-    block.run(id, store)?;
+    block.run(id, store, NoCodec, format)?;
 
     // Check what the Block wrote
     println!("\nBlock execution complete. Checking results...\n");
     let data = shared_data.lock().unwrap();
     for (key, value) in data.iter() {
-        println!("  {} = {:?}", key, value);
+        let display = String::from_utf8_lossy(value);
+        println!("  {} = {}", key, display);
     }
 
     println!("\n=== Example complete ===");

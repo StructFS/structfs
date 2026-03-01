@@ -2,50 +2,34 @@
 ///
 /// This WIT file defines the contract between the Featherweight runtime (host)
 /// and WASM Blocks (guests). Blocks interact with the world exclusively through
-/// the store interface provided by the host.
+/// the ll-store interface provided by the host.
+///
+/// The WASM boundary is an LL-store boundary: paths are byte components
+/// (`list<list<u8>>`), data is raw bytes (`list<u8>`). The Block declares what
+/// serialization format it speaks (JSON, CBOR, etc.), and the runtime uses
+/// `CoreToLL` with the appropriate codec to bridge. The WIT never changes;
+/// adding new formats requires zero WIT/bindgen work.
 
 package featherweight:block@0.1.0;
 
-/// The store interface provided by the host to guest Blocks.
-/// This is how Blocks read and write data.
-interface store {
-    /// A value that can be stored.
-    /// Simplified for initial implementation.
-    variant value {
-        val-null,
-        val-bool(bool),
-        val-integer(s64),
-        val-float(f64),
-        val-text(string),
-    }
+/// The ll-store interface provided by the host to guest Blocks.
+/// Paths are byte-component sequences; data is raw bytes.
+interface ll-store {
+    /// Read raw bytes from a path.
+    /// Returns Ok(Some(data)) if found, Ok(None) if not found, Err on error.
+    read: func(path: list<list<u8>>) -> result<option<list<u8>>, string>;
 
-    /// Result of a read operation.
-    variant read-result {
-        /// Value found at path
-        found(value),
-        /// No value at path
-        not-found,
-        /// Error occurred
-        read-error(string),
-    }
-
-    /// Result of a write operation.
-    variant write-result {
-        /// Write succeeded, returns the path written to
-        written(string),
-        /// Error occurred
-        write-error(string),
-    }
-
-    /// Read a value from a path.
-    read: func(path: string) -> read-result;
-
-    /// Write a value to a path.
-    write: func(path: string, val: value) -> write-result;
+    /// Write raw bytes to a path.
+    /// Returns Ok(result-path) on success, Err on error.
+    write: func(path: list<list<u8>>, data: list<u8>) -> result<list<list<u8>>, string>;
 }
 
 /// The Block interface that guests must implement.
 interface block {
+    /// Return a JSON manifest describing the Block's capabilities.
+    /// The manifest includes name, version, serialization format, and path declarations.
+    manifest: func() -> list<u8>;
+
     /// Run the Block. Called once when the Block starts.
     /// Returns Ok(()) on success or an error message on failure.
     run: func() -> result<_, string>;
@@ -53,8 +37,8 @@ interface block {
 
 /// The world that WASM Blocks live in.
 world block-world {
-    /// Host provides store access
-    import store;
+    /// Host provides ll-store access
+    import ll-store;
 
     /// Guest implements the Block
     export block;

@@ -8,6 +8,8 @@ description = "Block-based pico-process runtime for Isotope virtual OS"
 
 [dependencies]
 structfs-core-store = { workspace = true }
+structfs-ll-store = { workspace = true }
+bytes = "1.9"
 
 wasmtime = { workspace = true, features = ["component-model"] }
 tokio = { workspace = true, features = ["sync"] }
