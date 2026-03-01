@@ -5,14 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Serde integration for StructFS stores - typed access"
+readme = "../../README.md"
+keywords = ["store", "serde", "typed", "codec"]
+categories = ["data-structures", "encoding"]
 
 [features]
 default = []
 async = ["async-trait", "structfs-core-store/async"]
 
 [dependencies]
-structfs-core-store = { path = "../core-store" }
-structfs-ll-store = { path = "../ll-store" }
+structfs-core-store = { workspace = true }
+structfs-ll-store = { workspace = true }
 bytes = "1.9"
 serde.workspace = true
 serde_json.workspace = true

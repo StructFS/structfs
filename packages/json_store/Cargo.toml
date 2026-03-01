@@ -5,10 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "JSON-based store implementations for StructFS"
+readme = "../../README.md"
+keywords = ["store", "json", "in-memory", "structured-data"]
+categories = ["data-structures"]
 
 [dependencies]
-structfs-core-store = { path = "../core-store" }
-structfs-serde-store = { path = "../serde-store" }
+structfs-core-store = { workspace = true }
+structfs-serde-store = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

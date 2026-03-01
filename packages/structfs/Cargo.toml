@@ -5,3 +5,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "A uniform interface for accessing data through read/write operations on paths"
+readme = "../../README.md"
+keywords = ["store", "path", "read-write", "mount", "structured-data"]
+categories = ["data-structures", "rust-patterns"]
+
+[dependencies]
+structfs-core-store = { workspace = true }
+structfs-serde-store = { workspace = true, optional = true }
+structfs-json-store = { workspace = true, optional = true }
+structfs-http = { workspace = true, optional = true }
+structfs-sys = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:structfs-serde-store"]
+json = ["serde", "dep:structfs-json-store"]
+http = ["serde", "dep:structfs-http"]
+sys = ["dep:structfs-sys"]
+async = ["structfs-core-store/async", "structfs-serde-store?/async"]
+full = ["serde", "json", "http", "sys", "async"]

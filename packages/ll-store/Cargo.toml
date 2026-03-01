@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Low-level StructFS store traits - pure bytes, no semantics"
+readme = "../../README.md"
+keywords = ["store", "bytes", "read-write", "traits"]
+categories = ["data-structures"]
 
 [features]
 default = []

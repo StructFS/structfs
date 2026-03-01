@@ -5,13 +5,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core StructFS store traits - Record, Value, Path, Format"
+readme = "../../README.md"
+keywords = ["store", "path", "read-write", "structured-data"]
+categories = ["data-structures", "rust-patterns"]
 
 [features]
 default = []
 async = ["async-trait", "structfs-ll-store/async"]
 
 [dependencies]
-structfs-ll-store = { path = "../ll-store" }
+structfs-ll-store = { workspace = true }
 bytes = "1.9"
 collection_literals = { workspace = true }
 serde.workspace = true

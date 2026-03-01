@@ -42,15 +42,15 @@ repository = "https://github.com/AdjectiveNoun/structfs"
 
 [workspace.dependencies]
 # Workspace crates - layered architecture
-structfs-ll-store = { path = "packages/ll-store" }
-structfs-core-store = { path = "packages/core-store" }
-structfs-serde-store = { path = "packages/serde-store" }
+structfs-ll-store = { version = "0.1.0", path = "packages/ll-store" }
+structfs-core-store = { version = "0.1.0", path = "packages/core-store" }
+structfs-serde-store = { version = "0.1.0", path = "packages/serde-store" }
 
 # Workspace crates - store implementations
-structfs-json-store = { path = "packages/json_store" }
-structfs-http = { path = "packages/http" }
-structfs-repl = { path = "packages/repl" }
-structfs-sys = { path = "packages/sys" }
+structfs-json-store = { version = "0.1.0", path = "packages/json_store" }
+structfs-http = { version = "0.1.0", path = "packages/http" }
+structfs-repl = { version = "0.1.0", path = "packages/repl" }
+structfs-sys = { version = "0.1.0", path = "packages/sys" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

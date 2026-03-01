@@ -5,14 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "HTTP client stores for StructFS"
+readme = "../../README.md"
+keywords = ["store", "http", "client", "broker"]
+categories = ["web-programming::http-client"]
 
 [features]
 default = ["blocking"]
 blocking = ["reqwest/blocking"]
 
 [dependencies]
-structfs-core-store = { path = "../core-store" }
-structfs-serde-store = { path = "../serde-store" }
+structfs-core-store = { workspace = true }
+structfs-serde-store = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -5,14 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Interactive REPL for StructFS"
+readme = "../../README.md"
+keywords = ["store", "repl", "cli", "interactive"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "structfs"
 path = "src/main.rs"
 
 [dependencies]
-structfs-core-store = { path = "../core-store" }
-structfs-serde-store = { path = "../serde-store" }
+structfs-core-store = { workspace = true }
+structfs-serde-store = { workspace = true }
 structfs-json-store = { workspace = true }
 structfs-http = { workspace = true, features = ["blocking"] }
 structfs-sys = { workspace = true }
