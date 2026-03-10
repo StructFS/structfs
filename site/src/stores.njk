@@ -1,0 +1,155 @@
+---
+layout: base.njk
+title: Stores
+---
+
+<h1>Designing Stores</h1>
+<p class="page-intro">The <a href="/concepts/">concepts</a> page introduces the model. This page goes deeper into what it means to build a store — the design space, the trade-offs, and the shapes that stores take.</p>
+
+<section class="concept-section">
+  <h2>The contract</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">A store implements two operations: read a path, write a path and value.</p>
+    <p class="concept-detail">That's the entire surface area. But within those two operations, stores make choices that give them radically different behavior. A memory store is a tree you write values into. An HTTP store translates paths into URLs. A clock store ignores writes entirely and returns the current time on every read. All three are valid stores.</p>
+    <p class="concept-detail">The contract says nothing about what paths mean, what values are accepted, whether reads have side effects, or whether writes are durable. Those are design choices, and they define the character of the store.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Relative addressing</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">A store doesn't know where it lives in the tree.</p>
+    <p class="concept-detail">When you mount a store at <code>/api</code> and read <code>/api/users</code>, the store receives <code>users</code> — not <code>/api/users</code>. The tree strips the mount prefix before routing. This means the same store can be mounted at different paths without modification, and a store can be developed and tested in isolation without knowing its eventual location.</p>
+    <p class="concept-detail">This is the foundation of testability. If a store only sees relative paths, you can test it without constructing a full tree. Mount it at the root, send it paths directly, verify the results.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Store shapes</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Stores vary along a few dimensions. Understanding these dimensions helps you design stores that compose well.</p>
+  </div>
+
+  <div class="consequence-grid">
+    <div class="consequence-card">
+      <h3>Stateless</h3>
+      <p>Every read is a pure function of the path. No memory between operations. A clock, a random number generator, an environment variable reader. Simple to reason about, trivially safe to share.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Stateful</h3>
+      <p>Reads and writes change internal state. A memory store accumulates data. A file handle tracks a position. An HTTP broker queues requests. State means ordering matters — the same path can return different values depending on what happened before.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Proxy</h3>
+      <p>Translates StructFS operations into another protocol. An HTTP store turns reads into GET requests. A database store turns paths into queries. The store is an adapter between the StructFS world and everything outside it.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Composite</h3>
+      <p>Contains other stores. The tree itself is a composite store — it routes paths to child stores based on prefixes. A cache store wraps another store and intercepts reads. A logger sits in front of any store and records operations. Composites are stores made of stores.</p>
+    </div>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">These categories aren't exclusive. A caching proxy is both composite and proxy. An HTTP broker is stateful and proxy. The categories are a vocabulary for thinking about what a store does, not a type hierarchy to inherit from.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>The broker pattern</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Some operations don't fit cleanly into "write a value, read it back." The broker pattern handles this by splitting intent from execution.</p>
+    <p class="concept-detail">Write expresses intent — "I want this to happen." The store returns a handle path. Read against that handle executes the intent and returns the result.</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">write</span> /http {"method": "GET", "url": "https://example.com/data"}<br>
+    <span class="ex-result">→ /http/pending/0</span><br>
+    <br>
+    <span class="ex-prompt">read</span> /http/pending/0<br>
+    <span class="ex-result">→ {"status": 200, "body": {...}}</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The separation gives you control over timing. You can queue several writes before reading any results. You can inspect the queue. You can discard a pending operation by never reading its handle. The interface stays synchronous — no callbacks, no futures — but the interaction is inherently multi-step.</p>
+    <p class="concept-detail">This same pattern works for anything with deferred results: database transactions, file uploads, long-running computations. Write to start. Read to finish.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Handle-based protocols</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">When write returns a path, that path becomes a handle — a multi-step conversation with the store.</p>
+    <p class="concept-detail">File I/O is the classic example. You write to an "open" path with a filename and mode. The store returns a handle path. You read and write against that handle to interact with the file. You write to a "close" sub-path to release it.</p>
+  </div>
+
+  <div class="concept-tree">
+    write /fs/open {"path": "data.txt", "mode": "read"}<br>
+    <span class="tree-label">→ /fs/handles/0</span><br>
+    <br>
+    read /fs/handles/0 <span class="tree-label">← read file content</span><br>
+    read /fs/handles/0/position <span class="tree-label">← current offset</span><br>
+    write /fs/handles/0/close null <span class="tree-label">← release handle</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The handle is a sub-tree with its own paths. <code>position</code>, <code>close</code>, and the handle root itself are all just paths — readable, writable, composable with the same mechanisms as everything else. No special handle type, no resource lifecycle API. Just paths in the tree.</p>
+    <p class="concept-detail">This pattern generalizes to sessions, transactions, subscriptions, iterators — any interaction that spans multiple operations. The handle path is the session. Sub-paths are the session's capabilities.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Self-description</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">A store can describe itself through the same read interface it uses for everything else.</p>
+    <p class="concept-detail">If a store serves documentation at a well-known path, any tool that reads from the tree can discover what the store does, what paths it responds to, and what values it expects. No separate introspection API, no schema registry, no documentation system outside the tree.</p>
+    <p class="concept-detail">This is what makes the <a href="/patterns/#the-meta-lens">meta lens pattern</a> possible: reading <code>meta/path</code> returns information about what <code>path</code> does. But even without the meta convention, a store can put help text, schemas, or examples at any path it chooses. Self-description is a design choice a store makes, not a feature the system imposes.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>The representation hierarchy</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">StructFS has a narrow waist — two operations and structured values — but it encodes systems of increasing complexity.</p>
+  </div>
+
+  <div class="hierarchy-stack">
+    <div class="hierarchy-level">
+      <div class="hierarchy-label">Values</div>
+      <div class="hierarchy-desc">The primitive layer. A path names a value: a string, a number, a boolean, an array, a map. Reading and writing at this level is direct data access.</div>
+    </div>
+    <div class="hierarchy-level">
+      <div class="hierarchy-label">Structs</div>
+      <div class="hierarchy-desc">A tree of named values. Read a parent path, get a map. Read a child path, get a field. The struct is the natural unit of exchange — the shape that paths decompose into.</div>
+    </div>
+    <div class="hierarchy-level">
+      <div class="hierarchy-label">Interfaces</div>
+      <div class="hierarchy-desc">A struct whose fields are backed by read/write behavior. There's no distinction between a stored field and a computed one — a consumer can't tell whether a path returns a constant or runs a function. An interface is a schema over actions.</div>
+    </div>
+    <div class="hierarchy-level">
+      <div class="hierarchy-label">Protocols</div>
+      <div class="hierarchy-desc">An interface through time. A state machine defined by sequences of reads and writes against a family of paths. Handle-based protocols, the broker pattern, pagination — these are all protocols. The state machine is implicit in the paths and the ordering of operations.</div>
+    </div>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">Each level builds on the one below. You don't need new operations or new primitives to move up the hierarchy — just conventions about what paths mean and how they relate to each other. A store that implements a protocol is still just a store that responds to read and write.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Design principles</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">When designing a store, two principles help keep the interface clean.</p>
+  </div>
+
+  <div class="concept-ops">
+    <div class="concept-op">
+      <h3>Consistency</h3>
+      <p>If reading <code>/foo</code> returns a map with a key <code>bar</code>, then reading <code>/foo/bar</code> should return the same value. Paths should decompose predictably. Not every store can guarantee this — external systems have their own rules — but when you have a choice, prefer the more consistent option.</p>
+    </div>
+    <div class="concept-op">
+      <h3>Concision</h3>
+      <p>There should be one way to perform a given action. If a value is readable at two different paths, that's a design smell. If there are three ways to delete something, pick one. Fewer paths means fewer things to learn, test, and document.</p>
+    </div>
+  </div>
+</section>

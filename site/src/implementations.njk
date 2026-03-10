@@ -1,0 +1,141 @@
+---
+layout: base.njk
+title: Implementations
+---
+
+<h1>Implementations</h1>
+<p class="page-intro">StructFS is a specification. These are the implementations that bring it to life.</p>
+
+<section class="concept-section">
+  <h2>Rust (reference implementation)</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">The reference implementation of StructFS is written in Rust.</p>
+    <p class="concept-detail">It includes the core store traits, several built-in store types, and an interactive REPL for exploring stores from the command line.</p>
+  </div>
+
+  <div class="impl-install">
+    <h3>Install the REPL</h3>
+    <pre><code>cargo install structfs-repl</code></pre>
+  </div>
+
+  <div class="impl-install">
+    <h3>Use as a library</h3>
+    <pre><code>cargo add structfs</code></pre>
+  </div>
+
+  <div class="impl-links">
+    <a href="https://crates.io/crates/structfs" class="btn btn-primary">Crates.io</a>
+    <a href="https://docs.rs/structfs" class="btn btn-secondary">API Docs</a>
+    <a href="https://github.com/structfs/structfs" class="btn btn-ghost">Source</a>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Packages</h2>
+  <div class="concept-prose">
+    <p class="concept-detail">The Rust implementation provides two traits — <code>Reader</code> and <code>Writer</code> — that every store implements. The workspace is split into focused crates:</p>
+  </div>
+
+  <div class="consequence-grid" style="margin-top: 1rem;">
+    <div class="consequence-card">
+      <h3>Core store</h3>
+      <p>Path routing, value types, mount management. The foundation that all stores build on.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>JSON store</h3>
+      <p>In-memory tree of structured values. Fast, ephemeral, no dependencies. The default store for experimentation.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>HTTP</h3>
+      <p>HTTP client store (reads become GETs, writes become POSTs) and broker store (write queues a request, read executes it).</p>
+    </div>
+    <div class="consequence-card">
+      <h3>System primitives</h3>
+      <p>Environment variables, time, random numbers, process info, filesystem handles — OS functionality exposed as stores.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>The REPL</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">The REPL is an interactive shell for exploring a live store tree.</p>
+    <p class="concept-detail">Two commands, matching the two operations:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">></span> read /path/to/something<br>
+    <span class="ex-prompt">></span> write /path/to/something {"value": "here"}
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">When the REPL starts, several stores are already mounted:</p>
+  </div>
+
+  <div class="impl-table">
+    <table>
+      <thead>
+        <tr><th>Path</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>/ctx/http</code></td><td>HTTP broker — queue requests, read responses</td></tr>
+        <tr><td><code>/ctx/http_sync</code></td><td>Same, but blocks until the response arrives</td></tr>
+        <tr><td><code>/ctx/sys</code></td><td>OS primitives — env, time, random, process, filesystem</td></tr>
+        <tr><td><code>/ctx/help</code></td><td>Built-in documentation</td></tr>
+        <tr><td><code>/ctx/mounts</code></td><td>Mount configuration — read to list, write to add</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 style="margin-top: 1.5rem; font-size: 1.1rem;">Registers</h3>
+  <div class="concept-prose">
+    <p class="concept-detail">Registers capture output for reuse. Prefix any command with <code>@name</code>:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">></span> @result read /ctx/sys/time/now<br>
+    <span class="ex-result">"2025-01-15T10:30:00Z"</span><br>
+    <br>
+    <span class="ex-prompt">></span> read @result<br>
+    <span class="ex-result">"2025-01-15T10:30:00Z"</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The power is in dereference. <code>*@name</code> substitutes the register's value as a path:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">></span> @h write /ctx/sys/fs/open {"path": "/tmp/test.txt", "mode": "write", "encoding": "utf8"}<br>
+    <span class="ex-prompt">></span> write *@h "Hello, World!"<br>
+    <span class="ex-prompt">></span> write *@h/close null
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail"><code>*@h</code> expands to the path returned by the open call. <code>*@h/close</code> appends <code>/close</code> to that path. This is how you work with <a href="/stores/#handle-based-protocols">handle-based protocols</a> — the register holds the handle, dereference uses it.</p>
+  </div>
+
+  <h3 style="margin-top: 1.5rem; font-size: 1.1rem;">Help</h3>
+  <div class="concept-prose">
+    <p class="concept-detail">The REPL documents itself through the store tree:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">></span> read /ctx/help<br>
+    <span class="ex-prompt">></span> read /ctx/help/commands<br>
+    <span class="ex-prompt">></span> read /ctx/help/stores
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The help store aggregates documentation from all mounted stores. When you mount a new store that provides docs, they appear in the help tree automatically.</p>
+    <p class="concept-detail">The REPL also detects vi mode from your environment (<code>EDITOR=vim</code>, <code>set editing-mode vi</code> in <code>~/.inputrc</code>, or <code>STRUCTFS_EDIT_MODE=vi</code>).</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Want to build one?</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">StructFS is designed to be implementable in any language.</p>
+    <p class="concept-detail">The interface is two operations — read and write — over paths and structured values. No complex type system, no code generation, no language-specific features. If your language has maps, strings, and functions, you can implement StructFS.</p>
+    <p class="concept-detail">Start with the <a href="/concepts/">concepts</a>, then the <a href="/stores/">store design</a> page and the <a href="/patterns/">patterns</a>. The specification is the interface; everything else is an implementation choice.</p>
+  </div>
+</section>

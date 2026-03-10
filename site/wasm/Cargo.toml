@@ -1,0 +1,15 @@
+[package]
+name = "structfs-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+structfs-core-store = { path = "../../packages/core-store" }
+structfs-serde-store = { path = "../../packages/serde-store" }
+structfs-json-store = { path = "../../packages/json_store" }
+serde_json = "1.0"
+wasm-bindgen = "0.2"

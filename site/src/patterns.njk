@@ -1,0 +1,161 @@
+---
+layout: base.njk
+title: Patterns
+---
+
+<h1>Patterns</h1>
+<p class="page-intro">Two operations and a tree give you a small number of building blocks. These patterns show how those blocks compose into the mechanisms that real systems need.</p>
+
+<section class="concept-section">
+  <h2>References</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">A reference is a value that points somewhere else in the tree.</p>
+    <p class="concept-detail">When a store returns a collection, it doesn't have to embed every item inline. It can return <em>references</em> — lightweight values that say "the real data is over there." A reference is just a map with a <code>path</code> key:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">read</span> /users<br>
+    <span class="ex-result">→ {"items": [{"path": "users/alice"}, {"path": "users/bob"}]}</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">Each reference is a promise: follow the path and you'll find the value. The client decides which references to follow and when. This gives stores control over response size without requiring a separate "fields" or "expand" mechanism.</p>
+    <p class="concept-detail">References can optionally carry type information — a hint about the shape of the value at the other end:</p>
+  </div>
+
+  <div class="concept-exchange">
+    {"path": "users/alice", "type": {"name": "user"}}
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The type tells you what to expect without fetching. The path tells you where to go. Together, they let clients make navigation decisions cheaply — browsing the structure of the tree without loading every leaf.</p>
+  </div>
+
+  <div class="pattern-principles">
+    <div class="pattern-principle">
+      <h3>Shallow by default</h3>
+      <p>Return references instead of embedding. Clients follow what they need. Large responses become small ones.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Consistent addresses</h3>
+      <p>The path in a reference is the same path you'd use to read the value directly. No indirection, no special resolution step.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Convention, not primitive</h3>
+      <p>A reference is an ordinary map value. No changes to the data model. Any store can return them, any client can detect them.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Pagination</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Collections can be too large to return in one read. Pagination solves this with the same mechanism as everything else: paths and references.</p>
+    <p class="concept-detail">A paginated response includes the current page of items and a reference to the next page. The client doesn't construct pagination URLs — it follows the path the store provides:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">read</span> /users<br>
+    <span class="ex-result">→ {</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"items": [{"path": "users/alice"}, {"path": "users/bob"}],</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"links": {"next": {"path": "users/after/bob/limit/2"}}</span><br>
+    <span class="ex-result">&nbsp;&nbsp;}</span><br>
+    <br>
+    <span class="ex-prompt">read</span> /users/after/bob/limit/2<br>
+    <span class="ex-result">→ {</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"items": [{"path": "users/charlie"}, {"path": "users/dave"}],</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"links": {"self": {"path": "users/after/bob/limit/2"}}</span><br>
+    <span class="ex-result">&nbsp;&nbsp;}</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">When <code>links.next</code> is absent, you've reached the end. The client loop is: read a page, process items, follow <code>next</code>, repeat.</p>
+  </div>
+
+  <div class="pattern-principles">
+    <div class="pattern-principle">
+      <h3>Cursors, not offsets</h3>
+      <p>Offset-based pagination breaks when items are added or removed between pages. Cursors are stable — "everything after this item" stays correct even as the collection changes.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Server-controlled navigation</h3>
+      <p>The store decides what the cursor looks like, what page sizes are allowed, and what orderings exist. The client just follows references. This lets the store evolve its pagination strategy without breaking clients.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Parameters are paths</h3>
+      <p>Page size, ordering, and cursor are path components — <code>/users/by/name/after/bob/limit/20</code>. No query strings, no special encoding. Pagination addresses work exactly like every other address in the tree.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>The meta lens</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Sometimes you need to know what a path <em>does</em> before you use it. The meta lens is a convention for asking.</p>
+    <p class="concept-detail">For any path <code>P</code> in a store, reading <code>meta/P</code> returns information <em>about</em> that path — what operations it supports, what shape the data takes, what sub-paths are available. The data and its description live in the same tree, accessed by the same operations.</p>
+  </div>
+
+  <div class="concept-tree">
+    users/alice <span class="tree-label">← the data</span><br>
+    meta/users/alice <span class="tree-label">← what you can do with it</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">A meta response might tell you that a path is readable and writable, that it contains certain fields, or that it supports pagination with a maximum page size of 100. The exact shape is up to the store — the convention is the prefix, not the schema.</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">read</span> /meta/users<br>
+    <span class="ex-result">→ {</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"readable": true,</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"writable": true,</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"paginated": true,</span><br>
+    <span class="ex-result">&nbsp;&nbsp;&nbsp;&nbsp;"limits": {"default": 20, "max": 100}</span><br>
+    <span class="ex-result">&nbsp;&nbsp;}</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">This is different from metadata <em>on</em> data. A file's size and modification time describe the data itself — that's suffix metadata (<code>path/meta</code>). The meta lens describes the <em>path</em> — what the address means, what it affords. The two are orthogonal.</p>
+  </div>
+
+  <div class="pattern-principles">
+    <div class="pattern-principle">
+      <h3>Prefix, not suffix</h3>
+      <p><code>meta/path</code> describes the path's capabilities. <code>path/meta</code> describes the data's properties. Both use the same read interface, but they answer different questions.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Same interface</h3>
+      <p>Introspection uses the same read operation as everything else. No separate reflection API, no out-of-band schema registry. If you can read from the tree, you can introspect it.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Optionally writable</h3>
+      <p>If a meta path is writable, writing to it changes the configuration of the underlying path. The meta lens can be a control surface, not just a mirror.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Why these patterns work</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">None of these require new operations. They're all built from read, write, paths, and structured values.</p>
+  </div>
+
+  <div class="consequence-grid">
+    <div class="consequence-card">
+      <h3>Composable</h3>
+      <p>References can point to paginated collections. Paginated responses can contain references. Meta paths can describe pagination parameters. The patterns layer without friction because they share the same substrate.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Discoverable</h3>
+      <p>A client that understands references can navigate any store. A client that understands the meta lens can learn about stores it's never seen before. The patterns make the tree self-navigable.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Evolvable</h3>
+      <p>Stores can start simple and adopt these patterns incrementally. Return inline data first. Switch to references when responses get large. Add pagination when collections grow. Layer on meta when clients need introspection. Each step is backward-compatible.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Testable</h3>
+      <p>Since patterns are just data shapes returned by the read/write interface, you can test them with the same store mocks you use for everything else. No special pagination harness. No mock schema registry.</p>
+    </div>
+  </div>
+</section>

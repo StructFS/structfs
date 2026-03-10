@@ -1,0 +1,5 @@
+{
+  "title": "StructFS",
+  "url": "https://structfs.dev",
+  "description": "A uniform interface for accessing data through read/write operations on paths. Everything is a store."
+}

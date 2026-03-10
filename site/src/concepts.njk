@@ -1,0 +1,114 @@
+---
+layout: base.njk
+title: Concepts
+---
+
+<h1>How StructFS Works</h1>
+
+<section class="concept-section">
+  <h2>Everything is a store</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">A store is anything that holds data you can read from or write to.</p>
+    <p class="concept-detail">An in-memory tree is a store. An HTTP API is a store. The system clock is a store. A random number generator is a store. A database is a store.</p>
+    <p class="concept-detail">The difference between these systems isn't what they <em>are</em> — they're all just data behind an address. The difference is how you <em>talk</em> to them. Today, each one has its own protocol, its own client library, its own error handling, its own testing story. StructFS erases that difference. A store is a store is a store.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Two operations</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Every store responds to the same two operations. That's the entire interface.</p>
+  </div>
+
+  <div class="concept-ops">
+    <div class="concept-op">
+      <h3>read(path)</h3>
+      <p>Returns the value at that path, or null.</p>
+    </div>
+    <div class="concept-op">
+      <h3>write(path, value)</h3>
+      <p>Sets a value at that path. Returns a result path.</p>
+    </div>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">No DELETE, no PATCH, no LIST, no SUBSCRIBE. This works because <strong>paths carry meaning</strong>. HTTP needs many verbs because URLs are nouns — you need different verbs to do different things to the same noun. In StructFS, a path can name an action just as easily as it names a resource. Writing to <code>users/alice/deactivate</code> is as expressive as <code>DELETE /users/alice</code>, but the deactivation action is itself a path — one that can be composed, proxied, or intercepted using the same mechanisms as everything else.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>The tree</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Stores compose into a tree.</p>
+    <p class="concept-detail">Attach a store to a path prefix, and all reads and writes under that prefix route to that store. Attach several stores at different prefixes, and you have a unified tree:</p>
+  </div>
+
+  <div class="concept-tree">
+    /<br>
+    ├── users/ <span class="tree-label">← database store</span><br>
+    ├── api/ <span class="tree-label">← HTTP client</span><br>
+    ├── cache/ <span class="tree-label">← in-memory store</span><br>
+    └── config/ <span class="tree-label">← read-only config store</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">A store doesn't know where it lives in the tree. When you read <code>/api/items</code>, the HTTP store sees <code>items</code> — not <code>/api/items</code>. This is what makes stores swappable. Attach a mock at <code>/api</code> instead of the real HTTP client, and nothing else changes.</p>
+    <p class="concept-detail">The tree is the wiring diagram of your system. You can rewire it without touching application code.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Write returns a path</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">This is the mechanism that makes two operations sufficient for modeling complex systems.</p>
+    <p class="concept-detail">When you write to a store, the return value isn't just an acknowledgement — it's a <em>path</em>. That path might be the same path you wrote to, confirming the write. Or it might be a new path — a handle you can read from later.</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">write</span> /jobs {"task": "resize", "input": "photo.jpg"}<br>
+    <span class="ex-result">→ /jobs/pending/0</span><br>
+    <br>
+    <span class="ex-prompt">read</span> /jobs/pending/0<br>
+    <span class="ex-result">→ {"status": "complete", "output": "photo_resized.jpg"}</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The write queued work. The read collected the result. The interface stays synchronous — no callbacks, no futures, no event loops — but the protocol is asynchronous.</p>
+    <p class="concept-detail">The same pattern models file handles, subscriptions, sessions, transactions — any interaction that spans multiple steps. You don't need <code>OPEN</code>, <code>CLOSE</code>, <code>SUBSCRIBE</code>, <code>EXECUTE</code> as separate operations. Each of those is just a path that you read from or write to.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>Structured values</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Classic filesystems deal in bytes. This provides infinite flexibility and zero interoperability.</p>
+    <p class="concept-detail">StructFS deals in structured values: strings, numbers, booleans, arrays, and maps. The same types that JSON gives you, but as a native data model rather than a serialization format. When a store returns a value, it's already parsed. When you write a value, there's no encoding step. The structure <em>is</em> the data.</p>
+    <p class="concept-detail">When you need raw bytes — because you're bridging to a legacy system or optimizing a hot path — you can still use them. But the default is structured data.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2>What falls out of this</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">These aren't separate features. They're consequences of the model.</p>
+  </div>
+
+  <div class="consequence-grid">
+    <div class="consequence-card">
+      <h3>Testability</h3>
+      <p>If your application talks to an external service through a store, test it by swapping in a memory store at the same path. No network. No mock server. The store interface is the test seam.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Composability</h3>
+      <p>Every store has the same interface, so you can layer them. A cache in front of a remote store. A logger in front of anything. Each layer is just another store.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Portability</h3>
+      <p>The same application logic works whether the backing store is a local filesystem, a remote API, or an in-process data structure. Change the wiring, keep the logic.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Self-description</h3>
+      <p>Stores can document themselves through the same read interface. A system built from stores can describe its own structure without a separate introspection API.</p>
+    </div>
+  </div>
+</section>

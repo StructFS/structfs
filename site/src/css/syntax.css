@@ -1,0 +1,85 @@
+/* Syntax highlighting — light (warm) */
+:root {
+  --syn-keyword: #7c3aed;
+  --syn-string: #166534;
+  --syn-comment: #a8a29e;
+  --syn-function: #1d4ed8;
+  --syn-number: #b45309;
+  --syn-operator: #78716c;
+  --syn-punctuation: #57534e;
+  --syn-type: #0e7490;
+  --syn-attr: #9333ea;
+  --syn-variable: #1c1917;
+}
+
+/* Syntax highlighting — dark (warm slate) */
+[data-theme="dark"] {
+  --syn-keyword: #c4b5fd;
+  --syn-string: #fbbf24;
+  --syn-comment: #78716c;
+  --syn-function: #7dd3fc;
+  --syn-number: #f59e0b;
+  --syn-operator: #a8a29e;
+  --syn-punctuation: #d6cfc4;
+  --syn-type: #67e8f9;
+  --syn-attr: #d8b4fe;
+  --syn-variable: #e7e0d5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --syn-keyword: #c4b5fd;
+    --syn-string: #fbbf24;
+    --syn-comment: #78716c;
+    --syn-function: #7dd3fc;
+    --syn-number: #f59e0b;
+    --syn-operator: #a8a29e;
+    --syn-punctuation: #d6cfc4;
+    --syn-type: #67e8f9;
+    --syn-attr: #d8b4fe;
+    --syn-variable: #e7e0d5;
+  }
+}
+
+/* Prism token styles */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata { color: var(--syn-comment); font-style: italic; }
+
+.token.keyword,
+.token.tag,
+.token.boolean,
+.token.constant { color: var(--syn-keyword); }
+
+.token.string,
+.token.char,
+.token.attr-value { color: var(--syn-string); }
+
+.token.function { color: var(--syn-function); }
+
+.token.number { color: var(--syn-number); }
+
+.token.operator,
+.token.entity,
+.token.url { color: var(--syn-operator); }
+
+.token.punctuation { color: var(--syn-punctuation); }
+
+.token.class-name,
+.token.builtin { color: var(--syn-type); }
+
+.token.attr-name,
+.token.symbol { color: var(--syn-attr); }
+
+.token.variable { color: var(--syn-variable); }
+
+.token.macro,
+.token.annotation { color: var(--syn-attr); }
+
+.token.namespace { opacity: 0.8; }
+
+.token.important,
+.token.bold { font-weight: bold; }
+
+.token.italic { font-style: italic; }

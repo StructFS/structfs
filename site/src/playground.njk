@@ -1,0 +1,40 @@
+---
+layout: base.njk
+title: Playground
+---
+
+<section class="playground-section">
+  <h1>Playground</h1>
+  <p>Try StructFS in your browser. A memory store is pre-mounted at <code>/data</code>.</p>
+
+  <div id="wasm-status" class="wasm-loading">Loading playground...</div>
+
+  <div id="playground" style="display: none;">
+    <div class="playground-repl">
+      <div class="repl-toolbar">
+        <span class="prompt-label">StructFS</span>
+        <button class="btn btn-ghost" id="btn-reset" style="margin-left: auto; padding: 0.25rem 0.75rem; font-size: 0.8rem;">Reset</button>
+      </div>
+      <div class="repl-output" id="repl-output"></div>
+      <div class="repl-input-row">
+        <span class="prompt-char">&gt;</span>
+        <input type="text" id="repl-input" placeholder="try: write /data/hello &quot;world&quot;" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+
+    <div style="margin-top: 1.5rem;">
+      <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Try these:</p>
+      <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+        <button class="btn btn-ghost example-btn" data-cmd="help">help</button>
+        <button class="btn btn-ghost example-btn" data-cmd='write /data/users/alice {"name": "Alice", "email": "alice@example.com"}'>write user</button>
+        <button class="btn btn-ghost example-btn" data-cmd="read /data/users/alice">read user</button>
+        <button class="btn btn-ghost example-btn" data-cmd='write /ctx/mounts/scratch {"type": "memory"}'>mount store</button>
+        <button class="btn btn-ghost example-btn" data-cmd="mounts">list mounts</button>
+        <button class="btn btn-ghost example-btn" data-cmd='@greeting write /data/hello "world"'>use register</button>
+        <button class="btn btn-ghost example-btn" data-cmd="read @greeting">read register</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script type="module" src="/js/playground.js"></script>

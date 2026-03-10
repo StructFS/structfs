@@ -1,0 +1,17 @@
+{
+  "name": "structfs-site",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.20.0",
+  "scripts": {
+    "build": "./build.sh",
+    "clean": "./clean.sh",
+    "serve": "eleventy --serve",
+    "dev": "eleventy --serve --watch"
+  },
+  "devDependencies": {
+    "@11ty/eleventy": "^3.0.0",
+    "@11ty/eleventy-plugin-syntaxhighlight": "^5.0.2",
+    "markdown-it-anchor": "^9.0.0"
+  }
+}
