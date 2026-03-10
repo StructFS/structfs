@@ -670,17 +670,26 @@ h1, h2, h3, h4 {
 .concept-highlight {
   background: var(--bg-card);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
   border-radius: var(--radius);
   padding: 1.25rem 1.5rem;
-  margin-top: 1rem;
+  margin-top: 1.25rem;
 }
 
 .concept-highlight p {
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  line-height: 1.7;
 }
 
 .concept-highlight p:first-child {
   margin-top: 0;
+}
+
+.concept-highlight p:last-child {
+  color: var(--text);
+  font-weight: 500;
 }
 
 .concept-ops {
@@ -702,6 +711,12 @@ h1, h2, h3, h4 {
   font-size: 1rem;
   color: var(--accent);
   margin-bottom: 0.35rem;
+}
+
+.concept-op .op-returns {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.85rem;
 }
 
 .concept-op p {
@@ -811,6 +826,43 @@ h1, h2, h3, h4 {
   font-size: 0.85rem;
   color: var(--text-muted);
   line-height: 1.6;
+}
+
+/* === Design lineage === */
+.lineage-stack {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.lineage-item {
+  padding: 1.25rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.lineage-item:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.lineage-item h3 {
+  font-size: 1rem;
+  color: var(--accent);
+  margin-bottom: 0.4rem;
+}
+
+.lineage-item p {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+/* === Walkthrough headings === */
+.walkthrough-heading {
+  font-size: 1rem;
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  color: var(--text);
 }
 
 /* === Hierarchy stack === */

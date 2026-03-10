@@ -8,7 +8,7 @@ layout: base.njk
   <p class="subtitle">Two operations. Structured data. Paths for everything.</p>
   <div class="hero-actions">
     <a href="/playground/" class="btn btn-primary">Try it</a>
-    <a href="/concepts/" class="btn btn-secondary">How it works</a>
+    <a href="/concepts/" class="btn btn-secondary">The model</a>
   </div>
 </section>
 
@@ -16,7 +16,7 @@ layout: base.njk
   <div class="philosophy-lead">
     <p>In the 1970s, every application had to know how to talk to every printer. Then operating systems introduced drivers &mdash; a uniform interface between applications and hardware &mdash; and the problem disappeared.</p>
     <p>Today we have the same problem with data. Every application has to know how to talk to every API, every database, every file format, every cloud service. The protocols differ. The conventions differ. The error handling differs. The testing story is always bespoke.</p>
-    <p>That's StructFS. A driver layer for data. One interface. Two operations. Everything else is a store you plug in.</p>
+    <p>StructFS is a driver layer for data. One interface. Two operations. Everything else is a store you plug in.</p>
   </div>
 </section>
 
@@ -24,19 +24,19 @@ layout: base.njk
   <div class="feature-grid">
     <div class="feature-card">
       <h3>Read and write</h3>
-      <p>Every interaction with every system &mdash; files, HTTP, databases, OS primitives &mdash; is expressed as <code>read(path)</code> or <code>write(path, value)</code>. There are no other operations. This isn't a limitation; it's the point.</p>
+      <p>Every interaction &mdash; files, HTTP, databases, OS primitives &mdash; is <code>read(path)</code> or <code>write(path, value)</code>. No other operations.</p>
     </div>
     <div class="feature-card">
       <h3>Structures, not bytes</h3>
-      <p>Classic filesystems deal in bytes and force every application to reinvent parsing. StructFS deals in typed values: strings, numbers, booleans, arrays, maps. The struct is the universal unit of exchange.</p>
+      <p>Values are typed &mdash; strings, numbers, booleans, arrays, maps &mdash; not byte streams. No parsing, no encoding, no format negotiation.</p>
     </div>
     <div class="feature-card">
       <h3>Paths are the interface</h3>
-      <p>HTTP needs many verbs because URLs are nouns. In StructFS, paths <em>are</em> the interface. A path can name a resource, an action, a capability. Composition happens by composing paths.</p>
+      <p>A path names a resource, an action, or a capability. Composition happens by composing paths, not by inventing new verbs.</p>
     </div>
     <div class="feature-card">
       <h3>Stores all the way down</h3>
-      <p>A store is anything that responds to read and write. Mount stores into a tree. The mount system itself is a store. Configuration is a store. Help is a store. There is no escape hatch &mdash; and none is needed.</p>
+      <p>Anything that responds to read and write is a store. The tree is stores. Configuration is a store. Documentation is a store.</p>
     </div>
   </div>
 </section>
@@ -45,16 +45,16 @@ layout: base.njk
   <h2>What this makes possible</h2>
   <div class="philosophy-grid">
     <div>
-      <h3>Test without mocking the world</h3>
-      <p>An application that talks to an HTTP API through StructFS can be tested by swapping in a memory store. No network. No mock server. No test doubles for six different client libraries. Swap the store, run the test.</p>
+      <h3>Test without mocking</h3>
+      <p>Swap a store at a path. No network, no mock server, no test doubles for six client libraries.</p>
     </div>
     <div>
-      <h3>Compose without glue code</h3>
-      <p>Mount a remote API at one path, a local cache at another, a transformation layer in between. The application sees one tree. Routing, caching, and proxying are just mount configuration &mdash; not application code.</p>
+      <h3>Compose without glue</h3>
+      <p>Mount stores at prefixes. Caching, routing, proxying &mdash; tree configuration, not application code.</p>
     </div>
     <div>
       <h3>Port without rewriting</h3>
-      <p>StructFS is transport-agnostic and format-agnostic. The same application logic works whether the backing store is a local filesystem, an HTTP service, or an in-process data structure. Change the wiring, keep the logic.</p>
+      <p>Same logic, different stores. Local, remote, in-process. Change the wiring, keep the code.</p>
     </div>
   </div>
 </section>
@@ -63,7 +63,7 @@ layout: base.njk
   <h2>Get started</h2>
   <div class="hero-actions" style="margin-top: 1rem; justify-content: flex-start;">
     <a href="/playground/" class="btn btn-primary">Playground</a>
-    <a href="/getting-started/" class="btn btn-secondary">Walkthrough</a>
+    <a href="/concepts/" class="btn btn-secondary">Read the model</a>
     <a href="/implementations/" class="btn btn-ghost">Implementations</a>
   </div>
 </section>
