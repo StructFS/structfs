@@ -4,8 +4,8 @@ layout: base.njk
 
 <section class="hero">
   <h1>StructFS</h1>
-  <p class="tagline">The driver system for modern applications</p>
-  <p class="subtitle">Two operations. Structured data. Paths for everything.</p>
+  <p class="tagline">One interface. Every system.</p>
+  <p class="subtitle">APIs, databases, file systems, cloud services &mdash; all accessed the same way. Test anything. Swap anything. Compose everything.</p>
   <div class="hero-actions">
     <a href="/playground/" class="btn btn-primary">Try it</a>
     <a href="/concepts/" class="btn btn-secondary">The model</a>
@@ -14,35 +14,12 @@ layout: base.njk
 
 <section class="philosophy">
   <div class="philosophy-lead">
-    <p>In the 1970s, every application had to know how to talk to every printer. Then operating systems introduced drivers &mdash; a uniform interface between applications and hardware &mdash; and the problem disappeared.</p>
-    <p>Today we have the same problem with data. Every application has to know how to talk to every API, every database, every file format, every cloud service. The protocols differ. The conventions differ. The error handling differs. The testing story is always bespoke.</p>
-    <p>StructFS is a driver layer for data. One interface. Two operations. Everything else is a store you plug in.</p>
+    <p>Every data source your application touches &mdash; APIs, databases, file systems, cloud services &mdash; has its own client library, its own error model, its own testing story. You learn each one separately. Test each one separately. Replace each one separately.</p>
+    <p>StructFS makes them all the same thing.</p>
   </div>
 </section>
 
-<section class="features">
-  <div class="feature-grid">
-    <div class="feature-card">
-      <h3>Read and write</h3>
-      <p>Every interaction &mdash; files, HTTP, databases, OS primitives &mdash; is <code>read(path)</code> or <code>write(path, value)</code>. No other operations.</p>
-    </div>
-    <div class="feature-card">
-      <h3>Structures, not bytes</h3>
-      <p>Values are typed &mdash; strings, numbers, booleans, arrays, maps &mdash; not byte streams. No parsing, no encoding, no format negotiation.</p>
-    </div>
-    <div class="feature-card">
-      <h3>Paths are the interface</h3>
-      <p>A path names a resource, an action, or a capability. Composition happens by composing paths, not by inventing new verbs.</p>
-    </div>
-    <div class="feature-card">
-      <h3>Stores all the way down</h3>
-      <p>Anything that responds to read and write is a store. The tree is stores. Configuration is a store. Documentation is a store.</p>
-    </div>
-  </div>
-</section>
-
-<section class="philosophy" style="margin-top: 2.5rem;">
-  <h2>What this makes possible</h2>
+<section class="features" style="margin-top: 2rem;">
   <div class="philosophy-grid">
     <div>
       <h3>Test without mocking</h3>
@@ -55,6 +32,28 @@ layout: base.njk
     <div>
       <h3>Port without rewriting</h3>
       <p>Same logic, different stores. Local, remote, in-process. Change the wiring, keep the code.</p>
+    </div>
+  </div>
+</section>
+
+<section class="features">
+  <h2>How it works</h2>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <h3>Two operations</h3>
+      <p>Every interaction is <code>read(path)</code> or <code>write(path, value)</code>. The simplicity is the point &mdash; complexity lives in the paths and values, not the verb set.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Structured values</h3>
+      <p>Data crosses boundaries as typed values &mdash; the same model every serialization format converges on. No parsing, no encoding, no format negotiation.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Paths carry meaning</h3>
+      <p>A path names a resource, an action, or a capability. Different paths for different things &mdash; not different verbs for the same thing.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Stores compose into a tree</h3>
+      <p>Mount a database at <code>/users</code>, a cache at <code>/cache</code>, a clock at <code>/time</code>. The tree is the wiring diagram. Rewire it without changing application code.</p>
     </div>
   </div>
 </section>
