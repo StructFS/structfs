@@ -55,6 +55,12 @@ cargo run -p structfs-repl
 - Use `thiserror` for error types
 - Use `serde` for serialization with JSON as the primary format
 
+## Commit Messages
+
+- Use conventional commits (`feat:`, `fix:`, `refactor:`, etc.)
+- Describe what changed and why — never use subjective quality labels like "S-tier", "world-class", "best-in-class", "premium", etc.
+- Keep the subject line under 72 characters; use the body for detail
+
 ## Architecture Decisions
 
 1. **Three-layer architecture**:
