@@ -16,6 +16,7 @@ members = [
 ]
 exclude = [
     "namecode/site/wasm",
+    "site/wasm",
 ]
 
 # Exclude WASM-only crates from default builds

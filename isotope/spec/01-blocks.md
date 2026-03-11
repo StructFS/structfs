@@ -120,9 +120,36 @@ This is useful for Blocks that want to batch or prioritize work.
 
 ## Self-Description
 
-Blocks describe their interface in two ways:
+Blocks describe their interface at two levels: a **static manifest** inspectable
+before the Block runs, and a **runtime declaration** written through the store.
 
-### Static Declaration
+### Static Manifest
+
+Every Block exports a `manifest()` function that returns a JSON blob:
+
+```json
+{
+    "name": "log-service",
+    "version": "1.0.0",
+    "serialization": "application/json",
+    "paths": {
+        "/": { "read": "Returns server status" },
+        "/log/{level}": { "write": "Log a message at the specified level" },
+        "/log/recent": { "read": "Returns recent log entries" }
+    }
+}
+```
+
+The runtime calls `manifest()` **before wiring** to discover the Block's
+declared serialization format, then provides the matching codec when bridging the
+store. This solves a bootstrap ordering problem: the store bridge needs to know
+what serialization the Block speaks, but the Block can't declare that *through*
+the store—it doesn't have one yet.
+
+The manifest is always JSON regardless of the Block's native transport encoding.
+See `isotope/rationale/04-why-manifest.md` for the full design rationale.
+
+### Runtime Declaration
 
 On startup, a Block writes its interface to `/iso/self/interface`:
 
@@ -142,8 +169,9 @@ write("/iso/self/interface", {
 })
 ```
 
-This allows tooling (Assembly validators, documentation generators) to
-understand the Block's interface without running it.
+This runtime declaration goes through the store interface and can include
+dynamic information not available at compile time. Tooling (Assembly validators,
+documentation generators) can also use it to understand the Block's interface.
 
 ### Runtime Introspection (Meta Lens)
 

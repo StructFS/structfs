@@ -128,9 +128,13 @@ impl WasmBlock {
 
     /// Retrieve the manifest from this WASM Block.
     ///
+    /// The manifest is a JSON blob declaring the block's name, version,
+    /// serialization format, and path interface. The runtime calls this
+    /// **before wiring** to discover what codec the block speaks—the store
+    /// bridge can't be set up without it (see `isotope/rationale/04-why-manifest.md`).
+    ///
     /// Creates a minimal Wasmtime environment with a no-op store,
     /// instantiates the component, and calls the guest's `manifest()` export.
-    /// Returns the raw JSON bytes describing the block's capabilities.
     pub fn manifest(&self) -> Result<Vec<u8>> {
         use structfs_core_store::NoCodec;
 

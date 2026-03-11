@@ -116,7 +116,7 @@ Values: `created`, `starting`, `running`, `stopping`, `stopped`, `failed`
 
 ### `/iso/self/interface`
 
-Write the Block's interface declaration here at startup:
+Write the Block's runtime interface declaration here at startup:
 
 ```
 write("/iso/self/interface", {
@@ -132,6 +132,11 @@ write("/iso/self/interface", {
     }
 })
 ```
+
+This is the **runtime** counterpart to the static `manifest()` export. The
+static manifest is available before wiring (the runtime needs it to set up the
+codec bridge). The runtime declaration here goes through the store and can
+include dynamic information not known at compile time.
 
 This enables:
 - Assembly validation (do wired Blocks have compatible interfaces?)

@@ -27,7 +27,29 @@ interface ll-store {
 /// The Block interface that guests must implement.
 interface block {
     /// Return a JSON manifest describing the Block's capabilities.
-    /// The manifest includes name, version, serialization format, and path declarations.
+    ///
+    /// The manifest declares name, version, serialization format, and path
+    /// interface. The runtime inspects it before wiring to discover what
+    /// codec the Block speaks.
+    ///
+    /// This is intentionally opaque bytes rather than a structured WIT type.
+    /// Three alternatives were considered and rejected:
+    ///
+    /// 1. Self-describe through the store (write to `/iso/self/interface`):
+    ///    The manifest declares the serialization format the store *will*
+    ///    speak — the runtime needs it before it can bridge the store.
+    ///    Chicken-and-egg.
+    ///
+    /// 2. Structured WIT record: Blocks are not exclusively WASM components.
+    ///    Web is a target surface. Encoding the manifest schema into WIT
+    ///    marries us to the Component Model for a cross-runtime concern.
+    ///
+    /// 3. WASM custom section: Same portability problem — not every block
+    ///    will be a WASM component.
+    ///
+    /// JSON is the lingua franca that works across every runtime target.
+    /// The opaque return type is portable precisely because it does not
+    /// depend on the host's type system.
     manifest: func() -> list<u8>;
 
     /// Run the Block. Called once when the Block starts.
