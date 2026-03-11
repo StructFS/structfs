@@ -7,7 +7,7 @@ title: Patterns
 <p class="page-intro">The <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a> shows how two operations scale to arbitrary complexity through conventions at each level. These are the conventions that have emerged so far — value-level, interface-level, and structural.</p>
 
 <section class="concept-section">
-  <h2>References</h2>
+  <h2 id="references">References</h2>
   <div class="concept-prose">
     <p class="concept-lead">A reference is a value that points somewhere else in the tree.</p>
     <p class="concept-detail">When a store returns a collection, it doesn't have to embed every item inline. It can return <em>references</em> — lightweight values that say "the real data is over there." A reference is just a map with a <code>path</code> key:</p>
@@ -48,7 +48,7 @@ title: Patterns
 </section>
 
 <section class="concept-section">
-  <h2>Pagination</h2>
+  <h2 id="pagination">Pagination</h2>
   <div class="concept-prose">
     <p class="concept-lead">Collections that are too large for one read. Solved with paths and references — no new mechanisms.</p>
     <p class="concept-detail">A paginated response includes items and a reference to the next page. The client doesn't construct pagination URLs — it follows the path the store provides:</p>
@@ -133,7 +133,7 @@ title: Patterns
 </section>
 
 <section class="concept-section">
-  <h2>The patterns compose</h2>
+  <h2 id="the-patterns-compose">The patterns compose</h2>
   <div class="concept-prose">
     <p class="concept-lead">These aren't independent features. They're layers that stack because they share the same substrate.</p>
   </div>
@@ -159,7 +159,7 @@ title: Patterns
 </section>
 
 <section class="concept-section">
-  <h2>Thought experiment: 1rec</h2>
+  <h2 id="thought-experiment-1rec">Thought experiment: 1rec</h2>
   <div class="concept-prose">
     <p class="concept-lead">Mount a service. Any service. Now interact with it through read and write.</p>
     <p class="concept-detail">The internet already has naming — DNS, URLs, service registries. What it doesn't have is a uniform interaction model. Every service has its own client library, its own pagination scheme, its own error model, its own authentication flow. You need to learn each one separately. Test each one separately. Handle each one's failures separately.</p>
@@ -202,3 +202,8 @@ title: Patterns
     <p>One record. The tree unfolds as far as you want to go.</p>
   </div>
 </section>
+
+<nav class="page-nav">
+  <a href="/stores/" class="page-nav-prev">← Stores</a>
+  <a href="/implementations/" class="page-nav-next">Continue to Implementations →</a>
+</nav>

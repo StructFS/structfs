@@ -11,7 +11,7 @@ title: The Model
 </div>
 
 <section class="concept-section">
-  <h2>The store</h2>
+  <h2 id="the-store">The store</h2>
   <div class="concept-prose">
     <p class="concept-lead">A store is anything that responds to read and write.</p>
     <p class="concept-detail">A tree of data in memory is a store. So is an HTTP endpoint, a system clock, a database, or a random number generator. The differences between these systems — protocol, client library, error handling, testing story — are real, but they're accidental. At the level that matters to the application, they're all the same thing: data behind an address.</p>
@@ -20,7 +20,7 @@ title: The Model
 </section>
 
 <section class="concept-section">
-  <h2>Two operations</h2>
+  <h2 id="two-operations">Two operations</h2>
   <div class="concept-prose">
     <p class="concept-lead">Every store responds to the same two operations. That's the entire interface.</p>
   </div>
@@ -44,7 +44,7 @@ title: The Model
 </section>
 
 <section class="concept-section">
-  <h2>The tree</h2>
+  <h2 id="the-tree">The tree</h2>
   <div class="concept-prose">
     <p class="concept-lead">Stores compose into a tree.</p>
     <p class="concept-detail">Mount a store at a path prefix, and all reads and writes under that prefix route to that store. Mount several stores at different prefixes, and you have a unified namespace:</p>
@@ -65,7 +65,7 @@ title: The Model
 </section>
 
 <section class="concept-section">
-  <h2>Write returns a path</h2>
+  <h2 id="write-returns-a-path">Write returns a path</h2>
   <div class="concept-prose">
     <p class="concept-lead">This is the mechanism that makes two operations sufficient for complex systems.</p>
     <p class="concept-detail">When you write to a store, the return value isn't an acknowledgement — it's a <em>path</em>. That path might be the same one you wrote to, confirming the write. Or it might be a new path — a handle you can read from later.</p>
@@ -86,7 +86,7 @@ title: The Model
 </section>
 
 <section class="concept-section">
-  <h2>Structured values</h2>
+  <h2 id="structured-values">Structured values</h2>
   <div class="concept-prose">
     <p class="concept-lead">Classic filesystems deal in bytes. Infinite flexibility, zero interoperability.</p>
     <p class="concept-detail">StructFS deals in structured values — the same types your programming language already gives you, and the same model that every serialization format converges on. JSON, CBOR, MessagePack, Protocol Buffers — they all encode the same core shapes. StructFS makes that shared model native. When a store returns a value, it's already structured. When you write a value, there's no encoding step. The structure <em>is</em> the data.</p>
@@ -95,7 +95,7 @@ title: The Model
 </section>
 
 <section class="concept-section">
-  <h2>Path encoding</h2>
+  <h2 id="path-encoding">Path encoding</h2>
   <div class="concept-prose">
     <p class="concept-lead">Structured values solve the data boundary. Paths need the same treatment.</p>
     <p class="concept-detail">A path component in StructFS must be a valid identifier in every language that might handle it — Rust, Go, JavaScript, Python, and anything else that touches the tree. This is the same problem HTTP faces with URLs: arbitrary strings need to be constrained to a form that survives every context they pass through.</p>
@@ -148,7 +148,7 @@ title: The Model
 </section>
 
 <section class="concept-section">
-  <h2>Design lineage</h2>
+  <h2 id="design-lineage">Design lineage</h2>
   <div class="concept-prose">
     <p class="concept-lead">StructFS sits at an intersection of three traditions.</p>
   </div>
@@ -168,3 +168,7 @@ title: The Model
     </div>
   </div>
 </section>
+
+<nav class="page-nav">
+  <a href="/stores/" class="page-nav-next">Continue to Stores →</a>
+</nav>

@@ -21,6 +21,7 @@
     <div class="nav-inner">
       <a href="/" class="nav-logo">StructFS</a>
       <div class="nav-right">
+        <button class="nav-hamburger" aria-label="Menu" aria-expanded="false">&#9776;</button>
         <div class="nav-links">
           <a href="/concepts/">The Model</a>
           <a href="/stores/">Stores</a>
@@ -76,6 +77,26 @@
 
       apply(current());
     })();
+
+    // Hamburger menu
+    var hamburger = document.querySelector(".nav-hamburger");
+    var navLinks = document.querySelector(".nav-links");
+    if (hamburger && navLinks) {
+      hamburger.addEventListener("click", function() {
+        var open = navLinks.classList.toggle("open");
+        hamburger.setAttribute("aria-expanded", open);
+      });
+    }
+
+    // Heading anchor links
+    document.querySelectorAll("h2[id], h3[id]").forEach(function(h) {
+      var a = document.createElement("a");
+      a.href = "#" + h.id;
+      a.className = "heading-anchor";
+      a.textContent = "#";
+      a.setAttribute("aria-label", "Link to " + h.textContent);
+      h.appendChild(a);
+    });
   </script>
 </body>
 </html>

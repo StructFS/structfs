@@ -7,7 +7,7 @@ title: Implementations
 <p class="page-intro">StructFS is an architectural style. These are the implementations that make it concrete.</p>
 
 <section class="concept-section">
-  <h2>Rust (reference implementation)</h2>
+  <h2 id="rust">Rust (reference implementation)</h2>
   <div class="concept-prose">
     <p class="concept-lead">The reference implementation is written in Rust.</p>
     <p class="concept-detail">It includes the core store traits, several built-in store types, and an interactive REPL for exploring stores from the command line.</p>
@@ -31,7 +31,7 @@ title: Implementations
 </section>
 
 <section class="concept-section">
-  <h2>Packages</h2>
+  <h2 id="packages">Packages</h2>
   <div class="concept-prose">
     <p class="concept-detail">The implementation provides two traits — <code>Reader</code> and <code>Writer</code> — that every store implements. The workspace is split into focused crates:</p>
   </div>
@@ -57,7 +57,7 @@ title: Implementations
 </section>
 
 <section class="concept-section">
-  <h2>Walkthrough</h2>
+  <h2 id="walkthrough">Walkthrough</h2>
   <div class="concept-prose">
     <p class="concept-lead">Install the REPL and try the model hands-on. Or use the <a href="/playground/">browser playground</a>.</p>
   </div>
@@ -129,7 +129,7 @@ title: Implementations
 </section>
 
 <section class="concept-section">
-  <h2>The REPL</h2>
+  <h2 id="the-repl">The REPL</h2>
   <div class="concept-prose">
     <p class="concept-detail">When the REPL starts, several stores are already mounted:</p>
   </div>
@@ -188,10 +188,14 @@ title: Implementations
 </section>
 
 <section class="concept-section">
-  <h2>Build your own</h2>
+  <h2 id="build-your-own">Build your own</h2>
   <div class="concept-prose">
     <p class="concept-lead">StructFS is designed to be implementable in any language.</p>
     <p class="concept-detail">The interface is two operations over paths and structured values. No complex type system, no code generation, no language-specific features. If your language has maps, strings, and functions, you can implement StructFS.</p>
     <p class="concept-detail">Start with <a href="/concepts/">the model</a>, then <a href="/stores/">store design</a> and <a href="/patterns/">patterns</a>. The specification is the interface; everything else is an implementation choice.</p>
   </div>
 </section>
+
+<nav class="page-nav">
+  <a href="/patterns/" class="page-nav-prev">← Patterns</a>
+</nav>

@@ -7,7 +7,7 @@ title: Designing Stores
 <p class="page-intro"><a href="/concepts/">The model</a> defines the interface. This page is about the design space on the other side of it — the shapes stores take, the trade-offs they make, and the patterns that emerge when you build systems from them.</p>
 
 <section class="concept-section">
-  <h2>The contract</h2>
+  <h2 id="the-contract">The contract</h2>
   <div class="concept-prose">
     <p class="concept-lead">Read a path, get a value. Write a path and value, get a result path.</p>
     <p class="concept-detail">That's the entire surface area. But within those two operations, stores make choices that give them radically different behavior. A memory store is a tree you write values into. An HTTP store translates paths into URLs. A clock store ignores writes entirely and returns the current time on every read. All three are valid stores.</p>
@@ -16,7 +16,7 @@ title: Designing Stores
 </section>
 
 <section class="concept-section">
-  <h2>Relative addressing</h2>
+  <h2 id="relative-addressing">Relative addressing</h2>
   <div class="concept-prose">
     <p class="concept-lead">A store doesn't know where it lives in the tree.</p>
     <p class="concept-detail">When you mount a store at <code>/api</code> and read <code>/api/users</code>, the store receives <code>users</code> — not <code>/api/users</code>. The tree strips the mount prefix before routing. The same store can be mounted at different paths without modification, and developed and tested in isolation without knowing its eventual location.</p>
@@ -25,7 +25,7 @@ title: Designing Stores
 </section>
 
 <section class="concept-section">
-  <h2>Store shapes</h2>
+  <h2 id="store-shapes">Store shapes</h2>
   <div class="concept-prose">
     <p class="concept-lead">Stores vary along a few dimensions. Understanding these dimensions helps you design stores that compose well.</p>
   </div>
@@ -98,7 +98,7 @@ title: Designing Stores
 </section>
 
 <section class="concept-section">
-  <h2>Self-description</h2>
+  <h2 id="self-description">Self-description</h2>
   <div class="concept-prose">
     <p class="concept-lead">A store can describe itself through the same read interface it uses for everything else.</p>
     <p class="concept-detail">Serve documentation at a well-known path, and any tool that reads from the tree can discover what the store does, what paths it responds to, and what values it expects. No separate introspection API, no schema registry, no documentation system outside the tree.</p>
@@ -107,7 +107,7 @@ title: Designing Stores
 </section>
 
 <section class="concept-section">
-  <h2>Design principles</h2>
+  <h2 id="design-principles">Design principles</h2>
   <div class="concept-prose">
     <p class="concept-lead">Two principles for keeping a store's interface clean.</p>
   </div>
@@ -123,3 +123,8 @@ title: Designing Stores
     </div>
   </div>
 </section>
+
+<nav class="page-nav">
+  <a href="/concepts/" class="page-nav-prev">← The Model</a>
+  <a href="/patterns/" class="page-nav-next">Continue to Patterns →</a>
+</nav>
