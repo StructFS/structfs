@@ -152,7 +152,10 @@ impl WasmBlock {
         BlockWorld::add_to_linker::<
             WasmBlockState<NoOpStore, NoCodec>,
             wasmtime::component::HasSelf<WasmBlockState<NoOpStore, NoCodec>>,
-        >(&mut linker, |state: &mut WasmBlockState<NoOpStore, NoCodec>| state)
+        >(
+            &mut linker,
+            |state: &mut WasmBlockState<NoOpStore, NoCodec>| state,
+        )
         .map_err(|e| RuntimeError::Store(StoreError::store("wasmtime", "linker", e.to_string())))?;
 
         let state = WasmBlockState::new(BlockId::new(), NoOpStore, NoCodec, Format::OCTET_STREAM);
@@ -166,7 +169,11 @@ impl WasmBlock {
             .featherweight_block_block()
             .call_manifest(&mut store)
             .map_err(|e| {
-                RuntimeError::Store(StoreError::store("wasmtime", "call_manifest", e.to_string()))
+                RuntimeError::Store(StoreError::store(
+                    "wasmtime",
+                    "call_manifest",
+                    e.to_string(),
+                ))
             })?;
 
         Ok(manifest_bytes)
@@ -378,10 +385,7 @@ mod tests {
             vec![b"output".to_vec(), b"test".to_vec()],
             b"hello".to_vec(),
         );
-        assert_eq!(
-            result,
-            Ok(vec![b"output".to_vec(), b"test".to_vec()])
-        );
+        assert_eq!(result, Ok(vec![b"output".to_vec(), b"test".to_vec()]));
     }
 
     #[test]

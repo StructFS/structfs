@@ -20,8 +20,11 @@ printf "fmt: "
 if cargo fmt --all -- --check >/dev/null 2>&1; then
     echo "ok"
 else
-    echo "reformatted"
-    cargo fmt --all --quiet
+    echo "FAILED"
+    echo ""
+    echo "Formatting drift detected. The release script gates on --check too,"
+    echo "so this would block publish. Run 'cargo fmt --all' and re-commit."
+    exit 1
 fi
 
 printf "clippy: "

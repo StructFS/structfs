@@ -13,7 +13,7 @@ read/write interface.
 cargo run -p structfs-repl
 
 # Inside the REPL:
-> write /_mounts/data {"type": "memory"}
+> write /ctx/mounts/data {"type": "memory"}
 > write /data/users/1 {"name": "Alice", "email": "alice@example.com"}
 > read /data/users/1
 > read /ctx/help
@@ -43,23 +43,23 @@ cargo run -p structfs-repl
 
 ## Store Types
 
-Mount stores by writing configuration to `/_mounts/<name>`:
+Mount stores by writing configuration to `/ctx/mounts/<name>`:
 
 ```bash
 # In-memory store (data lost on exit)
-write /_mounts/data {"type": "memory"}
+write /ctx/mounts/data {"type": "memory"}
 
 # Local filesystem (persisted as JSON files)
-write /_mounts/files {"type": "local", "path": "/path/to/dir"}
+write /ctx/mounts/files {"type": "local", "path": "/path/to/dir"}
 
 # HTTP client with base URL
-write /_mounts/api {"type": "http", "url": "https://api.example.com"}
+write /ctx/mounts/api {"type": "http", "url": "https://api.example.com"}
 
 # HTTP broker for arbitrary URLs
-write /_mounts/http {"type": "httpbroker"}
+write /ctx/mounts/http {"type": "httpbroker"}
 
 # Remote StructFS server
-write /_mounts/remote {"type": "structfs", "url": "https://structfs.example.com"}
+write /ctx/mounts/remote {"type": "structfs", "url": "https://structfs.example.com"}
 ```
 
 ## HTTP Broker
