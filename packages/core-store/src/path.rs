@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Errors related to path parsing and validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PathError {
     /// A path component is not a valid Unicode identifier.
     InvalidComponent {
@@ -45,7 +46,7 @@ impl std::error::Error for PathError {}
 /// used as identifiers in most programming languages.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Path {
-    pub components: Vec<String>,
+    pub(crate) components: Vec<String>,
 }
 
 impl Path {

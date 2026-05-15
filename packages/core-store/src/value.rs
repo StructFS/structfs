@@ -18,6 +18,7 @@ use crate::{Error, Path, PathError};
 /// - Includes `Bytes` for binary data (unlike JSON, but like CBOR/MessagePack)
 /// - Uses `i64` for integers (sufficient for most use cases, matches many protocols)
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     /// Absence of a value. Distinct from "path doesn't exist".
     #[default]

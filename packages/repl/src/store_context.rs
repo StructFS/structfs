@@ -88,6 +88,13 @@ impl StoreFactory for CoreReplStoreFactory {
             MountConfig::Sys => Ok(Box::new(SysStore::new())),
             MountConfig::Repl => Ok(Box::new(ReplDocsStore::new())),
             MountConfig::Registers => Ok(Box::new(RegisterStore::new())),
+            // MountConfig is #[non_exhaustive]; report unknown variants so the
+            // factory can be extended in lockstep with new variant additions.
+            _ => Err(CoreError::store(
+                "factory",
+                "create",
+                "unsupported MountConfig variant",
+            )),
         }
     }
 }
@@ -351,7 +358,7 @@ impl<F: StoreFactory> StoreContext<F> {
             }
 
             // Extract topic name: /ctx/help/ctx/sys -> "ctx/sys"
-            let topic = from.components[2..].join("/");
+            let topic = from.slice(2, from.len()).to_string();
 
             // Try to read the docs manifest to get metadata for search
             let manifest = store
@@ -386,7 +393,7 @@ impl<F: StoreFactory> StoreContext<F> {
                     continue;
                 }
 
-                let topic = from.components[2..].join("/");
+                let topic = from.slice(2, from.len()).to_string();
                 let manifest = self
                     .store
                     .read(&to)
@@ -539,11 +546,11 @@ impl<F: StoreFactory> StoreContext<F> {
         if let Some(stripped) = path_str.strip_prefix('/') {
             Path::parse(stripped).map_err(|e| ContextError::InvalidPath(format!("{}", e)))
         } else if path_str == ".." {
-            let mut components = self.current_path.components.clone();
+            let mut components: Vec<String> = self.current_path.iter().cloned().collect();
             components.pop();
-            Ok(Path { components })
+            Ok(Path::from_components(components))
         } else if path_str.starts_with("../") {
-            let mut components = self.current_path.components.clone();
+            let mut components: Vec<String> = self.current_path.iter().cloned().collect();
             let mut remaining = path_str;
             while remaining.starts_with("../") {
                 components.pop();
@@ -552,9 +559,9 @@ impl<F: StoreFactory> StoreContext<F> {
             if !remaining.is_empty() {
                 let suffix = Path::parse(remaining)
                     .map_err(|e| ContextError::InvalidPath(format!("{}", e)))?;
-                components.extend(suffix.components);
+                components.extend(suffix.iter().cloned());
             }
-            Ok(Path { components })
+            Ok(Path::from_components(components))
         } else {
             let suffix =
                 Path::parse(path_str).map_err(|e| ContextError::InvalidPath(format!("{}", e)))?;

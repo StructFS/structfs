@@ -338,7 +338,7 @@ impl HelpStore {
         }
 
         // The query is the full remaining path (allows multi-word queries)
-        let query = path.components.join("/");
+        let query = path.to_string();
         Ok(Some(Record::parsed(state.index.search(&query))))
     }
 }
