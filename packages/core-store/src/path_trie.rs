@@ -470,7 +470,7 @@ mod tests {
         trie.insert(&path!("a/c"), 3);
 
         let mut items: Vec<_> = trie.iter().collect();
-        items.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        items.sort_by_key(|a| a.0.to_string());
 
         assert_eq!(items.len(), 3);
         assert_eq!(items[0], (path!("a"), &1));

@@ -54,7 +54,7 @@ The REPL starts with these mounts:
 
 ```bash
 # Create an in-memory store
-> write /_mounts/data {"type": "memory"}
+> write /ctx/mounts/data {"type": "memory"}
 ok
 
 # Write some data
