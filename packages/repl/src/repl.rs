@@ -104,7 +104,7 @@ fn format_path(path: &structfs_core_store::Path) -> String {
     if path.is_empty() {
         "/".to_string()
     } else {
-        format!("/{}", path.components.join("/"))
+        format!("/{}", path)
     }
 }
 

@@ -249,7 +249,7 @@ impl Reader for ReplDocsStore {
 
         // Strip "docs" prefix
         let doc_path = if from.len() > 1 {
-            from.components[1..].join("/")
+            from.slice(1, from.len()).to_string()
         } else {
             String::new()
         };

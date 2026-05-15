@@ -42,6 +42,9 @@ pub fn value_to_json(value: Value) -> serde_json::Value {
                 .map(|(k, v)| (k, value_to_json(v)))
                 .collect(),
         ),
+        // Value is #[non_exhaustive]; an unknown variant has no JSON
+        // representation, so fall back to null (same policy as NaN floats).
+        _ => serde_json::Value::Null,
     }
 }
 

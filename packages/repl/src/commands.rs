@@ -1302,7 +1302,7 @@ fn format_path(path: &Path) -> String {
     if path.is_empty() {
         "/".to_string()
     } else {
-        format!("/{}", path.components.join("/"))
+        format!("/{}", path)
     }
 }
 

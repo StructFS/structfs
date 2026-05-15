@@ -24,6 +24,7 @@ use crate::{path, Error, Path, Reader, Record, Value, Writer};
 /// Configuration for a mount point
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum MountConfig {
     /// In-memory JSON store
     Memory,

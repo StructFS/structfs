@@ -213,7 +213,7 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
         }
         let id: RequestId = path[1].parse().ok()?;
         let sub_path = if path.len() > 2 {
-            Some(path.components[2..].join("/"))
+            Some(path.slice(2, path.len()).to_string())
         } else {
             None
         };
@@ -619,7 +619,7 @@ impl<E: HttpExecutor> HttpClientStore<E> {
     pub fn get(&self, path: &Path) -> Result<HttpResponse, crate::Error> {
         let request = HttpRequest {
             method: crate::types::Method::GET,
-            path: path.components.join("/"),
+            path: path.to_string(),
             ..Default::default()
         };
         let full_request = self.build_request(request);
@@ -698,7 +698,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
             let json_value = structfs_serde_store::value_to_json(value);
             let request = HttpRequest {
                 method: crate::types::Method::POST,
-                path: to.components.join("/"),
+                path: to.to_string(),
                 body: Some(json_value),
                 ..Default::default()
             };
@@ -834,7 +834,7 @@ impl AsyncHttpBrokerStore {
         }
         let id: RequestId = path[1].parse().ok()?;
         let sub_path = if path.len() > 2 {
-            Some(path.components[2..].join("/"))
+            Some(path.slice(2, path.len()).to_string())
         } else {
             None
         };

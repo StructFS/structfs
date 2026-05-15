@@ -35,11 +35,13 @@ use crate::{Codec, Error, Format, Value};
 /// // let value = record.into_value(&codec)?;
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum Record {
     /// Unparsed bytes with format hint.
     ///
     /// The bytes can be forwarded without parsing. Use `into_value()` to
     /// parse when you need to inspect or modify the data.
+    #[non_exhaustive]
     Raw {
         /// The raw bytes.
         bytes: Bytes,
