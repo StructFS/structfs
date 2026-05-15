@@ -39,7 +39,7 @@ default-members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/AdjectiveNoun/structfs"
+repository = "https://github.com/StructFS/structfs"
 
 [workspace.dependencies]
 # Workspace crates - layered architecture
