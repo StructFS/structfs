@@ -212,9 +212,7 @@ fn cmd_write(args: &str, session: &mut Session) -> String {
     // InMemoryStore requires parents to be present, so we create
     // empty maps for any missing ancestors.
     // Skip this for ctx/mounts/* paths — MountStore handles those internally.
-    let is_mount_path = path.len() >= 3
-        && path.components[0] == "ctx"
-        && path.components[1] == "mounts";
+    let is_mount_path = path.len() >= 3 && path[0] == "ctx" && path[1] == "mounts";
 
     if !is_mount_path && path.len() > 1 {
         for i in 1..path.len() {
