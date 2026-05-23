@@ -33,7 +33,7 @@ title: Implementations
 <section class="concept-section">
   <h2 id="packages">Packages</h2>
   <div class="concept-prose">
-    <p class="concept-detail">The implementation provides two traits — <code>Reader</code> and <code>Writer</code> — that every store implements. The workspace is split into focused crates:</p>
+    <p class="concept-detail">The implementation provides two traits (<code>Reader</code> and <code>Writer</code>) that every store implements. The workspace is split into focused crates:</p>
   </div>
 
   <div class="consequence-grid" style="margin-top: 1rem;">
@@ -51,7 +51,7 @@ title: Implementations
     </div>
     <div class="consequence-card">
       <h3>System primitives</h3>
-      <p>Environment variables, time, random numbers, process info, filesystem handles — OS functionality as stores.</p>
+      <p>Environment variables, time, random numbers, process info, filesystem handles: OS functionality as stores.</p>
     </div>
   </div>
 </section>
@@ -84,7 +84,7 @@ title: Implementations
     <span class="ex-result">{"name": "Alice", "email": "alice@example.com"}</span>
   </div>
   <div class="concept-prose" style="margin-top: 0.75rem;">
-    <p class="concept-detail">Values aren't just strings. Maps, arrays, numbers, booleans — structured data, not bytes.</p>
+    <p class="concept-detail">Values aren't just strings. Maps, arrays, numbers, booleans: structured data, not bytes.</p>
   </div>
 
   <h3 class="walkthrough-heading">Everything is a path</h3>
@@ -99,7 +99,7 @@ title: Implementations
     <span class="ex-result">"550e8400-e29b-41d4-a716-446655440000"</span>
   </div>
   <div class="concept-prose" style="margin-top: 0.75rem;">
-    <p class="concept-detail">The environment, the clock, a random number generator — real stores mounted at <code>/ctx/sys</code>, responding to <code>read</code> the same way your data store does.</p>
+    <p class="concept-detail">The environment, the clock, a random number generator: real stores mounted at <code>/ctx/sys</code>, responding to <code>read</code> the same way your data store does.</p>
   </div>
 
   <h3 class="walkthrough-heading">Mount more stores</h3>
@@ -140,11 +140,11 @@ title: Implementations
         <tr><th>Path</th><th>Store</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>/ctx/http</code></td><td>HTTP broker — queue requests, read responses</td></tr>
-        <tr><td><code>/ctx/http_sync</code></td><td>Synchronous HTTP — blocks until response arrives</td></tr>
-        <tr><td><code>/ctx/sys</code></td><td>OS primitives — env, time, random, process, filesystem</td></tr>
-        <tr><td><code>/ctx/help</code></td><td>Documentation — aggregates docs from all mounted stores</td></tr>
-        <tr><td><code>/ctx/mounts</code></td><td>Mount configuration — read to list, write to add</td></tr>
+        <tr><td><code>/ctx/http</code></td><td>HTTP broker: queue requests, read responses</td></tr>
+        <tr><td><code>/ctx/http_sync</code></td><td>Synchronous HTTP: blocks until response arrives</td></tr>
+        <tr><td><code>/ctx/sys</code></td><td>OS primitives: env, time, random, process, filesystem</td></tr>
+        <tr><td><code>/ctx/help</code></td><td>Documentation: aggregates docs from all mounted stores</td></tr>
+        <tr><td><code>/ctx/mounts</code></td><td>Mount configuration: read to list, write to add</td></tr>
       </tbody>
     </table>
   </div>

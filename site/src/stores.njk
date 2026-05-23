@@ -4,7 +4,7 @@ title: Designing Stores
 ---
 
 <h1>Designing Stores</h1>
-<p class="page-intro"><a href="/concepts/">The model</a> defines the interface. This page is about the design space on the other side of it — the shapes stores take, the trade-offs they make, and the patterns that emerge when you build systems from them.</p>
+<p class="page-intro"><a href="/concepts/">The model</a> defines the interface. This page is about the design space on the other side of it: the shapes stores take, the trade-offs they make, and the patterns that emerge when you build systems from them.</p>
 
 <section class="concept-section">
   <h2 id="the-contract">The contract</h2>
@@ -19,7 +19,7 @@ title: Designing Stores
   <h2 id="relative-addressing">Relative addressing</h2>
   <div class="concept-prose">
     <p class="concept-lead">A store doesn't know where it lives in the tree.</p>
-    <p class="concept-detail">When you mount a store at <code>/api</code> and read <code>/api/users</code>, the store receives <code>users</code> — not <code>/api/users</code>. The tree strips the mount prefix before routing. The same store can be mounted at different paths without modification, and developed and tested in isolation without knowing its eventual location.</p>
+    <p class="concept-detail">When you mount a store at <code>/api</code> and read <code>/api/users</code>, the store receives <code>users</code>, not <code>/api/users</code>. The tree strips the mount prefix before routing. The same store can be mounted at different paths without modification, and developed and tested in isolation without knowing its eventual location.</p>
     <p class="concept-detail">This is the foundation of testability. If a store only sees relative paths, you can test it without constructing a full tree. Mount it at the root, send it paths directly, verify the results.</p>
   </div>
 </section>
@@ -37,7 +37,7 @@ title: Designing Stores
     </div>
     <div class="consequence-card">
       <h3>Stateful</h3>
-      <p>Reads and writes change internal state. A memory store accumulates data. A file handle tracks a position. An HTTP broker queues requests. State means ordering matters — the same path can return different values depending on what happened before.</p>
+      <p>Reads and writes change internal state. A memory store accumulates data. A file handle tracks a position. An HTTP broker queues requests. State means ordering matters: the same path can return different values depending on what happened before.</p>
     </div>
     <div class="consequence-card">
       <h3>Proxy</h3>
@@ -45,7 +45,7 @@ title: Designing Stores
     </div>
     <div class="consequence-card">
       <h3>Composite</h3>
-      <p>Contains other stores. The tree itself is a composite — it routes paths to child stores by prefix. A cache wraps a store and intercepts reads. A logger sits in front of anything and records operations. Composites are stores made of stores.</p>
+      <p>Contains other stores. The tree itself is a composite: it routes paths to child stores by prefix. A cache wraps a store and intercepts reads. A logger sits in front of anything and records operations. Composites are stores made of stores.</p>
     </div>
   </div>
 
@@ -58,7 +58,7 @@ title: Designing Stores
   <h2 id="the-broker-pattern">The broker pattern</h2>
   <div class="concept-prose">
     <p class="concept-lead">Some operations don't fit "write a value, read it back." The broker pattern splits intent from execution.</p>
-    <p class="concept-detail">Write expresses intent — "I want this to happen." The store returns a handle path. Read against that handle executes the intent and returns the result.</p>
+    <p class="concept-detail">Write expresses intent: "I want this to happen." The store returns a handle path. Read against that handle executes the intent and returns the result.</p>
   </div>
 
   <div class="concept-exchange">
@@ -70,7 +70,7 @@ title: Designing Stores
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">The separation gives you control over timing. Queue several writes before reading any results. Inspect the queue. Discard a pending operation by never reading its handle. The interface stays synchronous — no callbacks, no futures — but the interaction is inherently multi-step.</p>
+    <p class="concept-detail">The separation gives you control over timing. Queue several writes before reading any results. Inspect the queue. Discard a pending operation by never reading its handle. The interface stays synchronous (no callbacks, no futures) but the interaction is inherently multi-step.</p>
     <p class="concept-detail">This pattern works for anything with deferred results: database transactions, file uploads, long-running computations. Write to start. Read to finish.</p>
   </div>
 </section>
@@ -78,7 +78,7 @@ title: Designing Stores
 <section class="concept-section">
   <h2 id="handle-based-protocols">Handle-based protocols</h2>
   <div class="concept-prose">
-    <p class="concept-lead">When write returns a path, that path becomes a handle — a multi-step conversation with the store.</p>
+    <p class="concept-lead">When write returns a path, that path becomes a handle: a multi-step conversation with the store.</p>
     <p class="concept-detail">File I/O is the classic example. Write to an "open" path with a filename and mode. Get back a handle path. Read and write against the handle. Write to a "close" sub-path to release it.</p>
   </div>
 
@@ -92,8 +92,8 @@ title: Designing Stores
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">The handle is a sub-tree with its own paths. <code>position</code>, <code>close</code>, and the handle root itself are all just paths — readable, writable, composable with the same mechanisms as everything else. No special handle type, no resource lifecycle API.</p>
-    <p class="concept-detail">This generalizes to sessions, transactions, subscriptions, iterators — any interaction spanning multiple operations. The handle path is the session. Sub-paths are the session's capabilities. In the <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a>, this is where interfaces become protocols.</p>
+    <p class="concept-detail">The handle is a sub-tree with its own paths. <code>position</code>, <code>close</code>, and the handle root itself are all just paths: readable, writable, composable with the same mechanisms as everything else. No special handle type, no resource lifecycle API.</p>
+    <p class="concept-detail">This generalizes to sessions, transactions, subscriptions, iterators: any interaction spanning multiple operations. The handle path is the session. Sub-paths are the session's capabilities. In the <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a>, this is where interfaces become protocols.</p>
   </div>
 </section>
 
@@ -115,7 +115,7 @@ title: Designing Stores
   <div class="concept-ops">
     <div class="concept-op">
       <h3>Consistency</h3>
-      <p>If reading <code>/foo</code> returns a map with key <code>bar</code>, then reading <code>/foo/bar</code> should return the same value. Paths should decompose predictably. Not every store can guarantee this — external systems have their own rules — but when you have a choice, prefer the more consistent option.</p>
+      <p>If reading <code>/foo</code> returns a map with key <code>bar</code>, then reading <code>/foo/bar</code> should return the same value. Paths should decompose predictably. Not every store can guarantee this (external systems have their own rules), but when you have a choice, prefer the more consistent option.</p>
     </div>
     <div class="concept-op">
       <h3>Concision</h3>

@@ -4,13 +4,13 @@ title: Patterns
 ---
 
 <h1>Patterns</h1>
-<p class="page-intro">The <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a> shows how two operations scale to arbitrary complexity through conventions at each level. These are the conventions that have emerged so far — value-level, interface-level, and structural.</p>
+<p class="page-intro">The <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a> shows how two operations scale to arbitrary complexity through conventions at each level. These are the conventions that have emerged so far: value-level, interface-level, and structural.</p>
 
 <section class="concept-section">
   <h2 id="references">References</h2>
   <div class="concept-prose">
     <p class="concept-lead">A reference is a value that points somewhere else in the tree.</p>
-    <p class="concept-detail">When a store returns a collection, it doesn't have to embed every item inline. It can return <em>references</em> — lightweight values that say "the real data is over there." A reference is just a map with a <code>path</code> key:</p>
+    <p class="concept-detail">When a store returns a collection, it doesn't have to embed every item inline. It can return <em>references</em>, lightweight values that say "the real data is over there." A reference is just a map with a <code>path</code> key:</p>
   </div>
 
   <div class="concept-exchange">
@@ -20,7 +20,7 @@ title: Patterns
 
   <div class="concept-prose" style="margin-top: 1rem;">
     <p class="concept-detail">Each reference is a promise: follow the path and you'll find the value. The client decides which references to follow and when. This gives stores control over response size without a separate "fields" or "expand" mechanism.</p>
-    <p class="concept-detail">References can optionally carry type information — a hint about the shape at the other end:</p>
+    <p class="concept-detail">References can optionally carry type information, a hint about the shape at the other end:</p>
   </div>
 
   <div class="concept-exchange">
@@ -28,7 +28,7 @@ title: Patterns
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">In the hierarchy, references are a <strong>value-level</strong> convention. They're ordinary map values — no new primitives, no changes to the data model. Any store can return them, any client can detect them. The path in a reference is the same path you'd use to read the value directly.</p>
+    <p class="concept-detail">In the hierarchy, references are a <strong>value-level</strong> convention. They're ordinary map values: no new primitives, no changes to the data model. Any store can return them, any client can detect them. The path in a reference is the same path you'd use to read the value directly.</p>
   </div>
 
   <div class="pattern-principles">
@@ -50,8 +50,8 @@ title: Patterns
 <section class="concept-section">
   <h2 id="pagination">Pagination</h2>
   <div class="concept-prose">
-    <p class="concept-lead">Collections that are too large for one read. Solved with paths and references — no new mechanisms.</p>
-    <p class="concept-detail">A paginated response includes items and a reference to the next page. The client doesn't construct pagination URLs — it follows the path the store provides:</p>
+    <p class="concept-lead">Collections that are too large for one read. Solved with paths and references, no new mechanisms.</p>
+    <p class="concept-detail">A paginated response includes items and a reference to the next page. The client doesn't construct pagination URLs; it follows the path the store provides:</p>
   </div>
 
   <div class="concept-exchange">
@@ -70,13 +70,13 @@ title: Patterns
 
   <div class="concept-prose" style="margin-top: 1rem;">
     <p class="concept-detail">When <code>links.next</code> is absent, you've reached the end. The loop is: read a page, process items, follow <code>next</code>.</p>
-    <p class="concept-detail">In the hierarchy, pagination is an <strong>interface-level</strong> convention. The paginated collection is a struct whose fields (<code>items</code>, <code>links</code>) are backed by behavior — the store computes each page on demand. The client iterates by following references, making it a protocol: an interface through time.</p>
+    <p class="concept-detail">In the hierarchy, pagination is an <strong>interface-level</strong> convention. The paginated collection is a struct whose fields (<code>items</code>, <code>links</code>) are backed by behavior; the store computes each page on demand. The client iterates by following references, making it a protocol: an interface through time.</p>
   </div>
 
   <div class="pattern-principles">
     <div class="pattern-principle">
       <h3>Cursors, not offsets</h3>
-      <p>Offsets break under concurrent modification. Cursors are stable — "everything after this item" stays correct even as the collection changes.</p>
+      <p>Offsets break under concurrent modification. Cursors are stable: "everything after this item" stays correct even as the collection changes.</p>
     </div>
     <div class="pattern-principle">
       <h3>Server-controlled navigation</h3>
@@ -84,7 +84,7 @@ title: Patterns
     </div>
     <div class="pattern-principle">
       <h3>Parameters are paths</h3>
-      <p>Page size, ordering, cursor — all path components. <code>/users/by/name/after/bob/limit/20</code>. Pagination addresses work like every other address.</p>
+      <p>Page size, ordering, cursor: all path components. <code>/users/by/name/after/bob/limit/20</code>. Pagination addresses work like every other address.</p>
     </div>
   </div>
 </section>
@@ -93,7 +93,7 @@ title: Patterns
   <h2 id="the-meta-lens">The meta lens</h2>
   <div class="concept-prose">
     <p class="concept-lead">Sometimes you need to know what a path <em>does</em> before you use it.</p>
-    <p class="concept-detail">For any path <code>P</code> in a store, reading <code>meta/P</code> returns information <em>about</em> that path — what operations it supports, what shape the data takes, what sub-paths are available. The data and its description live in the same tree, accessed by the same operations.</p>
+    <p class="concept-detail">For any path <code>P</code> in a store, reading <code>meta/P</code> returns information <em>about</em> that path: what operations it supports, what shape the data takes, what sub-paths are available. The data and its description live in the same tree, accessed by the same operations.</p>
   </div>
 
   <div class="concept-tree">
@@ -112,8 +112,8 @@ title: Patterns
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">This is different from metadata <em>on</em> data. A file's size and modification time describe the data itself — suffix metadata (<code>path/meta</code>). The meta lens describes the <em>path</em> — what the address means, what it affords. The two are orthogonal.</p>
-    <p class="concept-detail">In the hierarchy, the meta lens is <strong>structural</strong> — it operates across all levels. It can describe a value's type, a struct's fields, an interface's capabilities, or a protocol's state machine. It's introspection over the hierarchy itself.</p>
+    <p class="concept-detail">This is different from metadata <em>on</em> data. A file's size and modification time describe the data itself: suffix metadata (<code>path/meta</code>). The meta lens describes the <em>path</em>: what the address means, what it affords. The two are orthogonal.</p>
+    <p class="concept-detail">In the hierarchy, the meta lens is <strong>structural</strong>: it operates across all levels. It can describe a value's type, a struct's fields, an interface's capabilities, or a protocol's state machine. It's introspection over the hierarchy itself.</p>
   </div>
 
   <div class="pattern-principles">
@@ -145,7 +145,7 @@ title: Patterns
     </div>
     <div class="consequence-card">
       <h3>Meta over pagination</h3>
-      <p><code>meta/users</code> can describe pagination capabilities — cursor type, max page size, available orderings — before the client makes its first request.</p>
+      <p><code>meta/users</code> can describe pagination capabilities (cursor type, max page size, available orderings) before the client makes its first request.</p>
     </div>
     <div class="consequence-card">
       <h3>Incremental adoption</h3>
@@ -162,7 +162,7 @@ title: Patterns
   <h2 id="thought-experiment-1rec">Thought experiment: 1rec</h2>
   <div class="concept-prose">
     <p class="concept-lead">Mount a service. Any service. Now interact with it through read and write.</p>
-    <p class="concept-detail">The internet already has naming — DNS, URLs, service registries. What it doesn't have is a uniform interaction model. Every service has its own client library, its own pagination scheme, its own error model, its own authentication flow. You need to learn each one separately. Test each one separately. Handle each one's failures separately.</p>
+    <p class="concept-detail">The internet already has naming: DNS, URLs, service registries. What it doesn't have is a uniform interaction model. Every service has its own client library, its own pagination scheme, its own error model, its own authentication flow. You need to learn each one separately, test each one separately, and handle each one's failures separately.</p>
     <p class="concept-detail">Now imagine you mount a proxy store for a weather API at <code>/weather</code>:</p>
   </div>
 
@@ -198,7 +198,7 @@ title: Patterns
   </div>
 
   <div class="concept-highlight">
-    <p>This is 1rec. Not a directory of the internet — DNS already does naming. Not a database that contains everything — the data stays where it lives. 1rec is a single entry point — one record, one tree — where every service you interact with speaks the same interface. The proxy stores do the translation. The patterns do the navigation. You just read and write.</p>
+    <p>This is 1rec. Not a directory of the internet: DNS already does naming. Not a database that contains everything: the data stays where it lives. 1rec is a single entry point (one record, one tree) where every service you interact with speaks the same interface. The proxy stores do the translation. The patterns do the navigation. You just read and write.</p>
     <p>One record. The tree unfolds as far as you want to go.</p>
   </div>
 </section>

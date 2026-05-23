@@ -7,14 +7,14 @@ title: The Model
 
 <div class="concept-prose" style="margin-top: 0.5rem;">
   <p class="concept-lead">StructFS is an architectural style for data access.</p>
-  <p class="concept-detail">It defines a uniform interface — two operations over paths and structured values — and a composition model where anything implementing that interface is a <em>store</em>, and stores mount into a shared namespace tree.</p>
+  <p class="concept-detail">It defines a uniform interface (two operations over paths and structured values) and a composition model where anything implementing that interface is a <em>store</em>, and stores mount into a shared namespace tree.</p>
 </div>
 
 <section class="concept-section">
   <h2 id="the-store">The store</h2>
   <div class="concept-prose">
     <p class="concept-lead">A store is anything that responds to read and write.</p>
-    <p class="concept-detail">A tree of data in memory is a store. So is an HTTP endpoint, a system clock, a database, or a random number generator. The differences between these systems — protocol, client library, error handling, testing story — are real, but they're accidental. At the level that matters to the application, they're all the same thing: data behind an address.</p>
+    <p class="concept-detail">A tree of data in memory is a store. So is an HTTP endpoint, a system clock, a database, or a random number generator. The differences between these systems (protocol, client library, error handling, testing story) are real, but they're accidental. At the level that matters to the application, they're all the same thing: data behind an address.</p>
     <p class="concept-detail">StructFS makes that sameness the foundation. A store is a store is a store.</p>
   </div>
 </section>
@@ -32,13 +32,13 @@ title: The Model
     </div>
     <div class="concept-op">
       <h3>write(path, value) <span class="op-returns">→ path | error</span></h3>
-      <p>Sends a value to that path. On success, returns a result path — often the same path, sometimes a new one. On failure, returns an error.</p>
+      <p>Sends a value to that path. On success, returns a result path, often the same path, sometimes a new one. On failure, returns an error.</p>
     </div>
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
     <p class="concept-detail">No DELETE, no PATCH, no LIST, no SUBSCRIBE. This seems like a limitation until you see why it isn't: <strong>paths carry meaning</strong>.</p>
-    <p class="concept-detail">HTTP needs many verbs because URLs are nouns — you need different verbs to do different things to the same noun. In StructFS, a path can name an action just as easily as it names a resource. Writing to <code>users/alice/deactivate</code> is as expressive as <code>DELETE /users/alice</code>, but the deactivation is itself a path — one that can be composed, proxied, or intercepted with the same mechanisms as everything else.</p>
+    <p class="concept-detail">HTTP needs many verbs because URLs are nouns: you need different verbs to do different things to the same noun. In StructFS, a path can name an action just as easily as it names a resource. Writing to <code>users/alice/deactivate</code> is as expressive as <code>DELETE /users/alice</code>, but the deactivation is itself a path, one that can be composed, proxied, or intercepted with the same mechanisms as everything else.</p>
     <p class="concept-detail">Two operations isn't a constraint that limits what you can express. It's a constraint that forces expressiveness into the one place where it composes: the path.</p>
   </div>
 </section>
@@ -59,7 +59,7 @@ title: The Model
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">A store doesn't know where it lives in the tree. When you read <code>/api/items</code>, the HTTP store sees <code>items</code> — not <code>/api/items</code>. This is what makes stores swappable: attach a mock at <code>/api</code> instead of the real client, and nothing else changes.</p>
+    <p class="concept-detail">A store doesn't know where it lives in the tree. When you read <code>/api/items</code>, the HTTP store sees <code>items</code>, not <code>/api/items</code>. This is what makes stores swappable: attach a mock at <code>/api</code> instead of the real client, and nothing else changes.</p>
     <p class="concept-detail">The tree is the wiring diagram of your system. You can rewire it without touching application code.</p>
   </div>
 </section>
@@ -68,7 +68,7 @@ title: The Model
   <h2 id="write-returns-a-path">Write returns a path</h2>
   <div class="concept-prose">
     <p class="concept-lead">This is the mechanism that makes two operations sufficient for complex systems.</p>
-    <p class="concept-detail">When you write to a store, the return value isn't an acknowledgement — it's a <em>path</em>. That path might be the same one you wrote to, confirming the write. Or it might be a new path — a handle you can read from later.</p>
+    <p class="concept-detail">When you write to a store, the return value isn't an acknowledgement; it's a <em>path</em>. That path might be the same one you wrote to, confirming the write. Or it might be a new path, a handle you can read from later.</p>
   </div>
 
   <div class="concept-exchange">
@@ -80,8 +80,8 @@ title: The Model
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">The write queued work. The read collected the result. The interface stays synchronous — no callbacks, no futures, no event loops — but the interaction is multi-step.</p>
-    <p class="concept-detail">The same pattern models file handles, subscriptions, sessions, transactions — any interaction that spans multiple operations. You don't need <code>OPEN</code>, <code>CLOSE</code>, <code>SUBSCRIBE</code>, <code>EXECUTE</code>. Each is just a path you read from or write to.</p>
+    <p class="concept-detail">The write queued work. The read collected the result. The interface stays synchronous (no callbacks, no futures, no event loops) but the interaction is multi-step.</p>
+    <p class="concept-detail">The same pattern models file handles, subscriptions, sessions, transactions: any interaction that spans multiple operations. You don't need <code>OPEN</code>, <code>CLOSE</code>, <code>SUBSCRIBE</code>, <code>EXECUTE</code>. Each is just a path you read from or write to.</p>
   </div>
 </section>
 
@@ -89,8 +89,8 @@ title: The Model
   <h2 id="structured-values">Structured values</h2>
   <div class="concept-prose">
     <p class="concept-lead">Classic filesystems deal in bytes. Infinite flexibility, zero interoperability.</p>
-    <p class="concept-detail">StructFS deals in structured values — the same types your programming language already gives you, and the same model that every serialization format converges on. JSON, CBOR, MessagePack, Protocol Buffers — they all encode the same core shapes. StructFS makes that shared model native. When a store returns a value, it's already structured. When you write a value, there's no encoding step. The structure <em>is</em> the data.</p>
-    <p class="concept-detail">This is the departure from Plan 9. 9P gives you a universal namespace over byte streams — you still need to agree on a wire format between every producer and consumer. StructFS gives you a universal namespace over structured data. The serialization format is an implementation detail of the transport, not a concern of the interface.</p>
+    <p class="concept-detail">StructFS deals in structured values: the same types your programming language already gives you, and the same model that every serialization format converges on. JSON, CBOR, MessagePack, Protocol Buffers: they all encode the same core shapes. StructFS makes that shared model native. When a store returns a value, it's already structured. When you write a value, there's no encoding step. The structure <em>is</em> the data.</p>
+    <p class="concept-detail">This is the departure from Plan 9. 9P gives you a universal namespace over byte streams; you still need to agree on a wire format between every producer and consumer. StructFS gives you a universal namespace over structured data. The serialization format is an implementation detail of the transport, not a concern of the interface.</p>
   </div>
 </section>
 
@@ -98,8 +98,8 @@ title: The Model
   <h2 id="path-encoding">Path encoding</h2>
   <div class="concept-prose">
     <p class="concept-lead">Structured values solve the data boundary. Paths need the same treatment.</p>
-    <p class="concept-detail">A path component in StructFS must be a valid identifier in every language that might handle it — Rust, Go, JavaScript, Python, and anything else that touches the tree. This is the same problem HTTP faces with URLs: arbitrary strings need to be constrained to a form that survives every context they pass through.</p>
-    <p class="concept-detail">HTTP's answer is percent-encoding. StructFS's answer is <a href="https://namecode.dev">Namecode</a> — an encoding that turns any Unicode string into a valid <a href="https://unicode.org/reports/tr31/">UAX 31</a> identifier. Think Punycode for variable names.</p>
+    <p class="concept-detail">A path component in StructFS must be a valid identifier in every language that might handle it: Rust, Go, JavaScript, Python, and anything else that touches the tree. This is the same problem HTTP faces with URLs: arbitrary strings need to be constrained to a form that survives every context they pass through.</p>
+    <p class="concept-detail">HTTP's answer is percent-encoding. StructFS's answer is <a href="https://namecode.dev">Namecode</a>, an encoding that turns any Unicode string into a valid <a href="https://unicode.org/reports/tr31/">UAX 31</a> identifier. Think Punycode for variable names.</p>
   </div>
 
   <div class="concept-exchange">
@@ -110,7 +110,7 @@ title: The Model
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">The encoding is reversible, deterministic, and idempotent. Strings that are already valid identifiers pass through unchanged — most path components in practice never get encoded at all. But when a path component comes from user input, an external system, or any source that might contain spaces, punctuation, or emoji, namecode guarantees it survives the round trip through every language boundary in the system.</p>
+    <p class="concept-detail">The encoding is reversible, deterministic, and idempotent. Strings that are already valid identifiers pass through unchanged; most path components in practice never get encoded at all. But when a path component comes from user input, an external system, or any source that might contain spaces, punctuation, or emoji, namecode guarantees it survives the round trip through every language boundary in the system.</p>
     <p class="concept-detail">This is the same role URL encoding plays for REST. Without it, HTTP URLs would break the moment they crossed a context boundary. Namecode gives StructFS paths the same guarantee: any path, any language, any store.</p>
   </div>
 </section>
@@ -133,16 +133,16 @@ title: The Model
     </div>
     <div class="hierarchy-level">
       <div class="hierarchy-label">Interfaces</div>
-      <div class="hierarchy-desc">A struct whose fields are backed by behavior. There's no distinction between a stored field and a computed one — a consumer can't tell. An interface is a schema over actions.</div>
+      <div class="hierarchy-desc">A struct whose fields are backed by behavior. There's no distinction between a stored field and a computed one; a consumer can't tell. An interface is a schema over actions.</div>
     </div>
     <div class="hierarchy-level">
       <div class="hierarchy-label">Protocols</div>
-      <div class="hierarchy-desc">An interface through time. A state machine of reads and writes against a family of paths. Handles, brokers, pagination — all protocols. The state machine lives in the path structure and the ordering of operations.</div>
+      <div class="hierarchy-desc">An interface through time. A state machine of reads and writes against a family of paths. Handles, brokers, pagination: all protocols. The state machine lives in the path structure and the ordering of operations.</div>
     </div>
   </div>
 
   <div class="concept-prose" style="margin-top: 1rem;">
-    <p class="concept-detail">Each level builds on the one below without new operations or new primitives — just conventions about what paths mean and how they relate. A store that implements a complex protocol is still a store that responds to read and write.</p>
+    <p class="concept-detail">Each level builds on the one below without new operations or new primitives, just conventions about what paths mean and how they relate. A store that implements a complex protocol is still a store that responds to read and write.</p>
     <p class="concept-detail">This is why two operations are sufficient. The complexity lives in the paths and the values, not in the verb set.</p>
   </div>
 </section>
@@ -156,15 +156,15 @@ title: The Model
   <div class="lineage-stack">
     <div class="lineage-item">
       <h3>Plan 9 and 9P</h3>
-      <p>StructFS inherits the namespace philosophy: everything accessible through paths, composition through mounting. The departure is the data model — 9P traffics in byte streams, StructFS in structured values. This eliminates the serialization boundary between components. And StructFS is a library-level abstraction, not a kernel facility.</p>
+      <p>StructFS inherits the namespace philosophy: everything accessible through paths, composition through mounting. The departure is the data model: 9P traffics in byte streams, StructFS in structured values. This eliminates the serialization boundary between components. And StructFS is a library-level abstraction, not a kernel facility.</p>
     </div>
     <div class="lineage-item">
       <h3>REST</h3>
-      <p>Both define an architectural style around a uniform interface. REST has four operations over representations; StructFS has two over structured values. REST puts semantics in verbs — different verbs for different actions on the same resource. StructFS puts semantics in paths — different paths for different actions, same two verbs. REST constrains network interaction; StructFS constrains data access at any layer.</p>
+      <p>Both define an architectural style around a uniform interface. REST has four operations over representations; StructFS has two over structured values. REST puts semantics in verbs: different verbs for different actions on the same resource. StructFS puts semantics in paths: different paths for different actions, same two verbs. REST constrains network interaction; StructFS constrains data access at any layer.</p>
     </div>
     <div class="lineage-item">
       <h3>Capability systems</h3>
-      <p>A StructFS path is a capability: possession of the path grants the ability to read or write. The tree is a capability graph — mounting grants access to a subtree, and relative addressing means a store can't reach outside what it was given. This is structural, not an access control layer bolted on.</p>
+      <p>A StructFS path is a capability: possession of the path grants the ability to read or write. The tree is a capability graph; mounting grants access to a subtree, and relative addressing means a store can't reach outside what it was given. This is structural, not an access control layer bolted on.</p>
     </div>
   </div>
 </section>
