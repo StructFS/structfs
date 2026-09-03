@@ -59,7 +59,9 @@ isotope/              # The Isotope virtual-OS specification
   (`CancelToken`); certified by its own conformance module
 - **Isotope runtime** (`featherweight/`): blocks serve stores via the
   server protocol (requests read from `iso/server/requests`), assemblies
-  wire per-block capability namespaces, `fw shell` runs the demo
+  wire per-block capability namespaces, `fw shell` runs the demo. The
+  Block ABI is single-sourced at `featherweight/wit/world.wit`; WASI is
+  a shim above it (`featherweight-wasi`, spec 10), never a runtime dep
 - **Async**: `AsyncReader`/`AsyncWriter` (borrowed futures) plus
   `DetachedReader`/`DetachedWriter` (futures that don't borrow the store,
   for concurrent in-flight operations)

@@ -15,6 +15,7 @@ members = [
     "featherweight",
     "featherweight/runtime",
     "featherweight/guest",
+    "featherweight/wasi",
     "namecode",
 ]
 exclude = [
@@ -38,6 +39,7 @@ default-members = [
     "packages/structfs",
     "featherweight",
     "featherweight/runtime",
+    "featherweight/wasi",
     "namecode",
 ]
 

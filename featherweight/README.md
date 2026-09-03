@@ -72,7 +72,13 @@ read of the returned handle, and kill(2) is a Null write to it.
 - **Capability discipline**: unwired paths are denied (reads and writes
   alike); filesystem/network access is granted by wiring, never ambient
 - **Wasm blocks**: the WIT boundary is the LL-store boundary (bytes only);
-  the `manifest()` export selects the codec before the store bridge exists
+  the `manifest()` export selects the codec before the store bridge exists.
+  The Block ABI is single-sourced at `featherweight/wit/world.wit`
+- **The WASI tower** (spec 10): the runtime has no WASI dependency —
+  WASI is a shim over the Block ABI. `featherweight-wasi` implements the
+  syscall core (args/environ/clocks/random/stdio/exit/errno) generically
+  over any store; `tests/wasi_tower.rs` runs a POSIX-style program end
+  to end on the `/iso/` surface
 
 ## Strawman limits
 

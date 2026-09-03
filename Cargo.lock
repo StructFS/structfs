@@ -767,6 +767,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chrono",
+ "featherweight-wasi",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -780,6 +781,13 @@ dependencies = [
  "tracing",
  "uuid",
  "wasmtime",
+]
+
+[[package]]
+name = "featherweight-wasi"
+version = "0.1.0"
+dependencies = [
+ "structfs-core-store",
 ]
 
 [[package]]
