@@ -87,7 +87,10 @@ mod async_traits;
 mod async_bridge;
 
 #[cfg(feature = "async")]
-pub use async_traits::{AsyncReader, AsyncStore, AsyncWriter, SyncToAsync};
+pub use async_traits::{
+    AsyncReader, AsyncStore, AsyncWriter, DetachedFuture, DetachedReader, DetachedStore,
+    DetachedWriter, SyncToAsync,
+};
 
 #[cfg(feature = "async")]
 pub use async_bridge::{AsyncCoreToLL, AsyncLLToCore};

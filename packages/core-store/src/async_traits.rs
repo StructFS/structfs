@@ -180,6 +180,83 @@ impl<T: crate::Writer + Send + 'static> AsyncWriter for SyncToAsync<T> {
     }
 }
 
+// === Detached async traits ===
+
+/// A boxed future that does not borrow the store that produced it.
+pub type DetachedFuture<T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, Error>> + Send + 'static>>;
+
+/// Async reads whose futures are detached from the store.
+///
+/// `AsyncReader`'s futures borrow `&mut self`, so one in-flight read holds
+/// the store's exclusive borrow for the whole operation — a long-parked
+/// read stalls every other request. `DetachedReader` splits the phases:
+/// the store produces the future synchronously (`&mut self`, briefly), and
+/// the future resolves asynchronously with no borrow of the store, so many
+/// operations can be in flight at once.
+///
+/// Implementors typically clone an `Arc` of shared state into the future.
+pub trait DetachedReader: Send {
+    /// Begin a read; the returned future resolves independently.
+    fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>>;
+}
+
+/// Async writes whose futures are detached from the store.
+///
+/// See [`DetachedReader`] for the rationale.
+pub trait DetachedWriter: Send {
+    /// Begin a write; the returned future resolves independently.
+    fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path>;
+}
+
+/// Combined detached read/write.
+pub trait DetachedStore: DetachedReader + DetachedWriter {}
+impl<T: DetachedReader + DetachedWriter> DetachedStore for T {}
+
+impl<T: DetachedReader + ?Sized> DetachedReader for &mut T {
+    fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+        (*self).read_detached(from)
+    }
+}
+
+impl<T: DetachedWriter + ?Sized> DetachedWriter for &mut T {
+    fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+        (*self).write_detached(to, data)
+    }
+}
+
+impl<T: DetachedReader + ?Sized> DetachedReader for Box<T> {
+    fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+        self.as_mut().read_detached(from)
+    }
+}
+
+impl<T: DetachedWriter + ?Sized> DetachedWriter for Box<T> {
+    fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+        self.as_mut().write_detached(to, data)
+    }
+}
+
+// `Shared` already owns an `Arc<Mutex<S>>`, so it can hand out detached
+// futures over a sync store: the future clones the handle and locks when
+// polled. Sync store operations should be short; long-blocking sync stores
+// deserve a purpose-built DetachedReader implementation.
+impl<S: crate::Reader + 'static> DetachedReader for crate::Shared<S> {
+    fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+        let shared = self.clone();
+        let path = from.clone();
+        Box::pin(async move { shared.lock().read(&path) })
+    }
+}
+
+impl<S: crate::Writer + 'static> DetachedWriter for crate::Shared<S> {
+    fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+        let shared = self.clone();
+        let path = to.clone();
+        Box::pin(async move { shared.lock().write(&path, data) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +351,36 @@ mod tests {
 
         let result = boxed.read_async(&path!("test")).await.unwrap();
         assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn detached_futures_do_not_borrow_the_store() {
+        use crate::{path, MemoryStore, Shared};
+
+        let mut store = Shared::new(MemoryStore::new());
+
+        // Start a write, then a read, while both futures are pending —
+        // impossible with borrowed futures, the point of the detached traits.
+        let write_fut = store.write_detached(&path!("key"), Record::parsed(Value::from("v")));
+        write_fut.await.unwrap();
+
+        let read_fut = store.read_detached(&path!("key"));
+        let another_read = store.read_detached(&path!("key"));
+        let (a, b) = (read_fut.await.unwrap(), another_read.await.unwrap());
+        assert!(a.is_some());
+        assert!(b.is_some());
+    }
+
+    #[tokio::test]
+    async fn detached_object_safety() {
+        use crate::{path, MemoryStore, Shared};
+
+        let mut boxed: Box<dyn DetachedStore> = Box::new(Shared::new(MemoryStore::new()));
+        boxed
+            .write_detached(&path!("k"), Record::parsed(Value::from(1i64)))
+            .await
+            .unwrap();
+        assert!(boxed.read_detached(&path!("k")).await.unwrap().is_some());
     }
 
     #[tokio::test]
