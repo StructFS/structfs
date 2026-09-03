@@ -46,7 +46,7 @@ mod traits;
 mod value;
 
 pub use bridge::{CoreToLL, LLToCore};
-pub use combinators::{Cascade, ReadOnly, Rooted, Shared};
+pub use combinators::{Cascade, Masked, ReadOnly, Rooted, Shared};
 pub use error::{CodecOperation, Error};
 pub use format::Format;
 pub use lazy_record::LazyRecord;

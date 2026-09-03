@@ -1,9 +1,9 @@
 //! Composable store wrappers: capability restriction, layering, sharing,
-//! and path confinement.
+//! path confinement, and redaction.
 
 use std::sync::{Arc, Mutex};
 
-use crate::{Error, Path, Reader, Record, Writer};
+use crate::{Error, Path, PathPattern, Reader, Record, Value, Writer};
 
 /// A read-only view of a store: reads pass through, writes are rejected
 /// with a `PermissionDenied` error.
@@ -136,6 +136,73 @@ impl<S: Reader> Reader for Shared<S> {
 impl<S: Writer> Writer for Shared<S> {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         self.lock().write(to, data)
+    }
+}
+
+/// A store that redacts sensitive paths on read.
+///
+/// Paths matching any pattern read back as the mask value instead of
+/// their contents; existence is preserved (a masked path that exists
+/// reads `Some(mask)`, a missing one reads `None`). Writes pass through
+/// unchanged — masking is a read-side lens, not write protection (wrap
+/// in [`ReadOnly`] for that).
+///
+/// Matching is **component-wise** via [`PathPattern`]: masking
+/// `gate/api_key` does not mask `gate/api_key_other`, which a string
+/// prefix check would.
+pub struct Masked<S> {
+    inner: S,
+    patterns: Vec<PathPattern>,
+    mask: Value,
+}
+
+impl<S> Masked<S> {
+    /// Mask paths matching `patterns` with the default `"[masked]"`.
+    pub fn new(inner: S, patterns: Vec<PathPattern>) -> Self {
+        Self::with_mask(inner, patterns, Value::from("[masked]"))
+    }
+
+    /// Mask with a custom mask value.
+    pub fn with_mask(inner: S, patterns: Vec<PathPattern>, mask: Value) -> Self {
+        Self {
+            inner,
+            patterns,
+            mask,
+        }
+    }
+
+    /// Unwrap, returning the inner store.
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
+    fn is_masked(&self, path: &Path) -> bool {
+        self.patterns.iter().any(|pattern| pattern.matches(path))
+    }
+}
+
+impl<S: Reader> Reader for Masked<S> {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        if self.is_masked(from) {
+            // Preserve existence, redact content.
+            return Ok(self
+                .inner
+                .read(from)?
+                .map(|_| Record::parsed(self.mask.clone())));
+        }
+        self.inner.read(from)
+    }
+
+    fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
+        // Child names are structure, not content; they stay visible even
+        // under a masked prefix.
+        self.inner.read_children(from)
+    }
+}
+
+impl<S: Writer> Writer for Masked<S> {
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+        self.inner.write(to, data)
     }
 }
 
@@ -300,6 +367,82 @@ mod tests {
         });
         handle.join().unwrap();
         assert!(shared.lock().read(&path!("from_thread")).unwrap().is_some());
+    }
+
+    #[test]
+    fn masked_redacts_component_wise() {
+        let mut inner = MapStore::new();
+        inner
+            .write(
+                &path!("gate/api_key"),
+                Record::parsed(Value::from("s3cret")),
+            )
+            .unwrap();
+        inner
+            .write(
+                &path!("gate/api_key_other"),
+                Record::parsed(Value::from("visible")),
+            )
+            .unwrap();
+        inner
+            .write(&path!("gate/model"), Record::parsed(Value::from("gpt-oss")))
+            .unwrap();
+
+        let mut masked = Masked::new(inner, vec![PathPattern::prefix(path!("gate/api_key"))]);
+
+        // The secret reads as the mask; existence is preserved.
+        assert_eq!(
+            masked
+                .read(&path!("gate/api_key"))
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&Value::from("[masked]"))
+        );
+        // The byte-prefix bug: a component-wise sibling stays visible.
+        assert_eq!(
+            masked
+                .read(&path!("gate/api_key_other"))
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&Value::from("visible"))
+        );
+        // Unmasked paths pass through.
+        assert_eq!(
+            masked
+                .read(&path!("gate/model"))
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&Value::from("gpt-oss"))
+        );
+        // Missing masked paths stay absent — no fabricated existence.
+        assert!(masked.read(&path!("gate/api_key/sub")).unwrap().is_none());
+    }
+
+    #[test]
+    fn masked_passes_writes_through() {
+        let inner = MapStore::new();
+        let mut masked = Masked::with_mask(
+            inner,
+            vec![PathPattern::exact(path!("secret"))],
+            Value::Null,
+        );
+        masked
+            .write(&path!("secret"), Record::parsed(Value::from("v")))
+            .unwrap();
+        // Read of the freshly written secret is masked (custom mask).
+        assert_eq!(
+            masked.read(&path!("secret")).unwrap().unwrap().as_value(),
+            Some(&Value::Null)
+        );
+        // The inner store holds the real value.
+        let mut inner = masked.into_inner();
+        assert_eq!(
+            inner.read(&path!("secret")).unwrap().unwrap().as_value(),
+            Some(&Value::from("v"))
+        );
     }
 
     #[test]
