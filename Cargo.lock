@@ -747,6 +747,10 @@ dependencies = [
 [[package]]
 name = "featherweight"
 version = "0.1.0"
+dependencies = [
+ "featherweight-runtime",
+ "tokio",
+]
 
 [[package]]
 name = "featherweight-guest"

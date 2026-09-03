@@ -118,12 +118,8 @@ impl RtCtx {
         let ctx = self.clone();
         let task = self.handle.spawn_blocking(move || {
             let iso = Arc::new(IsoSurface::new(block.cell.clone(), ctx.log.clone()));
-            let mut namespace = Namespace::new(
-                ctx.clone(),
-                iso,
-                block.wiring.clone(),
-                block.cell.clone(),
-            );
+            let mut namespace =
+                Namespace::new(ctx.clone(), iso, block.wiring.clone(), block.cell.clone());
 
             // Spec 05 ties Running to "begins reading requests", but an
             // interactive or client-only block may never read them; the
@@ -136,12 +132,7 @@ impl RtCtx {
                     native.run(&mut namespace).map_err(|e| e.to_string())
                 }
                 Driver::Wasm(wasm, format) => wasm
-                    .run(
-                        block.cell.id.clone(),
-                        namespace,
-                        JsonCodec,
-                        format.clone(),
-                    )
+                    .run(block.cell.id.clone(), namespace, JsonCodec, format.clone())
                     .map_err(|e| e.to_string()),
             };
             finalize(&block, result);
@@ -300,7 +291,16 @@ impl Runtime {
     pub fn new() -> Self {
         Self::with_handle(tokio::runtime::Handle::current())
     }
+}
 
+impl Default for Runtime {
+    /// Equivalent to [`Runtime::new`]; requires a current tokio runtime.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Runtime {
     /// Create a runtime on an explicit tokio handle.
     pub fn with_handle(handle: tokio::runtime::Handle) -> Self {
         Self {
@@ -332,7 +332,11 @@ impl Runtime {
     }
 
     /// Register a native block under `builtin:{name}`.
-    pub fn register_builtin(&mut self, name: impl Into<String>, factory: Arc<dyn NativeBlockFactory>) {
+    pub fn register_builtin(
+        &mut self,
+        name: impl Into<String>,
+        factory: Arc<dyn NativeBlockFactory>,
+    ) {
         self.builtins.insert(name.into(), factory);
     }
 
@@ -396,8 +400,7 @@ impl Runtime {
                         child_def.name
                     )));
                 }
-                let child =
-                    self.instantiate(&child_def, HashMap::new(), base_dir)?;
+                let child = self.instantiate(&child_def, HashMap::new(), base_dir)?;
                 cells.insert(name.clone(), child.public_cell().clone());
                 children.push(child);
             } else {
@@ -422,16 +425,15 @@ impl Runtime {
             // Config appears read-only at /config (spec 02).
             if let Some(config) = def.config.get(&name) {
                 let store = ReadOnly::new(MemoryStore::with_root(config.clone()));
-                entries.push((Path::parse("config").unwrap(), Target::Store(host_store(store))));
+                entries.push((
+                    Path::parse("config").unwrap(),
+                    Target::Store(host_store(store)),
+                ));
             }
             for wire in def.wiring.iter().filter(|w| w.block == name) {
                 let target = match &wire.target {
-                    WireTarget::Block(target_name) => {
-                        Target::Block(cells[target_name].clone())
-                    }
-                    WireTarget::Import(import) => {
-                        Target::Store(imports[import].clone())
-                    }
+                    WireTarget::Block(target_name) => Target::Block(cells[target_name].clone()),
+                    WireTarget::Import(import) => Target::Store(imports[import].clone()),
                 };
                 entries.push((wire.prefix.clone(), target));
             }

@@ -57,7 +57,10 @@ pub fn serve_requests(
         let response = handler(ns, &envelope);
         ns.write(&envelope.respond_to, Record::parsed(response))?;
     }
-    ns.write(&path!("iso/shutdown/complete"), Record::parsed(Value::map()))?;
+    ns.write(
+        &path!("iso/shutdown/complete"),
+        Record::parsed(Value::map()),
+    )?;
     Ok(())
 }
 
@@ -354,7 +357,10 @@ impl NativeBlock for ShellBlock {
                 }
             }
         }
-        ns.write(&path!("iso/shutdown/complete"), Record::parsed(Value::map()))?;
+        ns.write(
+            &path!("iso/shutdown/complete"),
+            Record::parsed(Value::map()),
+        )?;
         Ok(())
     }
 }

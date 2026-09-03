@@ -1,4 +1,6 @@
-//! Featherweight: Block-based pico-process runtime using WASM sandboxes.
+//! Featherweight: a strawman Isotope runtime.
 //!
-//! Featherweight provides an execution model where "Blocks" (pico-processes) run in WASM
-//! sandboxes and communicate exclusively through store read/write operations.
+//! Blocks are pico-processes whose entire world is StructFS reads and
+//! writes; assemblies compose them with capability wiring. See
+//! `featherweight-runtime` for the runtime library and the `fw` binary
+//! for the CLI (`fw shell`, `fw run <assembly>`).

@@ -6,8 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use featherweight_runtime::{
-    native, protocol, register_builtins, AssemblyDef, BlockState, NativeBlock, Runtime,
-    ShellBlock,
+    native, protocol, register_builtins, AssemblyDef, BlockState, NativeBlock, Runtime, ShellBlock,
 };
 use structfs_core_store::{path, Error, Reader, Record, Value, Writer};
 
@@ -195,7 +194,11 @@ async fn fail_fast_takes_down_siblings() {
         .await
         .unwrap();
     assert_eq!(assembly.public_cell().state(), BlockState::Failed);
-    assert!(assembly.public_cell().last_error().unwrap().contains("boom"));
+    assert!(assembly
+        .public_cell()
+        .last_error()
+        .unwrap()
+        .contains("boom"));
 
     // Sibling kv never started; fail-fast shutdown moves it to Stopped.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -269,10 +272,7 @@ async fn imports_wire_host_stores() {
     seed.write(&path!("motd"), Record::parsed(Value::from("welcome")))
         .unwrap();
     let mut imports = HashMap::new();
-    imports.insert(
-        "seed".to_string(),
-        featherweight_runtime::host_store(seed),
-    );
+    imports.insert("seed".to_string(), featherweight_runtime::host_store(seed));
 
     let assembly = runtime.instantiate(&def, imports, &base_dir()).unwrap();
     // kv doesn't consult its wiring, but instantiation validated and
@@ -381,15 +381,30 @@ exit
     assert!(text.contains("running"), "state output missing: {text}");
     // ls of the namespace root shows iso + wired mounts
     assert!(text.contains("iso"), "root listing missing iso: {text}");
-    assert!(text.contains("services"), "root listing missing services: {text}");
+    assert!(
+        text.contains("services"),
+        "root listing missing services: {text}"
+    );
     // kv round trip
-    assert!(text.contains("-> services/kv/users/alice"), "write echo missing: {text}");
-    assert!(text.contains("\"name\": \"Alice\""), "kv read missing: {text}");
+    assert!(
+        text.contains("-> services/kv/users/alice"),
+        "write echo missing: {text}"
+    );
+    assert!(
+        text.contains("\"name\": \"Alice\""),
+        "kv read missing: {text}"
+    );
     assert!(text.contains("alice"), "kv ls missing: {text}");
     // echo service
-    assert!(text.contains("\"echo\": \"ping\""), "echo read missing: {text}");
+    assert!(
+        text.contains("\"echo\": \"ping\""),
+        "echo read missing: {text}"
+    );
     // interface declaration
-    assert!(text.contains("interactive shell"), "interface missing: {text}");
+    assert!(
+        text.contains("interactive shell"),
+        "interface missing: {text}"
+    );
     // absence and capability denial
     assert!(text.contains("(absent)"), "absent read missing: {text}");
     assert!(
@@ -400,10 +415,8 @@ exit
 
 #[tokio::test(flavor = "multi_thread")]
 async fn yaml_and_json_definitions_are_equivalent() {
-    let yaml = AssemblyDef::from_str(
-        "assembly: same\nblocks:\n  kv: builtin:kv\npublic: kv\n",
-    )
-    .unwrap();
+    let yaml =
+        AssemblyDef::from_str("assembly: same\nblocks:\n  kv: builtin:kv\npublic: kv\n").unwrap();
     let json = AssemblyDef::from_str(
         r#"{"assembly": "same", "blocks": {"kv": "builtin:kv"}, "public": "kv"}"#,
     )

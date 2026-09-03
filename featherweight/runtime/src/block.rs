@@ -249,12 +249,7 @@ impl BlockCell {
     ///
     /// The caller awaits the receiver; a dropped receiver (block reached a
     /// terminal state) means the store is unavailable.
-    pub fn enqueue(
-        &self,
-        op: &'static str,
-        path: Path,
-        data: Value,
-    ) -> oneshot::Receiver<Value> {
+    pub fn enqueue(&self, op: &'static str, path: Path, data: Value) -> oneshot::Receiver<Value> {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {

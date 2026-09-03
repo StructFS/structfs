@@ -114,9 +114,7 @@ impl IsoSurface {
                 .shutdown_mode()
                 .map(|mode| Value::from(mode.as_str())),
             // === time ===
-            (2, "time") if path[1] == "now" => {
-                Some(Value::String(chrono::Utc::now().to_rfc3339()))
-            }
+            (2, "time") if path[1] == "now" => Some(Value::String(chrono::Utc::now().to_rfc3339())),
             (2, "time") if path[1] == "monotonic" => {
                 Some(Value::Integer(self.cell.monotonic_nanos()))
             }
@@ -152,7 +150,13 @@ impl IsoSurface {
 
     /// Serve a write. All writes are immediate.
     pub fn write(&self, path: &Path, value: Value) -> Result<Path, Error> {
-        match (path.len(), path.iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {
+        match (
+            path.len(),
+            path.iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        ) {
             (3, ["server", "responses", token]) => {
                 let token: u64 = token
                     .parse()
@@ -305,7 +309,8 @@ mod tests {
             read_value(&iso, &path!("shutdown/mode")).await,
             Some(Value::from("graceful"))
         );
-        iso.write(&path!("shutdown/complete"), Value::map()).unwrap();
+        iso.write(&path!("shutdown/complete"), Value::map())
+            .unwrap();
         assert!(cell.shutdown_complete());
     }
 }

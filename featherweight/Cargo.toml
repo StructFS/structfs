@@ -4,4 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Block-based pico-process runtime using WASM sandboxes"
+description = "Featherweight Isotope runtime CLI: run assemblies and the demo shell"
+
+[[bin]]
+name = "fw"
+path = "src/main.rs"
+
+[dependencies]
+featherweight-runtime = { version = "0.1.0", path = "runtime" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -129,13 +129,14 @@ impl AssemblyDef {
                         },
                         Value::Map(fields) => BlockDef {
                             artifact: expect_string(
-                                fields.get("wasm").or_else(|| fields.get("artifact")).ok_or_else(
-                                    || {
+                                fields
+                                    .get("wasm")
+                                    .or_else(|| fields.get("artifact"))
+                                    .ok_or_else(|| {
                                         RuntimeError::assembly(format!(
                                             "block '{block_name}' missing artifact"
                                         ))
-                                    },
-                                )?,
+                                    })?,
                                 "artifact",
                             )?,
                             serialization: match fields.get("serialization") {
@@ -246,6 +247,10 @@ impl AssemblyDef {
     }
 
     /// Parse a definition from JSON or YAML source text.
+    ///
+    /// Also available through `std::str::FromStr`; the inherent method
+    /// exists so callers don't need the trait import.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(source: &str) -> Result<Self> {
         let json: serde_json::Value = if source.trim_start().starts_with('{') {
             serde_json::from_str(source)
@@ -260,6 +265,14 @@ impl AssemblyDef {
     /// The failure policy for a block (default fail-fast).
     pub fn failure_policy(&self, block: &str) -> FailurePolicy {
         self.failure.get(block).copied().unwrap_or_default()
+    }
+}
+
+impl std::str::FromStr for AssemblyDef {
+    type Err = RuntimeError;
+
+    fn from_str(source: &str) -> Result<Self> {
+        AssemblyDef::from_str(source)
     }
 }
 

@@ -8,9 +8,7 @@
 
 use std::sync::Arc;
 
-use structfs_core_store::{
-    Error, Path, Reader, Record, Shared, Store, Value, Writer,
-};
+use structfs_core_store::{Error, Path, Reader, Record, Shared, Store, Value, Writer};
 
 use crate::block::BlockCell;
 use crate::iso::IsoSurface;
@@ -44,7 +42,7 @@ pub struct WiringTable {
 impl WiringTable {
     /// Build a table; entries are sorted longest-prefix-first.
     pub fn new(mut entries: Vec<(Path, Target)>) -> Self {
-        entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        entries.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
         Self { entries }
     }
 
@@ -149,9 +147,7 @@ impl Writer for Namespace {
             Some((Target::Block(cell), rel, prefix)) => {
                 let cell = cell.clone();
                 let value = data.into_value(&structfs_core_store::NoCodec)?;
-                let result = self
-                    .ctx
-                    .block_on(self.ctx.call_write(&cell, rel, value))?;
+                let result = self.ctx.block_on(self.ctx.call_write(&cell, rel, value))?;
                 // Result paths are expressed in the caller's namespace.
                 Ok(prefix.join(&result))
             }

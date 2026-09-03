@@ -1,0 +1,24 @@
+# The fw demo assembly: `fw run featherweight/demo.assembly.yaml`
+# (equivalent to `fw shell`).
+assembly: fw-demo
+version: "0.1.0"
+
+blocks:
+  shell: builtin:shell
+  kv: builtin:kv
+  echo: builtin:echo
+  logs: builtin:logger
+
+public: shell
+
+wiring:
+  - "shell:/services/kv -> kv"
+  - "shell:/services/echo -> echo"
+  - "shell:/services/logs -> logs"
+
+config:
+  shell:
+    prompt: "iso> "
+
+failure:
+  kv: isolate
