@@ -1,43 +1,48 @@
-//! Error types for the Featherweight runtime.
+//! Runtime error types.
 
 use thiserror::Error;
-use uuid::Uuid;
 
-/// Errors that can occur in the Featherweight runtime.
+/// Errors from the Featherweight runtime.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    /// A Block with the given ID was not found.
-    #[error("block not found: {0}")]
-    BlockNotFound(Uuid),
-
-    /// The Block has already been started.
-    #[error("block already running: {0}")]
-    BlockAlreadyRunning(Uuid),
-
-    /// The Block has already been stopped.
-    #[error("block already stopped: {0}")]
-    BlockAlreadyStopped(Uuid),
-
     /// A store operation failed.
     #[error("store error: {0}")]
     Store(#[from] structfs_core_store::Error),
 
-    /// The channel was closed unexpectedly.
-    #[error("channel closed")]
-    ChannelClosed,
-
     /// An I/O error occurred.
-    #[error("io error: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A path was invalid.
-    #[error("invalid path: {0}")]
-    InvalidPath(String),
+    /// An assembly definition is invalid.
+    #[error("assembly error: {0}")]
+    Assembly(String),
 
-    /// The export was not found.
-    #[error("export not found: {0}")]
-    ExportNotFound(String),
+    /// The wasm engine failed (compile, link, instantiate, or trap).
+    #[error("wasm error during {operation}: {message}")]
+    Wasm {
+        operation: &'static str,
+        message: String,
+    },
+
+    /// A block's manifest is missing or malformed.
+    #[error("manifest error: {0}")]
+    Manifest(String),
 }
 
-/// Result type alias for runtime operations.
+impl RuntimeError {
+    /// Create an assembly-definition error.
+    pub fn assembly(message: impl Into<String>) -> Self {
+        RuntimeError::Assembly(message.into())
+    }
+
+    /// Create a wasm-engine error.
+    pub fn wasm(operation: &'static str, message: impl ToString) -> Self {
+        RuntimeError::Wasm {
+            operation,
+            message: message.to_string(),
+        }
+    }
+}
+
+/// Runtime result alias.
 pub type Result<T> = std::result::Result<T, RuntimeError>;

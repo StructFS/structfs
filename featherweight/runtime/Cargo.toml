@@ -4,28 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Block-based pico-process runtime for Isotope virtual OS"
+description = "Strawman Isotope runtime: blocks, assemblies, namespaces, and the /iso store over StructFS"
 
 [dependencies]
-structfs-core-store = { workspace = true }
+structfs-core-store = { workspace = true, features = ["async"] }
 structfs-ll-store = { workspace = true }
+structfs-serde-store = { workspace = true }
+structfs-handles = { workspace = true }
 bytes = "1.9"
 
 wasmtime = { workspace = true, features = ["component-model"] }
-tokio = { workspace = true, features = ["sync"] }
-async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
+chrono = "0.4"
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-collection_literals = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-
-[[example]]
-name = "hello_world"
-
-[[example]]
-name = "wasm_hello"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -761,13 +761,15 @@ dependencies = [
 name = "featherweight-runtime"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
- "collection_literals",
+ "chrono",
  "serde",
  "serde_json",
+ "serde_yaml",
  "structfs-core-store",
+ "structfs-handles",
  "structfs-ll-store",
+ "structfs-serde-store",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",

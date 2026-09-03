@@ -265,7 +265,7 @@ mod tests {
         }
 
         let id = BlockId::new();
-        let state = WasmBlockState::new(id, TestStore, NoCodec, Format::OCTET_STREAM);
+        let state = WasmBlockState::new(id.clone(), TestStore, NoCodec, Format::OCTET_STREAM);
         assert_eq!(state.id, id);
     }
 
