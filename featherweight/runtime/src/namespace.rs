@@ -126,8 +126,12 @@ impl Reader for Namespace {
                     .map(|v| v.map(Record::parsed))
             }
             Some((Target::Store(store), rel, _prefix)) => store.clone().read(&rel),
-            // Unwired reads are absent (spec 03: "read → null").
-            None => Ok(None),
+            // Unwired paths are denied (spec 03): a capability system
+            // must not leak absence vs denial.
+            None => Err(Error::permission_denied(format!(
+                "path is not wired into this namespace: {}",
+                from
+            ))),
         }
     }
 }
@@ -140,7 +144,7 @@ impl Writer for Namespace {
         if to[0] == "iso" {
             let rel = to.slice(1, to.len());
             let value = data.into_value(&structfs_core_store::NoCodec)?;
-            let result = self.iso.write(&rel, value)?;
+            let result = self.ctx.block_on(self.iso.write(&rel, value))?;
             return Ok(Path::parse("iso").unwrap().join(&result));
         }
         match self.wiring.resolve(to) {

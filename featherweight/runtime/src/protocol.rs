@@ -51,6 +51,50 @@ impl RequestEnvelope {
     }
 }
 
+/// One decoded mailbox event, as seen by a serving block
+/// (`isotope/spec/09-posix-closure.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventEnvelope {
+    /// Shutdown was requested: the mailbox read unblocked with Null.
+    Shutdown,
+    /// A server-protocol request to serve.
+    Request(RequestEnvelope),
+    /// A runtime signal (fire-and-forget).
+    Signal { name: String, data: Value },
+    /// A timer the block registered has fired.
+    Timer { tag: Value },
+    /// An event with an op this decoder doesn't know; per spec, ignore it.
+    Unknown(Value),
+}
+
+impl EventEnvelope {
+    /// Decode a mailbox event from the value a `iso/server/requests` read
+    /// returned.
+    pub fn from_value(value: &Value) -> Result<Self, Error> {
+        let map = match value {
+            Value::Null => return Ok(EventEnvelope::Shutdown),
+            Value::Map(map) => map,
+            _ => return Err(Error::store("protocol", "event", "not a map")),
+        };
+        match map.get("op") {
+            Some(Value::String(op)) if op == "read" || op == "write" => {
+                Ok(EventEnvelope::Request(RequestEnvelope::from_value(value)?))
+            }
+            Some(Value::String(op)) if op == "signal" => Ok(EventEnvelope::Signal {
+                name: match map.get("signal") {
+                    Some(Value::String(name)) => name.clone(),
+                    _ => return Err(Error::store("protocol", "event", "signal missing name")),
+                },
+                data: map.get("data").cloned().unwrap_or(Value::Null),
+            }),
+            Some(Value::String(op)) if op == "timer" => Ok(EventEnvelope::Timer {
+                tag: map.get("tag").cloned().unwrap_or(Value::Null),
+            }),
+            _ => Ok(EventEnvelope::Unknown(value.clone())),
+        }
+    }
+}
+
 /// Build a successful read response: `{result: "ok", value}`.
 pub fn ok_value(value: Value) -> Value {
     let mut map = BTreeMap::new();

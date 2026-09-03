@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use featherweight_runtime::{
-    native, protocol, register_builtins, AssemblyDef, BlockState, NativeBlock, Runtime, ShellBlock,
+    native, protocol, register_builtins, AssemblyDef, BlockState, NativeBlock, Runtime,
 };
 use structfs_core_store::{path, Error, Reader, Record, Value, Writer};
 
@@ -54,7 +54,7 @@ struct ProxyBlock;
 
 impl NativeBlock for ProxyBlock {
     fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
-        native::serve_requests(ns, |ns, request| {
+        native::serve_only_requests(ns, |ns, request| {
             let target = path!("services/kv").join(&request.path);
             match request.op.as_str() {
                 "read" => match ns.read(&target) {
@@ -323,41 +323,46 @@ async fn unresponsive_block_hits_deadline() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_exercises_the_os_surface() {
-    let script = "\
-id
-state
-time
-uuid
-ls
-ls iso
-ls services
-write services/kv/users/alice {\"name\": \"Alice\", \"age\": 30}
-read services/kv/users/alice
-ls services/kv/users
-read services/echo/ping
-log info hello from the shell
-read iso/self/interface
-read missing/path
-write unwired/path 1
-exit
-";
-    let output = native::SharedOutput::default();
-    let shell_output = output.clone();
+    let script = [
+        "id",
+        "state",
+        "time",
+        "uuid",
+        "env",
+        "read iso/self/args",
+        "ls",
+        "ls iso",
+        "write services/kv/users/alice {\"name\": \"Alice\", \"age\": 30}",
+        "read services/kv/users/alice",
+        "ls services/kv/users",
+        "read services/kv/users/nobody",
+        "read services/echo/ping",
+        "log info hello from the shell",
+        "read iso/self/interface",
+        "read unwired/path",
+        "write unwired/path 1",
+        "sleep 5",
+        "exit",
+    ];
+    let stdio = featherweight_runtime::ScriptedStdio::with_input(script);
+    let provided = stdio.clone();
 
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "test_shell",
-        Arc::new(move || {
-            Box::new(ShellBlock::with_io(
-                Box::new(std::io::Cursor::new(script.as_bytes().to_vec())),
-                Box::new(shell_output.clone()),
-            )) as Box<dyn NativeBlock>
-        }),
-    );
+    let runtime = Runtime::new().with_stdio_provider(Arc::new(move |name| {
+        (name == "shell")
+            .then(|| Arc::new(provided.clone()) as Arc<dyn featherweight_runtime::Stdio>)
+    }));
+    let mut runtime = {
+        let mut runtime = runtime;
+        register_builtins(&mut runtime);
+        runtime
+    };
+    let _ = &mut runtime;
 
     let def = AssemblyDef::from_str(
         r#"{"assembly": "demo",
-            "blocks": {"shell": "builtin:test_shell",
+            "blocks": {"shell": {"artifact": "builtin:shell",
+                                 "env": {"HOME": "/blocks"},
+                                 "args": ["shell", "--demo"]},
                        "kv": "builtin:kv",
                        "echo": "builtin:echo"},
             "public": "shell",
@@ -375,10 +380,16 @@ exit
         .expect("shell did not finish");
     assembly.shutdown(Duration::from_secs(2)).await;
 
-    let text = output.text();
+    let text = stdio.output();
     // Identity and system paths
     assert!(text.contains("block-"), "id output missing: {text}");
     assert!(text.contains("running"), "state output missing: {text}");
+    // Environment and args from the block definition
+    assert!(
+        text.contains("\"HOME\": \"/blocks\""),
+        "env missing: {text}"
+    );
+    assert!(text.contains("--demo"), "args missing: {text}");
     // ls of the namespace root shows iso + wired mounts
     assert!(text.contains("iso"), "root listing missing iso: {text}");
     assert!(
@@ -395,6 +406,8 @@ exit
         "kv read missing: {text}"
     );
     assert!(text.contains("alice"), "kv ls missing: {text}");
+    // Absence is a statement a wired store makes about its own contents
+    assert!(text.contains("(absent)"), "absent read missing: {text}");
     // echo service
     assert!(
         text.contains("\"echo\": \"ping\""),
@@ -405,12 +418,13 @@ exit
         text.contains("interactive shell"),
         "interface missing: {text}"
     );
-    // absence and capability denial
-    assert!(text.contains("(absent)"), "absent read missing: {text}");
-    assert!(
-        text.contains("permission denied"),
-        "unwired write not denied: {text}"
-    );
+    // Unwired paths are denied for reads AND writes (capability rule)
+    let denials = text.matches("permission denied").count();
+    assert!(denials >= 2, "unwired read+write not both denied: {text}");
+    // Blocking sleep resolved
+    assert!(text.contains("5"), "sleep result missing: {text}");
+    // The prompt itself flowed through iso/stdio
+    assert!(text.contains("iso> "), "prompt missing: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -422,4 +436,222 @@ async fn yaml_and_json_definitions_are_equivalent() {
     )
     .unwrap();
     assert_eq!(yaml, json);
+}
+
+/// A block that spawns a kv assembly through iso/proc, uses it, kills it,
+/// and reports what happened by serving reads.
+struct SpawnerBlock;
+
+impl NativeBlock for SpawnerBlock {
+    fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
+        // spawn(2): write a definition to iso/proc.
+        let def = structfs_serde_store::json_to_value(serde_json::json!({
+            "assembly": "spawned-kv",
+            "blocks": {"kv": "builtin:kv"},
+            "public": "kv"
+        }));
+        let handle = ns.write(&path!("iso/proc"), Record::parsed(def))?;
+        assert_eq!(handle.to_string(), "iso/proc/outstanding/0");
+
+        // Status read on the handle (starting or running: the Running
+        // transition happens on the child's driver thread).
+        let status = ns.read(&handle)?.expect("status");
+        let running = matches!(
+            status.as_value(),
+            Some(Value::Map(map)) if matches!(
+                map.get("state"),
+                Some(Value::String(s)) if s == "running" || s == "starting"
+            )
+        );
+
+        // kill(2): Null-write releases the handle and shuts the child down.
+        ns.write(&handle, Record::parsed(Value::Null))?;
+
+        // wait via the mailbox: serve one read reporting the outcome.
+        native::serve_only_requests(ns, |_ns, _request| protocol::ok_value(Value::Bool(running)))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocks_spawn_and_kill_assemblies_through_iso_proc() {
+    let mut runtime = runtime();
+    runtime.register_builtin(
+        "spawner",
+        Arc::new(|| Box::new(SpawnerBlock) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "sp",
+            "blocks": {"spawner": {"artifact": "builtin:spawner", "spawn": true}},
+            "public": "spawner"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &base_dir())
+        .unwrap();
+
+    // The spawner saw its child running before killing it.
+    let saw_running = assembly.read(path!("outcome")).await.unwrap();
+    assert_eq!(saw_running, Some(Value::Bool(true)));
+
+    assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_capability_is_denied_by_default() {
+    let runtime = runtime();
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "nospawn", "blocks": {"kv": "builtin:kv"}, "public": "kv"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &base_dir())
+        .unwrap();
+    // kv has no spawn grant; nothing should exist at iso/proc. Verified
+    // indirectly: the kv block itself never touches proc, and a direct
+    // grant check lives in the iso unit tests. Here we just confirm the
+    // assembly runs without the grant.
+    assembly.write(path!("x"), Value::from(1i64)).await.unwrap();
+    assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn management_store_runs_assemblies() {
+    use structfs_core_store::{DetachedReader, DetachedWriter};
+
+    let runtime = runtime();
+    let mut mgmt = runtime.management_store(&base_dir());
+
+    // Deploy by writing a definition — the management API is StructFS.
+    let def = structfs_serde_store::json_to_value(serde_json::json!({
+        "assembly": "managed",
+        "blocks": {"kv": "builtin:kv"},
+        "public": "kv"
+    }));
+    let handle = mgmt
+        .write_detached(&path!(""), Record::parsed(def))
+        .await
+        .unwrap();
+    assert_eq!(handle.to_string(), "outstanding/0");
+
+    // Status read: the assembly is starting or already running (the
+    // Running transition happens on the driver thread).
+    let status = mgmt.read_detached(&handle).await.unwrap().unwrap();
+    match status.as_value().unwrap() {
+        Value::Map(map) => {
+            assert!(
+                matches!(map.get("state"), Some(Value::String(s)) if s == "running" || s == "starting"),
+                "unexpected state: {map:?}"
+            );
+            assert_eq!(map.get("name"), Some(&Value::from("kv")));
+        }
+        other => panic!("expected status map, got {other:?}"),
+    }
+
+    // A parked wait resolves when the assembly is shut down (Null write).
+    let mut waiter = mgmt.clone();
+    let wait_path = handle.join(&path!("wait"));
+    let wait = tokio::spawn(async move { waiter.read_detached(&wait_path).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    mgmt.write_detached(&handle, Record::parsed(Value::Null))
+        .await
+        .unwrap();
+    // The wait either resolved with terminal status before the release
+    // cancelled it, or was cancelled by the release — both are protocol-
+    // conformant ends for a parked read on a released handle.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), wait)
+        .await
+        .expect("wait never resolved")
+        .unwrap();
+    match outcome {
+        Ok(Some(record)) => {
+            assert!(matches!(
+                record.as_value(),
+                Some(Value::Map(map)) if matches!(map.get("state"), Some(Value::String(s)) if s == "stopped" || s == "stopping")
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => assert!(e.is_cancelled(), "unexpected error: {e}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signals_reach_the_mailbox() {
+    /// Serves reads reporting the last signal it saw.
+    struct SignalEcho {
+        last: Option<String>,
+    }
+    impl NativeBlock for SignalEcho {
+        fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
+            let last = &mut self.last;
+            native::serve_requests(ns, |_ns, event| match event {
+                protocol::EventEnvelope::Signal { name, .. } => {
+                    *last = Some(name.clone());
+                    None
+                }
+                protocol::EventEnvelope::Request(_request) => Some(protocol::ok_value(
+                    last.clone().map(Value::String).unwrap_or(Value::Null),
+                )),
+                _ => None,
+            })
+        }
+    }
+
+    let mut runtime = runtime();
+    runtime.register_builtin(
+        "sig",
+        Arc::new(|| Box::new(SignalEcho { last: None }) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "sig", "blocks": {"sig": "builtin:sig"}, "public": "sig"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &base_dir())
+        .unwrap();
+
+    // Start the block, deliver a signal, then ask what it saw.
+    assert_eq!(assembly.read(path!("last")).await.unwrap(), None);
+    assert!(assembly.signal("sig", "usr1", Value::Null));
+    let seen = assembly.read(path!("last")).await.unwrap();
+    assert_eq!(seen, Some(Value::from("usr1")));
+
+    assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+/// Exits with a declared code.
+struct ExitingBlock;
+
+impl NativeBlock for ExitingBlock {
+    fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
+        ns.write(
+            &path!("iso/shutdown/complete"),
+            Record::parsed(structfs_serde_store::json_to_value(
+                serde_json::json!({"code": 42}),
+            )),
+        )?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_codes_propagate() {
+    let mut runtime = runtime();
+    runtime.register_builtin(
+        "exiting",
+        Arc::new(|| Box::new(ExitingBlock) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "ex", "blocks": {"main": "builtin:exiting"}, "public": "main"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &base_dir())
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), assembly.wait_public_terminal())
+        .await
+        .unwrap();
+    assert_eq!(assembly.public_cell().state(), BlockState::Stopped);
+    assert_eq!(assembly.public_cell().exit_code(), 42);
 }

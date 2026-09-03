@@ -22,6 +22,28 @@ pub struct BlockDef {
     pub serialization: String,
     /// Optional content hash (accepted, not verified in the strawman).
     pub hash: Option<String>,
+    /// Environment variables served at `iso/env`.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Arguments served at `iso/self/args`.
+    pub args: Vec<String>,
+    /// Stdio attachment: `"null"` (default) or `"host"`.
+    pub stdio: String,
+    /// Whether `iso/proc` (spawn/wait/kill) is granted.
+    pub spawn: bool,
+}
+
+impl BlockDef {
+    fn short(artifact: String) -> Self {
+        Self {
+            artifact,
+            serialization: "application/json".to_string(),
+            hash: None,
+            env: std::collections::BTreeMap::new(),
+            args: Vec::new(),
+            stdio: "null".to_string(),
+            spawn: false,
+        }
+    }
 }
 
 /// A wiring target.
@@ -122,13 +144,9 @@ impl AssemblyDef {
                 for (block_name, entry) in entries {
                     let def = match entry {
                         // Short form: artifact string, JSON serialization.
-                        Value::String(artifact) => BlockDef {
-                            artifact: artifact.clone(),
-                            serialization: "application/json".to_string(),
-                            hash: None,
-                        },
-                        Value::Map(fields) => BlockDef {
-                            artifact: expect_string(
+                        Value::String(artifact) => BlockDef::short(artifact.clone()),
+                        Value::Map(fields) => {
+                            let mut def = BlockDef::short(expect_string(
                                 fields
                                     .get("wasm")
                                     .or_else(|| fields.get("artifact"))
@@ -138,16 +156,38 @@ impl AssemblyDef {
                                         ))
                                     })?,
                                 "artifact",
-                            )?,
-                            serialization: match fields.get("serialization") {
-                                Some(v) => expect_string(v, "serialization")?,
-                                None => "application/json".to_string(),
-                            },
-                            hash: match fields.get("hash") {
-                                Some(v) => Some(expect_string(v, "hash")?),
-                                None => None,
-                            },
-                        },
+                            )?);
+                            if let Some(v) = fields.get("serialization") {
+                                def.serialization = expect_string(v, "serialization")?;
+                            }
+                            if let Some(v) = fields.get("hash") {
+                                def.hash = Some(expect_string(v, "hash")?);
+                            }
+                            if let Some(Value::Map(env)) = fields.get("env") {
+                                for (name, value) in env {
+                                    def.env
+                                        .insert(name.clone(), expect_string(value, "env value")?);
+                                }
+                            }
+                            if let Some(Value::Array(args)) = fields.get("args") {
+                                for arg in args {
+                                    def.args.push(expect_string(arg, "arg")?);
+                                }
+                            }
+                            if let Some(v) = fields.get("stdio") {
+                                let stdio = expect_string(v, "stdio")?;
+                                if stdio != "null" && stdio != "host" {
+                                    return Err(RuntimeError::assembly(format!(
+                                        "block '{block_name}' stdio must be 'null' or 'host'"
+                                    )));
+                                }
+                                def.stdio = stdio;
+                            }
+                            if let Some(Value::Bool(spawn)) = fields.get("spawn") {
+                                def.spawn = *spawn;
+                            }
+                            def
+                        }
                         _ => {
                             return Err(RuntimeError::assembly(format!(
                                 "block '{block_name}' must be a string or map"

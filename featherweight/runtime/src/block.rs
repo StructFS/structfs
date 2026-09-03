@@ -132,15 +132,51 @@ impl ServerRequest {
     }
 }
 
+/// One event on the block's unified mailbox
+/// (`isotope/spec/09-posix-closure.md`): served requests interleaved
+/// with runtime notifications.
+#[derive(Debug, Clone)]
+pub enum BlockEvent {
+    /// A server-protocol request (carries `respond_to`).
+    Request(ServerRequest),
+    /// A runtime- or host-originated signal. Fire-and-forget.
+    Signal { name: String, data: Value },
+    /// A delivery for a timer the block registered.
+    Timer { tag: Value },
+}
+
+impl BlockEvent {
+    /// Encode as the mailbox envelope; `op` distinguishes event kinds.
+    pub fn to_value(&self) -> Value {
+        match self {
+            BlockEvent::Request(request) => request.to_value(),
+            BlockEvent::Signal { name, data } => {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("op".to_string(), Value::from("signal"));
+                map.insert("signal".to_string(), Value::String(name.clone()));
+                map.insert("data".to_string(), data.clone());
+                Value::Map(map)
+            }
+            BlockEvent::Timer { tag } => {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("op".to_string(), Value::from("timer"));
+                map.insert("tag".to_string(), tag.clone());
+                Value::Map(map)
+            }
+        }
+    }
+}
+
 struct ShutdownFlags {
     requested: bool,
     mode: Option<ShutdownMode>,
     complete: bool,
+    exit_code: Option<i64>,
 }
 
 struct CellState {
     state: BlockState,
-    queue: VecDeque<ServerRequest>,
+    queue: VecDeque<BlockEvent>,
     responses: HashMap<u64, oneshot::Sender<Value>>,
     shutdown: ShutdownFlags,
     interface: Option<Value>,
@@ -181,6 +217,7 @@ impl BlockCell {
                     requested: false,
                     mode: None,
                     complete: false,
+                    exit_code: None,
                 },
                 interface: None,
                 last_error: None,
@@ -255,24 +292,39 @@ impl BlockCell {
         {
             let mut cell = self.lock();
             cell.responses.insert(token, tx);
-            cell.queue.push_back(ServerRequest {
+            cell.queue.push_back(BlockEvent::Request(ServerRequest {
                 op,
                 path,
                 data,
                 token,
-            });
+            }));
         }
         self.gate.notify();
         rx
     }
 
+    /// Deliver a signal to the block's mailbox.
+    pub fn deliver_signal(&self, name: impl Into<String>, data: Value) {
+        self.lock().queue.push_back(BlockEvent::Signal {
+            name: name.into(),
+            data,
+        });
+        self.gate.notify();
+    }
+
+    /// Deliver a timer expiry to the block's mailbox.
+    pub fn deliver_timer(&self, tag: Value) {
+        self.lock().queue.push_back(BlockEvent::Timer { tag });
+        self.gate.notify();
+    }
+
     // === Server protocol: block side ===
 
-    /// Take the next request, parking until one arrives or shutdown is
-    /// requested (which yields `None`, the spec's null-unblock).
-    pub async fn next_request(&self) -> Result<Option<ServerRequest>, Error> {
-        // First read of the request queue marks the block Running (the
-        // spec's Starting -> Running transition: "begins reading").
+    /// Take the next mailbox event, parking until one arrives or shutdown
+    /// is requested (which yields `None`, the spec's null-unblock).
+    pub async fn next_event(&self) -> Result<Option<BlockEvent>, Error> {
+        // First read of the mailbox marks the block Running (the spec's
+        // Starting -> Running transition: "begins reading").
         {
             let mut cell = self.lock();
             if cell.state == BlockState::Starting {
@@ -282,8 +334,8 @@ impl BlockCell {
         self.gate
             .wait_until_cancellable(&self.cancel, || {
                 let mut cell = self.lock();
-                if let Some(request) = cell.queue.pop_front() {
-                    return Some(Some(request));
+                if let Some(event) = cell.queue.pop_front() {
+                    return Some(Some(event));
                 }
                 if cell.shutdown.requested {
                     return Some(None);
@@ -294,8 +346,8 @@ impl BlockCell {
             .map_err(|c| c.into_error("block shutdown (immediate)"))
     }
 
-    /// Drain all pending requests without blocking.
-    pub fn pending_requests(&self) -> Vec<ServerRequest> {
+    /// Drain all pending mailbox events without blocking.
+    pub fn pending_events(&self) -> Vec<BlockEvent> {
         let mut cell = self.lock();
         cell.queue.drain(..).collect()
     }
@@ -340,15 +392,39 @@ impl BlockCell {
         self.lock().shutdown.mode
     }
 
-    /// Block signals its shutdown is complete.
-    pub fn mark_shutdown_complete(&self) {
-        self.lock().shutdown.complete = true;
+    /// Block signals its shutdown is complete, with an exit code.
+    pub fn mark_shutdown_complete(&self, code: i64) {
+        {
+            let mut cell = self.lock();
+            cell.shutdown.complete = true;
+            cell.shutdown.exit_code = Some(code);
+        }
         self.gate.notify();
     }
 
     /// Whether the block signalled shutdown completion.
     pub fn shutdown_complete(&self) -> bool {
         self.lock().shutdown.complete
+    }
+
+    /// The block's exit code: what it declared via `shutdown/complete`,
+    /// defaulting to 0 for a clean stop and 1 for failure.
+    pub fn exit_code(&self) -> i64 {
+        let cell = self.lock();
+        match cell.shutdown.exit_code {
+            Some(code) => code,
+            None if cell.state == BlockState::Failed => 1,
+            None => 0,
+        }
+    }
+
+    /// Terminal-status envelope: `{name, state, code}`.
+    pub fn status_value(&self) -> Value {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("name".to_string(), Value::String(self.name.clone()));
+        map.insert("state".to_string(), Value::from(self.state().as_str()));
+        map.insert("code".to_string(), Value::Integer(self.exit_code()));
+        Value::Map(map)
     }
 
     /// Park until this cell reaches a terminal state.
@@ -385,7 +461,11 @@ mod tests {
 
         let rx = cell.enqueue("read", path!("users/1"), Value::Null);
 
-        let request = cell.next_request().await.unwrap().unwrap();
+        let event = cell.next_event().await.unwrap().unwrap();
+        let request = match event {
+            BlockEvent::Request(request) => request,
+            other => panic!("expected request, got {other:?}"),
+        };
         assert_eq!(request.op, "read");
         assert_eq!(request.path, path!("users/1"));
         assert_eq!(cell.state(), BlockState::Running);
@@ -395,11 +475,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_request_parks_until_enqueue() {
+    async fn next_event_parks_until_enqueue() {
         let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
         let server = {
             let cell = cell.clone();
-            tokio::spawn(async move { cell.next_request().await })
+            tokio::spawn(async move { cell.next_event().await })
         };
         tokio::task::yield_now().await;
         let _rx = cell.enqueue("write", path!("k"), Value::from(1i64));
@@ -407,11 +487,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mailbox_interleaves_signals_and_timers() {
+        let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
+        cell.set_state(BlockState::Running);
+        let _rx = cell.enqueue("read", path!("a"), Value::Null);
+        cell.deliver_signal("usr1", Value::from(1i64));
+        cell.deliver_timer(Value::from("flush"));
+
+        assert!(matches!(
+            cell.next_event().await.unwrap().unwrap(),
+            BlockEvent::Request(_)
+        ));
+        assert!(matches!(
+            cell.next_event().await.unwrap().unwrap(),
+            BlockEvent::Signal { ref name, .. } if name == "usr1"
+        ));
+        assert!(matches!(
+            cell.next_event().await.unwrap().unwrap(),
+            BlockEvent::Timer { ref tag } if *tag == Value::from("flush")
+        ));
+    }
+
+    #[tokio::test]
+    async fn signal_wakes_parked_mailbox_read() {
+        let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
+        let server = {
+            let cell = cell.clone();
+            tokio::spawn(async move { cell.next_event().await })
+        };
+        tokio::task::yield_now().await;
+        cell.deliver_signal("wake", Value::Null);
+        assert!(matches!(
+            server.await.unwrap().unwrap(),
+            Some(BlockEvent::Signal { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown_unblocks_with_none() {
         let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
         let server = {
             let cell = cell.clone();
-            tokio::spawn(async move { cell.next_request().await })
+            tokio::spawn(async move { cell.next_event().await })
         };
         tokio::task::yield_now().await;
         cell.request_shutdown(ShutdownMode::Graceful);
@@ -425,13 +542,34 @@ mod tests {
         cell.set_state(BlockState::Running);
         let server = {
             let cell = cell.clone();
-            tokio::spawn(async move { cell.next_request().await })
+            tokio::spawn(async move { cell.next_event().await })
         };
         tokio::task::yield_now().await;
         cell.request_shutdown(ShutdownMode::Immediate);
         let result = server.await.unwrap();
         // Parked read fails on immediate shutdown (cancellation).
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn exit_codes() {
+        let cell = BlockCell::new("test", FailurePolicy::FailFast);
+        assert_eq!(cell.exit_code(), 0);
+        cell.mark_shutdown_complete(3);
+        cell.set_state(BlockState::Stopped);
+        assert_eq!(cell.exit_code(), 3);
+
+        let failed = BlockCell::new("bad", FailurePolicy::FailFast);
+        failed.set_state(BlockState::Failed);
+        assert_eq!(failed.exit_code(), 1);
+
+        match failed.status_value() {
+            Value::Map(map) => {
+                assert_eq!(map.get("state"), Some(&Value::from("failed")));
+                assert_eq!(map.get("code"), Some(&Value::Integer(1)));
+            }
+            _ => panic!("expected map"),
+        }
     }
 
     #[tokio::test]
@@ -447,8 +585,8 @@ mod tests {
         let cell = BlockCell::new("test", FailurePolicy::FailFast);
         let _r1 = cell.enqueue("read", path!("a"), Value::Null);
         let _r2 = cell.enqueue("read", path!("b"), Value::Null);
-        assert_eq!(cell.pending_requests().len(), 2);
-        assert_eq!(cell.pending_requests().len(), 0);
+        assert_eq!(cell.pending_events().len(), 2);
+        assert_eq!(cell.pending_events().len(), 0);
     }
 
     #[test]

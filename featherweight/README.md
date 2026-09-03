@@ -41,20 +41,36 @@ Run an assembly definition:
 $ cargo run -p featherweight -- run featherweight/demo.assembly.yaml
 ```
 
+Try `spawn {"assembly": "child", "blocks": {"kv": "builtin:kv"}, "public": "kv"}`
+in the shell: spawn(2) is a write to `iso/proc`, wait(2) is a blocking
+read of the returned handle, and kill(2) is a Null write to it.
+
 ## What's implemented
 
 - **Blocks** (native Rust or wasm components) with the six lifecycle
-  states, lazy startup, and graceful→immediate shutdown escalation
-- **The server protocol**: blocks serve their stores by reading
-  `iso/server/requests` and writing responses; callers park until the
-  response write lands
-- **The `/iso/` store**: `self/{id,state,interface}`,
-  `shutdown/{requested,mode,complete}`, `time/{now,monotonic,zone}`,
-  `random/{uuid,int,bytes/{n}}`, `log/{level}`, `server/requests[/pending]`
+  states, exit codes, lazy startup, and graceful→immediate shutdown
+  escalation
+- **The server protocol and the unified mailbox**: blocks serve their
+  stores by reading `iso/server/requests` and writing responses; signals
+  and timer deliveries arrive on the same queue (`poll` semantics with
+  one primitive); callers park until the response write lands
+- **The `/iso/` store** (POSIX closure, spec 09):
+  `self/{id,state,args,interface}`, `env`, `stdio/{stdin,stdout,stderr}`,
+  `shutdown/{requested,mode,complete}` (with exit codes),
+  `time/{now,now_unix_ns,monotonic,zone,after/{ms}}`, `timers`,
+  `random/{uuid,int,bytes/{n}}`, `log/{level}`,
+  `server/requests[/pending]`, and `proc` (spawn/wait/kill as the handle
+  pattern, granted per block via `spawn: true`)
 - **Assemblies**: JSON/YAML definitions, component-wise wiring with
-  bidirectional path rewriting, read-only `/config` injection, imports,
-  fail-fast/isolate failure policies, and nested assembly definitions
-  (an assembly is a block — the fractal property)
+  bidirectional path rewriting, read-only `/config` injection, per-block
+  `env`/`args`/`stdio`, imports, fail-fast/isolate failure policies, and
+  nested assembly definitions (an assembly is a block — the fractal
+  property)
+- **Management as a store**: `Runtime::management_store()` deploys,
+  observes, and shuts down assemblies through the same spawn protocol —
+  no separate management API
+- **Capability discipline**: unwired paths are denied (reads and writes
+  alike); filesystem/network access is granted by wiring, never ambient
 - **Wasm blocks**: the WIT boundary is the LL-store boundary (bytes only);
   the `manifest()` export selects the codec before the store bridge exists
 

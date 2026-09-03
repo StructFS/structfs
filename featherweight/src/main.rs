@@ -16,7 +16,13 @@ assembly: fw-demo
 version: "0.1.0"
 
 blocks:
-  shell: builtin:shell
+  shell:
+    artifact: builtin:shell
+    stdio: host
+    spawn: true
+    env:
+      DEMO: "1"
+    args: ["shell"]
   kv: builtin:kv
   echo: builtin:echo
   logs: builtin:logger

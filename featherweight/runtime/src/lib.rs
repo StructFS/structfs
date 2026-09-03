@@ -55,13 +55,19 @@ pub mod namespace;
 pub mod native;
 pub mod protocol;
 mod runtime;
+pub mod spawn;
+pub mod stdio;
 pub mod wasm_block;
 
 pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
-pub use block::{BlockCell, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode};
+pub use block::{
+    BlockCell, BlockEvent, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode,
+};
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use namespace::{host_store, HostStore, Namespace, Target, WiringTable};
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
-pub use runtime::{AssemblyInstance, Runtime};
+pub use runtime::{AssemblyInstance, Runtime, StdioProvider};
+pub use spawn::{ProcStore, SpawnProtocol};
+pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
 pub use wasm_block::WasmBlock;
