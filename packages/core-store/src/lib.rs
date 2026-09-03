@@ -37,6 +37,7 @@ mod path;
 pub mod path_trie;
 mod record;
 mod reference;
+mod serde_impls;
 mod traits;
 mod value;
 
