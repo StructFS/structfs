@@ -3,7 +3,7 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use structfs_core_store::{Codec, Error, Path, Reader, Record, Writer};
+use structfs_core_store::{Codec, Error, Format, Path, Reader, Record, Writer};
 
 use crate::convert::{from_value, to_value};
 
@@ -61,6 +61,58 @@ pub trait TypedReader: Reader {
     ) -> Result<Option<serde_json::Value>, Error> {
         self.read_as(from, codec)
     }
+
+    /// Codec-free typed read.
+    ///
+    /// Most stores return `Record::Parsed` values, where a codec argument is
+    /// meaningless; this method deserializes them directly via serde. Raw
+    /// JSON records are parsed with serde_json; other raw formats are an
+    /// `UnsupportedFormat` error — use [`TypedReader::read_as`] with a codec
+    /// for those.
+    ///
+    /// ```rust,ignore
+    /// let config: Option<Config> = store.read_typed(&path!("config"))?;
+    /// ```
+    fn read_typed<T: DeserializeOwned>(&mut self, from: &Path) -> Result<Option<T>, Error> {
+        let Some(record) = self.read(from)? else {
+            return Ok(None);
+        };
+        match record {
+            Record::Parsed(value) => Ok(Some(from_value(value)?)),
+            Record::Raw { bytes, format, .. } if format == Format::JSON => {
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|e| Error::decode(Format::JSON, e.to_string()))
+            }
+            Record::Raw { format, .. } => Err(Error::UnsupportedFormat(format)),
+            _ => Err(Error::store(
+                "typed_reader",
+                "read_typed",
+                "unsupported record variant",
+            )),
+        }
+    }
+
+    /// Enumerate children at a prefix and deserialize each into `T`.
+    ///
+    /// Returns pairs of `(child_name, value)`. Children that are absent
+    /// between the enumeration and the read are skipped.
+    fn read_children_typed<T: DeserializeOwned>(
+        &mut self,
+        from: &Path,
+    ) -> Result<Option<Vec<(String, T)>>, Error> {
+        let Some(children) = self.read_children(from)? else {
+            return Ok(None);
+        };
+        let mut result = Vec::with_capacity(children.len());
+        for name in children {
+            let child_path = from.child(structfs_core_store::PathComponent::try_new(&name)?);
+            if let Some(value) = self.read_typed(&child_path)? {
+                result.push((name, value));
+            }
+        }
+        Ok(Some(result))
+    }
 }
 
 // Blanket implementation for all Readers
@@ -104,6 +156,14 @@ pub trait TypedWriter: Writer {
     /// Convenience method for dynamic JSON data.
     fn write_json(&mut self, to: &Path, data: serde_json::Value) -> Result<Path, Error> {
         self.write_as(to, &data)
+    }
+
+    /// Codec-free typed write — the mirror of `TypedReader::read_typed`.
+    ///
+    /// Identical to [`TypedWriter::write_as`]; provided so read/write call
+    /// sites pair up by name.
+    fn write_typed<T: Serialize>(&mut self, to: &Path, data: &T) -> Result<Path, Error> {
+        self.write_as(to, data)
     }
 }
 
@@ -182,6 +242,97 @@ mod tests {
         let result: Option<TestUser> = store.read_as(&path!("nonexistent"), &codec).unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_typed_codec_free_roundtrip() {
+        use structfs_core_store::path;
+
+        let mut store = TestStore::new();
+        let user = TestUser {
+            name: "Alice".to_string(),
+            age: 30,
+        };
+
+        store.write_typed(&path!("users/alice"), &user).unwrap();
+        let recovered: TestUser = store.read_typed(&path!("users/alice")).unwrap().unwrap();
+        assert_eq!(user, recovered);
+
+        let missing: Option<TestUser> = store.read_typed(&path!("nope")).unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn read_typed_parses_raw_json() {
+        use bytes::Bytes;
+        use structfs_core_store::path;
+
+        let mut store = TestStore::new();
+        store
+            .write(
+                &path!("raw"),
+                Record::raw(
+                    Bytes::from_static(b"{\"name\":\"Bob\",\"age\":40}"),
+                    Format::JSON,
+                ),
+            )
+            .unwrap();
+
+        let user: TestUser = store.read_typed(&path!("raw")).unwrap().unwrap();
+        assert_eq!(user.name, "Bob");
+    }
+
+    #[test]
+    fn read_typed_rejects_non_json_raw() {
+        use bytes::Bytes;
+        use structfs_core_store::path;
+
+        let mut store = TestStore::new();
+        store
+            .write(
+                &path!("raw"),
+                Record::raw(Bytes::from_static(b"data"), Format::OCTET_STREAM),
+            )
+            .unwrap();
+
+        let result: Result<Option<TestUser>, _> = store.read_typed(&path!("raw"));
+        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn read_children_typed_works() {
+        use structfs_core_store::{path, MemoryStore};
+
+        let mut store = MemoryStore::new();
+        store
+            .write_typed(
+                &path!("users/alice"),
+                &TestUser {
+                    name: "Alice".to_string(),
+                    age: 30,
+                },
+            )
+            .unwrap();
+        store
+            .write_typed(
+                &path!("users/bob"),
+                &TestUser {
+                    name: "Bob".to_string(),
+                    age: 40,
+                },
+            )
+            .unwrap();
+
+        let users: Vec<(String, TestUser)> =
+            store.read_children_typed(&path!("users")).unwrap().unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].0, "alice");
+        assert_eq!(users[0].1.name, "Alice");
+        assert_eq!(users[1].0, "bob");
+
+        let missing: Option<Vec<(String, TestUser)>> =
+            store.read_children_typed(&path!("nowhere")).unwrap();
+        assert!(missing.is_none());
     }
 
     #[test]
