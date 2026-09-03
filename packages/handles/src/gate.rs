@@ -200,9 +200,7 @@ mod tests {
         let waiter = {
             let gate = gate.clone();
             let token = token.clone();
-            tokio::spawn(async move {
-                gate.wait_until_cancellable(&token, || None::<()>).await
-            })
+            tokio::spawn(async move { gate.wait_until_cancellable(&token, || None::<()>).await })
         };
 
         tokio::task::yield_now().await;
@@ -225,10 +223,7 @@ mod tests {
     async fn predicate_wins_over_no_cancel() {
         let gate = Gate::new();
         let token = CancelToken::new();
-        assert_eq!(
-            gate.wait_until_cancellable(&token, || Some(1)).await,
-            Ok(1)
-        );
+        assert_eq!(gate.wait_until_cancellable(&token, || Some(1)).await, Ok(1));
     }
 
     #[tokio::test]

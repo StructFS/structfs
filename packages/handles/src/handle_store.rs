@@ -212,9 +212,7 @@ impl<P: HandleProtocol> DetachedWriter for HandleStore<P> {
     fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
         // Root write mints a handle.
         if to.is_empty() {
-            let result = data
-                .into_value(&NoCodec)
-                .and_then(|value| self.mint(value));
+            let result = data.into_value(&NoCodec).and_then(|value| self.mint(value));
             return Box::pin(async move { result });
         }
 
@@ -305,7 +303,12 @@ mod tests {
             })
         }
 
-        fn write(&self, handle: Arc<Self::Handle>, sub: Path, data: Record) -> DetachedFuture<Path> {
+        fn write(
+            &self,
+            handle: Arc<Self::Handle>,
+            sub: Path,
+            data: Record,
+        ) -> DetachedFuture<Path> {
             Box::pin(async move {
                 if sub.len() == 1 && sub[0] == "push" {
                     let value = data.into_value(&NoCodec)?;
@@ -371,7 +374,10 @@ mod tests {
             .await
             .unwrap();
         let result = s
-            .write_detached(&path.join(&Path::parse("push").unwrap()), parsed(Value::from(1i64)))
+            .write_detached(
+                &path.join(&Path::parse("push").unwrap()),
+                parsed(Value::from(1i64)),
+            )
             .await
             .unwrap();
         assert_eq!(result.to_string(), format!("{}/push", path));
@@ -384,12 +390,18 @@ mod tests {
             .write_detached(&Path::parse("").unwrap(), parsed(Value::from("r")))
             .await
             .unwrap();
-        s.write_detached(&handle.join(&Path::parse("push").unwrap()), parsed(Value::from(1i64)))
-            .await
-            .unwrap();
-        s.write_detached(&handle.join(&Path::parse("done").unwrap()), parsed(Value::Null))
-            .await
-            .unwrap();
+        s.write_detached(
+            &handle.join(&Path::parse("push").unwrap()),
+            parsed(Value::from(1i64)),
+        )
+        .await
+        .unwrap();
+        s.write_detached(
+            &handle.join(&Path::parse("done").unwrap()),
+            parsed(Value::Null),
+        )
+        .await
+        .unwrap();
 
         let record = s
             .read_detached(&handle.join(&Path::parse("events/from/0").unwrap()))
@@ -419,7 +431,9 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Release the handle: the parked read must fail with Cancelled.
-        s.write_detached(&handle, parsed(Value::Null)).await.unwrap();
+        s.write_detached(&handle, parsed(Value::Null))
+            .await
+            .unwrap();
         let err = parked.await.unwrap().unwrap_err();
         assert!(err.is_cancelled());
 
@@ -434,13 +448,20 @@ mod tests {
             .write_detached(&Path::parse("").unwrap(), parsed(Value::from("r")))
             .await
             .unwrap();
-        s.write_detached(&handle, parsed(Value::Null)).await.unwrap();
-        // Second release of the same handle is a no-op, not an error.
-        s.write_detached(&handle, parsed(Value::Null)).await.unwrap();
-        // Releasing a handle that never existed is also fine.
-        s.write_detached(&Path::parse("outstanding/999").unwrap(), parsed(Value::Null))
+        s.write_detached(&handle, parsed(Value::Null))
             .await
             .unwrap();
+        // Second release of the same handle is a no-op, not an error.
+        s.write_detached(&handle, parsed(Value::Null))
+            .await
+            .unwrap();
+        // Releasing a handle that never existed is also fine.
+        s.write_detached(
+            &Path::parse("outstanding/999").unwrap(),
+            parsed(Value::Null),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

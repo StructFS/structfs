@@ -55,7 +55,12 @@ mod tests {
             Box::pin(async move { Ok(Some(Record::parsed((*handle).clone()))) })
         }
 
-        fn write(&self, _handle: Arc<Self::Handle>, sub: Path, _data: Record) -> DetachedFuture<Path> {
+        fn write(
+            &self,
+            _handle: Arc<Self::Handle>,
+            sub: Path,
+            _data: Record,
+        ) -> DetachedFuture<Path> {
             Box::pin(async move { Ok(sub) })
         }
     }
