@@ -1,0 +1,17 @@
+[package]
+name = "structfs-handles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Handle-store and streaming primitives for StructFS: outstanding/{id} scaffolding, atomic tail reads, cancellable parked reads"
+readme = "../../README.md"
+keywords = ["store", "handle", "streaming", "async"]
+categories = ["asynchronous", "data-structures"]
+
+[dependencies]
+structfs-core-store = { workspace = true, features = ["async"] }
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

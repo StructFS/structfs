@@ -82,6 +82,10 @@ pub enum Error {
 
     /// A resource limit was exceeded (size, depth, count, quota).
     ResourceLimit { message: String },
+
+    /// The operation was cancelled — typically a parked read whose handle
+    /// was released or whose store is shutting down.
+    Cancelled { message: String },
 }
 
 impl Error {
@@ -152,6 +156,18 @@ impl Error {
         }
     }
 
+    /// Create a cancelled error.
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Error::Cancelled {
+            message: message.into(),
+        }
+    }
+
+    /// Whether this error is a cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled { .. })
+    }
+
     /// Whether this error is a not-found error.
     pub fn is_not_found(&self) -> bool {
         matches!(self, Error::NotFound { .. })
@@ -186,6 +202,7 @@ impl std::fmt::Display for Error {
             Error::Overloaded { message } => write!(f, "overloaded: {}", message),
             Error::DeadlineExceeded { message } => write!(f, "deadline exceeded: {}", message),
             Error::ResourceLimit { message } => write!(f, "resource limit: {}", message),
+            Error::Cancelled { message } => write!(f, "cancelled: {}", message),
         }
     }
 }

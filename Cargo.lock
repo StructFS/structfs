@@ -2432,6 +2432,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "structfs-handles"
+version = "0.1.0"
+dependencies = [
+ "structfs-core-store",
+ "tokio",
+]
+
+[[package]]
 name = "structfs-http"
 version = "0.1.0"
 dependencies = [
