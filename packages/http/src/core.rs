@@ -3,20 +3,21 @@
 //! This module provides implementations using the new three-layer architecture
 //! (ll-store, core-store, serde-store) instead of the legacy erased_serde approach.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use collection_literals::btree;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Reference, Value, Writer};
+use structfs_core_store::{
+    DetachedReader, DetachedWriter, Error, NoCodec, Path, Reader, Record, Reference, Value, Writer,
+};
+use structfs_handles::HandleStore;
 use structfs_serde_store::{from_value, to_value};
 
 use crate::executor::{HttpExecutor, ReqwestExecutor};
-use crate::handle::RequestStatus;
+use crate::handle_broker::{Execution, HttpBrokerProtocol};
 
 use crate::types::{HttpRequest, HttpResponse};
 
@@ -731,16 +732,14 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
 }
 
 /// Internal state for an async request
-struct AsyncRequestHandle {
-    request: HttpRequest,
-    status: RequestStatus,
-    response: Option<HttpResponse>,
-}
-
 /// Async HTTP broker store (new architecture).
 ///
-/// Requests are executed in background threads. Write to queue a request,
-/// read from the handle to check status or get the response.
+/// A synchronous facade over a `HandleStore` running
+/// [`HttpBrokerProtocol`]: the `outstanding/{id}` scaffolding — id
+/// minting, the no-overwrite rule, Null-write release with cancellation,
+/// listing — comes from `structfs-handles`. Requests execute on
+/// background threads; `response/wait` is a parked read (no
+/// sleep-polling) that deleting the handle cancels.
 ///
 /// ## Path Structure
 ///
@@ -753,18 +752,34 @@ struct AsyncRequestHandle {
 /// | `read /outstanding/{id}/response` | Get response (non-blocking) | Returns response or `None` if pending |
 /// | `read /outstanding/{id}/response/wait` | Get response (blocking) | Blocks until response ready |
 /// | `write /outstanding/{id} null` | Delete handle | Removes handle |
+///
+/// The facade drives the detached store on a small owned tokio runtime,
+/// so it must not be called from inside another tokio runtime — call it
+/// from ordinary or blocking threads, which is where sync stores run.
 pub struct AsyncHttpBrokerStore {
-    handles: Arc<Mutex<HashMap<RequestId, AsyncRequestHandle>>>,
-    next_request_id: RequestId,
+    runtime: tokio::runtime::Runtime,
+    store: HandleStore<HttpBrokerProtocol>,
     timeout: Duration,
 }
 
 impl AsyncHttpBrokerStore {
     /// Create a new async HTTP broker store with the given request timeout.
     pub fn new(timeout: Duration) -> Result<Self, crate::Error> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(|e| crate::Error::Runtime {
+                message: e.to_string(),
+            })?;
         Ok(Self {
-            handles: Arc::new(Mutex::new(HashMap::new())),
-            next_request_id: 0,
+            runtime,
+            store: HandleStore::new(HttpBrokerProtocol {
+                execution: Execution::Threaded {
+                    timeout,
+                    execute: Self::execute_request,
+                },
+            }),
             timeout,
         })
     }
@@ -772,6 +787,11 @@ impl AsyncHttpBrokerStore {
     /// Create with default timeout of 30 seconds.
     pub fn with_default_timeout() -> Result<Self, crate::Error> {
         Self::new(Duration::from_secs(30))
+    }
+
+    /// The per-request timeout this broker was created with.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// Execute an HTTP request and return the response.
@@ -829,77 +849,9 @@ impl AsyncHttpBrokerStore {
         })
     }
 
-    /// Parse request ID and sub-path from a path like "outstanding/123" or "outstanding/123/response".
-    fn parse_handle_path(path: &Path) -> Option<(RequestId, Option<String>)> {
-        if path.is_empty() || path[0] != OUTSTANDING_PREFIX {
-            return None;
-        }
-        if path.len() < 2 {
-            return None;
-        }
-        let id: RequestId = path[1].parse().ok()?;
-        let sub_path = if path.len() > 2 {
-            Some(path.slice(2, path.len()).to_string())
-        } else {
-            None
-        };
-        Some((id, sub_path))
-    }
-
-    /// Blocking read of response - polls until complete or failed.
-    /// Optionally navigates into the response using the provided path.
-    fn blocking_read_response_with_path(
-        &self,
-        request_id: RequestId,
-        nav_path: &[&str],
-    ) -> Result<Option<Record>, Error> {
-        const POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-        loop {
-            let handles = self.handles.lock().map_err(|e| {
-                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
-            })?;
-
-            let handle = handles.get(&request_id).ok_or_else(|| {
-                Error::store(
-                    "async_http_broker",
-                    "read",
-                    format!("Request with ID {} not found", request_id),
-                )
-            })?;
-
-            if let Some(ref response) = handle.response {
-                let value = to_value(response)
-                    .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-
-                if !nav_path.is_empty() {
-                    return match navigate_value(value, nav_path) {
-                        Ok(v) => Ok(Some(Record::parsed(v))),
-                        Err(i) => Err(Error::store(
-                            "async_http_broker",
-                            "read",
-                            format!("Path not found at index {}: '{}'", i, nav_path[i]),
-                        )),
-                    };
-                }
-                return Ok(Some(Record::parsed(value)));
-            }
-
-            if handle.status.is_failed() {
-                return Err(Error::store(
-                    "async_http_broker",
-                    "read",
-                    format!(
-                        "HTTP request failed: {}",
-                        handle.status.error.as_deref().unwrap_or("unknown error")
-                    ),
-                ));
-            }
-
-            // Still pending - release lock and wait before polling again
-            drop(handles);
-            thread::sleep(POLL_INTERVAL);
-        }
+    /// Drive a detached-store operation to completion on the owned runtime.
+    fn block_on<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        self.runtime.block_on(fut)
     }
 
     /// Read meta paths for action descriptors and handle inspection.
@@ -919,11 +871,10 @@ impl AsyncHttpBrokerStore {
 
         // meta/outstanding - list handles with meta references
         if path.len() == 2 && path[1] == OUTSTANDING_PREFIX {
-            let handles = self.handles.lock().map_err(|e| {
-                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
-            })?;
-            let items: Vec<Value> = handles
-                .keys()
+            let items: Vec<Value> = self
+                .store
+                .handle_ids()
+                .into_iter()
                 .map(|id| {
                     Reference::with_type(format!("meta/outstanding/{}", id), "request-handle-meta")
                         .to_value()
@@ -944,11 +895,7 @@ impl AsyncHttpBrokerStore {
                 )
             })?;
 
-            let handles = self.handles.lock().map_err(|e| {
-                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
-            })?;
-
-            let handle = handles.get(&id).ok_or_else(|| {
+            let handle = self.store.get_handle(id).ok_or_else(|| {
                 Error::store(
                     "async_http_broker",
                     "read",
@@ -962,9 +909,10 @@ impl AsyncHttpBrokerStore {
             }
 
             // meta/outstanding/{id} - handle state + navigation
-            let state = if handle.status.is_complete() {
+            let status = handle.status();
+            let state = if status.is_complete() {
                 "complete"
-            } else if handle.status.is_failed() {
+            } else if status.is_failed() {
                 "failed"
             } else {
                 "pending"
@@ -973,8 +921,8 @@ impl AsyncHttpBrokerStore {
             return Ok(Some(Record::parsed(Value::Map(btree! {
                 "state".into() => Value::Map(btree! {
                     "status".into() => Value::String(state.to_string()),
-                    "method".into() => Value::String(format!("{:?}", handle.request.method)),
-                    "url".into() => Value::String(handle.request.path.clone()),
+                    "method".into() => Value::String(format!("{:?}", handle.request().method)),
+                    "url".into() => Value::String(handle.request().path.clone()),
                 }),
                 "request".into() => Reference::with_type(format!("outstanding/{}/request", id), "http-request").to_value(),
                 "response".into() => Reference::with_type(format!("outstanding/{}/response", id), "http-response").to_value(),
@@ -1066,11 +1014,10 @@ impl Reader for AsyncHttpBrokerStore {
 
         // Handle listing: read /outstanding -> {items: [refs...]}
         if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
-            let handles = self.handles.lock().map_err(|e| {
-                Error::store("async_http_broker", "read", format!("Lock error: {}", e))
-            })?;
-            let items: Vec<Value> = handles
-                .keys()
+            let items: Vec<Value> = self
+                .store
+                .handle_ids()
+                .into_iter()
                 .map(|id| {
                     Reference::with_type(format!("outstanding/{}", id), "request-handle").to_value()
                 })
@@ -1080,109 +1027,21 @@ impl Reader for AsyncHttpBrokerStore {
             }))));
         }
 
-        let (request_id, sub_path) = Self::parse_handle_path(from).ok_or_else(|| {
-            Error::store(
-                "async_http_broker",
-                "read",
-                format!(
-                    "Invalid path '{}'. Expected: outstanding, outstanding/{{id}}, or outstanding/{{id}}/...",
-                    from
-                ),
-            )
-        })?;
-
-        // Parse sub-path components for deep navigation
-        let sub_components: Vec<&str> = sub_path
-            .as_deref()
-            .map(|s| s.split('/').collect())
-            .unwrap_or_default();
-
-        // Handle blocking wait: /outstanding/{id}/response/wait[/...]
-        if sub_components.len() >= 2
-            && sub_components[0] == "response"
-            && sub_components[1] == "wait"
+        // Handle paths delegate to the handle store. Released or unknown
+        // handles read as absent (the handle-protocol rule), and
+        // response/wait parks on a gate instead of sleep-polling.
+        if from[0] == OUTSTANDING_PREFIX && from.len() >= 2 && from[1].parse::<RequestId>().is_ok()
         {
-            return self.blocking_read_response_with_path(request_id, &sub_components[2..]);
+            let mut store = self.store.clone();
+            return self.block_on(store.read_detached(from));
         }
 
-        let handles = self
-            .handles
-            .lock()
-            .map_err(|e| Error::store("async_http_broker", "read", format!("Lock error: {}", e)))?;
-
-        let handle = handles.get(&request_id).ok_or_else(|| {
-            Error::store(
-                "async_http_broker",
-                "read",
-                format!("Request with ID {} not found", request_id),
-            )
-        })?;
-
-        // Handle /outstanding/{id}/request[/...] - view queued request
-        if sub_components.first() == Some(&"request") {
-            let value = to_value(&handle.request)
-                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-
-            if sub_components.len() > 1 {
-                let nav_path = &sub_components[1..];
-                return match navigate_value(value, nav_path) {
-                    Ok(v) => Ok(Some(Record::parsed(v))),
-                    Err(i) => Err(Error::store(
-                        "async_http_broker",
-                        "read",
-                        format!("Path not found at index {}: '{}'", i, nav_path[i]),
-                    )),
-                };
-            }
-            return Ok(Some(Record::parsed(value)));
-        }
-
-        // Handle /outstanding/{id}/response[/...] - non-blocking response
-        if sub_components.first() == Some(&"response") {
-            if let Some(ref response) = handle.response {
-                let value = to_value(response)
-                    .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-
-                if sub_components.len() > 1 {
-                    let nav_path = &sub_components[1..];
-                    return match navigate_value(value, nav_path) {
-                        Ok(v) => Ok(Some(Record::parsed(v))),
-                        Err(i) => Err(Error::store(
-                            "async_http_broker",
-                            "read",
-                            format!("Path not found at index {}: '{}'", i, nav_path[i]),
-                        )),
-                    };
-                }
-                return Ok(Some(Record::parsed(value)));
-            } else if handle.status.is_failed() {
-                return Err(Error::store(
-                    "async_http_broker",
-                    "read",
-                    format!(
-                        "HTTP request failed: {}",
-                        handle.status.error.as_deref().unwrap_or("unknown error")
-                    ),
-                ));
-            } else {
-                return Ok(None); // Response not ready yet
-            }
-        }
-
-        // Handle /outstanding/{id} - return status
-        if sub_components.is_empty() {
-            let value = to_value(&handle.status)
-                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-            return Ok(Some(Record::parsed(value)));
-        }
-
-        // Reject unknown sub-paths
         Err(Error::store(
             "async_http_broker",
             "read",
             format!(
-                "Unknown sub-path '{}'. Use 'request', 'response', or 'response/wait'.",
-                sub_components.first().unwrap_or(&""),
+                "Invalid path '{}'. Expected: outstanding, outstanding/{{id}}, or outstanding/{{id}}/...",
+                from
             ),
         ))
     }
@@ -1190,73 +1049,13 @@ impl Reader for AsyncHttpBrokerStore {
 
 impl Writer for AsyncHttpBrokerStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        let value = data.into_value(&NoCodec)?;
-
-        // Delete handle: write null to /outstanding/{id}
-        if let Some((request_id, None)) = Self::parse_handle_path(to) {
-            if value == Value::Null {
-                let mut handles = self.handles.lock().map_err(|e| {
-                    Error::store("async_http_broker", "write", format!("Lock error: {}", e))
-                })?;
-                handles.remove(&request_id);
-                return Ok(to.clone());
-            }
-            return Err(Error::store(
-                "async_http_broker",
-                "write",
-                "Cannot overwrite existing request. Write null to delete, or write to root to queue a new request.",
-            ));
-        }
-
-        // Queue new request: write to root
-        if to.is_empty() {
-            let request: HttpRequest = from_value(value).map_err(|e| {
-                Error::decode(
-                    structfs_core_store::Format::JSON,
-                    format!("Data must be an HttpRequest: {}", e),
-                )
-            })?;
-
-            let request_id = self.next_request_id;
-            self.next_request_id += 1;
-
-            // Create initial pending status with the request stored
-            let handle = AsyncRequestHandle {
-                request: request.clone(),
-                status: RequestStatus::pending(request_id.to_string()),
-                response: None,
-            };
-
-            {
-                let mut handles = self.handles.lock().map_err(|e| {
-                    Error::store("async_http_broker", "write", format!("Lock error: {}", e))
-                })?;
-                handles.insert(request_id, handle);
-            }
-
-            // Spawn background thread to execute the request
-            let handles = Arc::clone(&self.handles);
-            let timeout = self.timeout;
-            thread::spawn(move || {
-                let result = Self::execute_request(request, timeout);
-
-                if let Ok(mut handles) = handles.lock() {
-                    if let Some(handle) = handles.get_mut(&request_id) {
-                        match result {
-                            Ok(response) => {
-                                handle.status = RequestStatus::complete(request_id.to_string());
-                                handle.response = Some(response);
-                            }
-                            Err(error) => {
-                                handle.status =
-                                    RequestStatus::failed(request_id.to_string(), error);
-                            }
-                        }
-                    }
-                }
-            });
-
-            return Ok(outstanding_path(request_id));
+        // Queue (root write), delete (Null to outstanding/{id}), and the
+        // no-overwrite conflict rule are all handle-store scaffolding.
+        if to.is_empty()
+            || (to[0] == OUTSTANDING_PREFIX && to.len() >= 2 && to[1].parse::<RequestId>().is_ok())
+        {
+            let mut store = self.store.clone();
+            return self.block_on(store.write_detached(to, data));
         }
 
         Err(Error::store(
@@ -1973,32 +1772,14 @@ mod tests {
     // ==================== AsyncHttpBrokerStore tests ====================
 
     #[test]
-    fn test_async_broker_parse_handle_path() {
-        assert_eq!(
-            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/0")),
-            Some((0, None))
-        );
-        assert_eq!(
-            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/123/response")),
-            Some((123, Some("response".to_string())))
-        );
-        assert_eq!(
-            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding")),
-            None
-        );
-        assert_eq!(
-            AsyncHttpBrokerStore::parse_handle_path(&path!("other/123")),
-            None
-        );
-        assert_eq!(AsyncHttpBrokerStore::parse_handle_path(&path!("")), None);
-        assert_eq!(
-            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/abc")),
-            None
-        );
-        assert_eq!(
-            AsyncHttpBrokerStore::parse_handle_path(&path!("outstanding/0/foo/bar")),
-            Some((0, Some("foo/bar".to_string())))
-        );
+    fn test_async_broker_non_handle_paths_rejected() {
+        // Handle-path parsing now lives in structfs-handles; the facade
+        // still rejects paths outside the store surface.
+        let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
+        for bad in ["other/123", "outstanding/abc"] {
+            let result = broker.read(&Path::parse(bad).unwrap());
+            assert!(result.is_err(), "expected rejection for {bad}");
+        }
     }
 
     #[test]
@@ -2034,9 +1815,10 @@ mod tests {
     fn test_async_broker_request_not_found() {
         let mut broker = AsyncHttpBrokerStore::with_default_timeout().unwrap();
 
-        let result = broker.read(&path!("outstanding/999"));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        // Unknown or released handles read as absent — the handle-protocol
+        // rule (see structfs-handles conformance).
+        let result = broker.read(&path!("outstanding/999")).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
@@ -2085,7 +1867,7 @@ mod tests {
     #[test]
     fn test_async_broker_custom_timeout() {
         let broker = AsyncHttpBrokerStore::new(Duration::from_secs(5)).unwrap();
-        assert_eq!(broker.timeout, Duration::from_secs(5));
+        assert_eq!(broker.timeout(), Duration::from_secs(5));
     }
 
     #[test]
@@ -2205,13 +1987,15 @@ mod tests {
             )
             .unwrap();
 
-        // Try to overwrite with non-null value
+        // Try to overwrite with non-null value: the handle-protocol
+        // no-overwrite rule, surfaced structurally as a Conflict.
         let result = broker.write(
             &handle,
             Record::parsed(to_value(&HttpRequest::get("/replacement")).unwrap()),
         );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Cannot overwrite"));
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::Conflict { .. }));
+        assert!(err.to_string().contains("overwrite"));
     }
 
     #[test]

@@ -62,6 +62,7 @@
 pub mod error;
 pub mod executor;
 pub mod handle;
+mod handle_broker;
 pub mod types;
 
 mod core;

@@ -11,6 +11,9 @@ pub enum Error {
     #[error("Invalid URL: {message}")]
     InvalidUrl { message: String },
 
+    #[error("Broker runtime error: {message}")]
+    Runtime { message: String },
+
     #[error("Invalid HTTP method: {method}")]
     InvalidMethod { method: String },
 

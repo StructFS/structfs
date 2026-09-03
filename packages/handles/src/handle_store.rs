@@ -131,6 +131,21 @@ impl<P: HandleProtocol> HandleStore<P> {
         self.lock_entries().len()
     }
 
+    /// The ids of all live handles, ascending.
+    ///
+    /// For meta/introspection lenses layered over a handle store.
+    pub fn handle_ids(&self) -> Vec<u64> {
+        self.lock_entries().keys().copied().collect()
+    }
+
+    /// The protocol state of a live handle, if present.
+    ///
+    /// For meta/introspection lenses; regular operations should go
+    /// through the store interface.
+    pub fn get_handle(&self, id: u64) -> Option<Arc<P::Handle>> {
+        self.get(id)
+    }
+
     fn mint(&self, request: Value) -> Result<Path, Error> {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = CancelToken::new();

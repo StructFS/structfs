@@ -2455,6 +2455,7 @@ dependencies = [
  "serde",
  "serde_json",
  "structfs-core-store",
+ "structfs-handles",
  "structfs-serde-store",
  "thiserror 2.0.17",
  "tokio",
