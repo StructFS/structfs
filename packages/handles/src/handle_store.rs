@@ -87,6 +87,21 @@ struct Inner<P: HandleProtocol> {
     entries: Mutex<BTreeMap<u64, Entry<P::Handle>>>,
 }
 
+impl<P: HandleProtocol> Drop for Inner<P> {
+    /// Dropping the last clone of a handle store releases every live
+    /// handle: parked reads cancel and the protocol's `close` runs. A
+    /// handle must never outlive its store — the RAII rule that keeps
+    /// abandoned owners (a dropped response future, a dead spawner
+    /// block) from leaking their handles forever.
+    fn drop(&mut self) {
+        let entries = std::mem::take(self.entries.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for (_, entry) in entries {
+            entry.cancel.cancel();
+            self.protocol.close(entry.handle);
+        }
+    }
+}
+
 /// Generic handle store over a [`HandleProtocol`].
 ///
 /// Cloneable; clones share the handle table. Implements the detached async
@@ -454,6 +469,35 @@ mod tests {
 
         // Post-release reads see absence.
         assert!(s.read_detached(&handle).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_store_releases_live_handles() {
+        let s = store();
+        let handle_path = {
+            let mut s = s.clone();
+            s.write_detached(&Path::parse("").unwrap(), parsed(Value::from("r")))
+                .await
+                .unwrap()
+        };
+
+        // Detached futures don't hold the store: create the read future,
+        // drop every store clone, and the parked read must cancel.
+        let tail = handle_path.join(&Path::parse("events/from/0").unwrap());
+        let fut = {
+            let mut reader = s.clone();
+            reader.read_detached(&tail)
+        };
+        let parked = tokio::spawn(fut);
+        tokio::task::yield_now().await;
+        drop(s);
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), parked)
+            .await
+            .expect("parked read never resolved after store drop")
+            .unwrap()
+            .unwrap_err();
+        assert!(err.is_cancelled());
     }
 
     #[tokio::test]

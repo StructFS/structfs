@@ -20,6 +20,7 @@
 //!   blocking thread.
 //! - [`conformance`]: certify any handle store against the protocol rules.
 
+mod byte_stream;
 mod gate;
 mod handle_store;
 mod sync_bridge;
@@ -27,6 +28,7 @@ mod tail;
 
 pub mod conformance;
 
+pub use byte_stream::{ByteChunk, ByteStream};
 pub use gate::{CancelToken, Cancelled, Gate};
 pub use handle_store::{HandleCx, HandleProtocol, HandleStore};
 pub use sync_bridge::SyncBridge;
