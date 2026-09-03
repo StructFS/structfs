@@ -73,12 +73,9 @@ impl Guest for KvBlock {
 
         let mut store: HashMap<String, serde_json::Value> = HashMap::new();
 
-        loop {
-            // Blocking read: parks until a request arrives; `null` means
-            // shutdown was requested.
-            let Some(request) = read_json("iso/server/requests")? else {
-                break;
-            };
+        // Blocking read: parks until a request arrives; `null` means
+        // shutdown was requested.
+        while let Some(request) = read_json("iso/server/requests")? {
             if request.is_null() {
                 break;
             }
