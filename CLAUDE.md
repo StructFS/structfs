@@ -8,13 +8,15 @@ StructFS is a Rust workspace that provides a uniform interface for accessing dat
 
 ```
 packages/
-├── ll-store/    # Low-level byte stream traits
-├── core-store/  # Core traits (Reader, Writer, Path, Value) and MountStore
-├── serde-store/ # Serde integration for typed access
-├── json_store/  # JSON-based in-memory store
-├── http/        # HTTP client store, broker store
-├── sys/         # OS primitives (env, time, proc, fs, random)
-└── repl/        # Interactive REPL with syntax highlighting and completion
+├── ll-store/         # Low-level byte stream traits
+├── path-validation/  # Canonical path component grammar (shared by runtime + macro)
+├── path-macro/       # Compile-time validated path! proc macro
+├── core-store/       # Core traits (Reader, Writer, Path, Value), MountStore, combinators
+├── serde-store/      # Serde integration for typed access
+├── json_store/       # JSON-based in-memory store + file persistence
+├── http/             # HTTP client store, broker store
+├── sys/              # OS primitives (env, time, proc, fs, random)
+└── repl/             # Interactive REPL with syntax highlighting and completion
 ```
 
 ## Key Concepts
@@ -22,9 +24,30 @@ packages/
 - **Stores**: Implement `Reader` and `Writer` traits for path-based data access
 - **Value**: Core data type (Null, Bool, Integer, Float, String, Bytes, Array, Map)
 - **Record**: Wrapper for raw bytes or parsed Value
+- **`path!` macro**: Proc macro validating literals at compile time; runtime
+  components must be `PathComponent` values (`try_new` validates; `encode`
+  makes any string valid via Namecode)
+- **Store conventions**: Reading a prefix returns a map of children; writing
+  `Null` deletes the subtree; writing a map replaces the subtree; deep writes
+  create intermediates. Certified by `core-store`'s `conformance` module;
+  `MemoryStore` is the reference implementation
+- **`Reader::read_children`**: Enumerate child names at a prefix (defaulted
+  from the map convention; stores can override)
+- **Combinators**: `ReadOnly`, `Cascade` (layering), `Shared` (Arc<Mutex>
+  handle), `Rooted` (subtree confinement) in `core-store`
+- **PathPattern**: Component-wise Exact/Prefix/PrefixSuffix matching
+- **Typed access**: `read_typed`/`write_typed` on any store (codec-free, in
+  `serde-store`); `Path`/`Value`/`Record`/`Format` all implement serde
+- **Typed errors**: Prefer `Error::NotFound`/`PermissionDenied`/`Conflict`/
+  `Overloaded`/`DeadlineExceeded`/`ResourceLimit` over stringly `Error::Store`
 - **MountStore**: Routes operations to different stores based on path prefixes
 - **OverlayStore**: Mounts stores at paths, creating a unified tree
 - **Broker pattern**: HTTP broker queues requests on write, executes on read
+- **Async**: `AsyncReader`/`AsyncWriter` (borrowed futures) plus
+  `DetachedReader`/`DetachedWriter` (futures that don't borrow the store,
+  for concurrent in-flight operations)
+- **Persistence**: `Backing` trait + `BackedStore`/`JsonFileBacking` in
+  `json_store`
 - **Docs protocol**: Stores can provide documentation at a `docs` path
 
 ## Development Commands
