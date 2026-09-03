@@ -12,10 +12,11 @@
 //! writes responses to the request's `respond_to` path, until shutdown
 //! unblocks the request read with `null`.
 
-// Generate bindings from the WIT file
+// Generate bindings from the canonical Block ABI (single-sourced;
+// the runtime's bindings come from the same file).
 wit_bindgen::generate!({
     world: "block-world",
-    path: "wit/world.wit",
+    path: "../wit/world.wit",
 });
 
 use std::collections::HashMap;

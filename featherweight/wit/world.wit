@@ -1,14 +1,20 @@
-/// Featherweight Block interface for WASM components.
+/// The Isotope Block ABI (canonical source — see isotope/spec/10-wasi-tower.md).
 ///
-/// This WIT file defines the contract between the Featherweight runtime (host)
-/// and WASM Blocks (guests). Blocks interact with the world exclusively through
-/// the ll-store interface provided by the host.
+/// This is the ONLY interface a runtime provides to a Block, and the
+/// single source both the runtime's and the guest's bindings are
+/// generated from. Every higher-level surface — the /iso system store,
+/// wired services, and every WASI version — is reached through these two
+/// functions.
 ///
-/// The WASM boundary is an LL-store boundary: paths are byte components
-/// (`list<list<u8>>`), data is raw bytes (`list<u8>`). The Block declares what
-/// serialization format it speaks (JSON, CBOR, etc.), and the runtime uses
-/// `CoreToLL` with the appropriate codec to bridge. The WIT never changes;
-/// adding new formats requires zero WIT/bindgen work.
+/// The boundary is an LL-store boundary: paths are validated byte
+/// components (`list<list<u8>>`), data is raw bytes (`list<u8>`) in the
+/// Block's manifest-declared serialization. Calls are stateless and
+/// complete in themselves: no pending results, no call-ordering
+/// protocol, no host-side per-call state. The WIT never changes when
+/// serialization formats do.
+///
+/// Planned ABI v2: errors as a WIT variant mirroring the protocol error
+/// taxonomy (spec 06), so typed errors survive the wasm edge.
 
 package featherweight:block@0.1.0;
 
@@ -20,7 +26,8 @@ interface ll-store {
     read: func(path: list<list<u8>>) -> result<option<list<u8>>, string>;
 
     /// Write raw bytes to a path.
-    /// Returns Ok(result-path) on success, Err on error.
+    /// Returns Ok(result-path) on success, Err on error. The result path
+    /// is expressed in the Block's own namespace.
     write: func(path: list<list<u8>>, data: list<u8>) -> result<list<list<u8>>, string>;
 }
 

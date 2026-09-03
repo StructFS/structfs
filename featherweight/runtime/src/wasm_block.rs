@@ -20,9 +20,10 @@ use wasmtime::{Config, Engine, Store};
 use crate::block::BlockId;
 use crate::error::{Result, RuntimeError};
 
-// Generate bindings from the WIT file
+// Generate bindings from the canonical Block ABI (single-sourced with
+// the guest; see featherweight/wit/world.wit).
 bindgen!({
-    path: "wit/world.wit",
+    path: "../wit/world.wit",
     world: "block-world",
 });
 

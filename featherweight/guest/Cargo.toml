@@ -18,5 +18,5 @@ serde_json = { workspace = true }
 package = "featherweight:block"
 
 [package.metadata.component.target]
-path = "wit/world.wit"
+path = "../wit/world.wit"
 world = "block-world"
