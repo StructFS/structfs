@@ -14,9 +14,14 @@ packages/
 ├── core-store/       # Core traits (Reader, Writer, Path, Value), MountStore, combinators
 ├── serde-store/      # Serde integration for typed access
 ├── json_store/       # JSON-based in-memory store + file persistence
+├── handles/          # Handle-store + streaming primitives (outstanding/{id}, TailLog, Gate)
 ├── http/             # HTTP client store, broker store
 ├── sys/              # OS primitives (env, time, proc, fs, random)
 └── repl/             # Interactive REPL with syntax highlighting and completion
+
+featherweight/        # Strawman Isotope runtime (isotope/spec): blocks,
+                      # assemblies, namespaces, /iso store, `fw` CLI
+isotope/              # The Isotope virtual-OS specification
 ```
 
 ## Key Concepts
@@ -43,6 +48,14 @@ packages/
 - **MountStore**: Routes operations to different stores based on path prefixes
 - **OverlayStore**: Mounts stores at paths, creating a unified tree
 - **Broker pattern**: HTTP broker queues requests on write, executes on read
+- **Handle protocol** (`structfs-handles`): generic `outstanding/{id}`
+  scaffolding (`HandleStore`), atomic tail reads (`TailLog` — items +
+  terminal status in one read, no close-out race), lost-wakeup-proof
+  parking (`Gate`), and cancellation that fails reads but not writes
+  (`CancelToken`); certified by its own conformance module
+- **Isotope runtime** (`featherweight/`): blocks serve stores via the
+  server protocol (requests read from `iso/server/requests`), assemblies
+  wire per-block capability namespaces, `fw shell` runs the demo
 - **Async**: `AsyncReader`/`AsyncWriter` (borrowed futures) plus
   `DetachedReader`/`DetachedWriter` (futures that don't borrow the store,
   for concurrent in-flight operations)
