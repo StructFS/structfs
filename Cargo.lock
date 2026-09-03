@@ -982,6 +982,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "h2"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2413,11 +2419,15 @@ dependencies = [
  "async-trait",
  "bytes",
  "collection_literals",
+ "namecode",
  "serde",
  "serde_json",
  "structfs-ll-store",
+ "structfs-path-macro",
+ "structfs-path-validation",
  "thiserror 2.0.17",
  "tokio",
+ "trybuild",
  "unicode-ident",
 ]
 
@@ -2457,6 +2467,23 @@ dependencies = [
  "bytes",
  "thiserror 2.0.17",
  "tokio",
+]
+
+[[package]]
+name = "structfs-path-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "structfs-path-validation",
+ "syn",
+]
+
+[[package]]
+name = "structfs-path-validation"
+version = "0.1.0"
+dependencies = [
+ "unicode-ident",
 ]
 
 [[package]]
@@ -2592,6 +2619,12 @@ name = "target-lexicon"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1dd07eb858a2067e2f3c7155d54e929265c264e6f37efe3ee7a8d1b5a1dd0ba"
+
+[[package]]
+name = "target-triple"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
 
 [[package]]
 name = "tempfile"
@@ -2850,6 +2883,21 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "trybuild"
+version = "1.0.115"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f614c21bd3a61bad9501d75cbb7686f00386c806d7f456778432c25cf86948a"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml",
+]
 
 [[package]]
 name = "typenum"

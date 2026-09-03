@@ -103,6 +103,24 @@ impl Path {
         Path { components }
     }
 
+    /// Create a path from components that are already known to be valid.
+    ///
+    /// This is the construction path used by the `path!` macro: literals are
+    /// validated at compile time and expressions are `PathComponent` values
+    /// validated at construction, so no runtime re-validation is needed.
+    /// Debug builds re-check as a safety net.
+    ///
+    /// Prefer `from_components`/`try_from_components` for strings whose
+    /// validity is not already guaranteed.
+    #[doc(hidden)]
+    pub fn from_validated_components(components: Vec<String>) -> Self {
+        #[cfg(debug_assertions)]
+        for (i, component) in components.iter().enumerate() {
+            Self::validate_component(component, i).expect("invalid pre-validated component");
+        }
+        Path { components }
+    }
+
     /// Try to create a path from components, validating each.
     pub fn try_from_components(components: Vec<String>) -> Result<Self, PathError> {
         for (i, component) in components.iter().enumerate() {
@@ -111,54 +129,23 @@ impl Path {
         Ok(Path { components })
     }
 
-    /// Validate a single path component.
-    fn validate_component(component: &str, position: usize) -> Result<(), PathError> {
-        if component.is_empty() {
-            return Err(PathError::InvalidComponent {
+    /// Validate a single path component against the StructFS grammar.
+    ///
+    /// The grammar is shared with the compile-time `path!` macro via the
+    /// `structfs-path-validation` crate: a component is a UAX#31 identifier
+    /// (an underscore prefix is allowed when followed by more identifier
+    /// characters) or a pure numeric string.
+    ///
+    /// `position` is only used to build the error; pass `0` when validating
+    /// a component in isolation.
+    pub fn validate_component(component: &str, position: usize) -> Result<(), PathError> {
+        structfs_path_validation::validate_component(component).map_err(|message| {
+            PathError::InvalidComponent {
                 component: component.to_string(),
                 position,
-                message: "empty component".to_string(),
-            });
-        }
-
-        // Allow pure numeric strings (for array indexing)
-        if component.chars().all(|c| c.is_ascii_digit()) {
-            return Ok(());
-        }
-
-        // Check for valid identifier
-        let mut chars = component.chars();
-        let first = chars.next().unwrap();
-
-        // First char: XID_Start or underscore followed by XID_Continue
-        let valid_start = unicode_ident::is_xid_start(first)
-            || (first == '_'
-                && chars
-                    .clone()
-                    .next()
-                    .is_some_and(unicode_ident::is_xid_continue));
-
-        if !valid_start {
-            return Err(PathError::InvalidComponent {
-                component: component.to_string(),
-                position,
-                message: "must start with a letter or underscore followed by letter/digit"
-                    .to_string(),
-            });
-        }
-
-        // Rest: XID_Continue
-        for c in chars {
-            if !unicode_ident::is_xid_continue(c) {
-                return Err(PathError::InvalidComponent {
-                    component: component.to_string(),
-                    position,
-                    message: format!("invalid character '{}' in identifier", c),
-                });
+                message,
             }
-        }
-
-        Ok(())
+        })
     }
 
     /// Check if this path is empty (root path).
@@ -182,6 +169,19 @@ impl Path {
         let mut components = self.components.clone();
         components.extend(other.components.iter().cloned());
         Path { components }
+    }
+
+    /// Return a new path with the component appended.
+    #[must_use]
+    pub fn child(&self, component: impl Into<PathComponent>) -> Path {
+        let mut components = self.components.clone();
+        components.push(component.into().into_string());
+        Path { components }
+    }
+
+    /// Append a component in place.
+    pub fn push(&mut self, component: impl Into<PathComponent>) {
+        self.components.push(component.into().into_string());
     }
 
     /// Check if this path has the given prefix.
@@ -252,26 +252,125 @@ impl std::ops::Index<usize> for Path {
     }
 }
 
-/// Macro for creating paths at compile time.
+/// A single validated path component.
 ///
-/// # Example
+/// Guarantees: the inner string is a valid StructFS path component (UAX#31
+/// identifier or pure numeric). Cannot be constructed from an arbitrary
+/// string without validation, which is what lets the `path!` macro accept
+/// `PathComponent` expressions without a runtime check.
 ///
-/// ```rust
-/// use structfs_core_store::path;
+/// # Arbitrary strings
 ///
-/// let p = path!("users/123/name");
-/// assert_eq!(p.len(), 3);
-/// ```
-#[macro_export]
-macro_rules! path {
-    ($s:expr) => {
-        $crate::Path::parse($s).expect("invalid path literal")
-    };
+/// Real-world identifiers (`my-account`, `hello world`, UUIDs with dashes)
+/// are often not valid components. Use [`PathComponent::encode`] to embed
+/// them losslessly via [Namecode](https://crates.io/crates/namecode) and
+/// [`PathComponent::decode`] to recover the original string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PathComponent(String);
+
+impl PathComponent {
+    /// Validate and wrap a string as a path component.
+    pub fn try_new(s: impl Into<String>) -> Result<Self, PathError> {
+        let s = s.into();
+        Path::validate_component(&s, 0)?;
+        Ok(Self(s))
+    }
+
+    /// Encode an arbitrary string as a valid path component.
+    ///
+    /// Valid UAX#31 identifiers pass through unchanged; everything else
+    /// (punctuation, spaces, leading digits) is Namecode-encoded into a
+    /// `_N_`-prefixed identifier. Always succeeds and is deterministic.
+    /// Reverse with [`PathComponent::decode`].
+    pub fn encode(s: &str) -> Self {
+        let encoded = namecode::encode(s);
+        debug_assert!(Path::validate_component(&encoded, 0).is_ok());
+        Self(encoded)
+    }
+
+    /// Decode a component produced by [`PathComponent::encode`] back to the
+    /// original string.
+    ///
+    /// Components that are not Namecode-encoded are returned unchanged
+    /// (matching `encode`'s pass-through of valid identifiers). Returns an
+    /// error only for a malformed `_N_`-prefixed component.
+    pub fn decode(&self) -> Result<String, PathError> {
+        match namecode::decode(&self.0) {
+            Ok(decoded) => Ok(decoded),
+            Err(namecode::DecodeError::NotEncoded) => Ok(self.0.clone()),
+            Err(e) => Err(PathError::InvalidComponent {
+                component: self.0.clone(),
+                position: 0,
+                message: format!("malformed namecode encoding: {}", e),
+            }),
+        }
+    }
+
+    /// Get the validated string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Borrow the validated string.
+    ///
+    /// Used by the `path!` macro to enforce that only `PathComponent` values
+    /// (not bare `String`/`&str`) are accepted as runtime path components.
+    /// Named distinctly so no standard type matches.
+    pub fn validated_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume and return the inner string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for PathComponent {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PathComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// Numeric indices are always valid components.
+impl From<usize> for PathComponent {
+    fn from(i: usize) -> Self {
+        Self(i.to_string())
+    }
+}
+
+impl From<u64> for PathComponent {
+    fn from(i: u64) -> Self {
+        Self(i.to_string())
+    }
+}
+
+impl From<PathComponent> for Path {
+    fn from(c: PathComponent) -> Self {
+        Path {
+            components: vec![c.into_string()],
+        }
+    }
+}
+
+impl FromIterator<PathComponent> for Path {
+    fn from_iter<I: IntoIterator<Item = PathComponent>>(iter: I) -> Self {
+        Path {
+            components: iter.into_iter().map(PathComponent::into_string).collect(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path;
 
     #[test]
     fn parse_basic_paths() {
@@ -519,6 +618,107 @@ mod tests {
         set.insert(path!("bar"));
         set.insert(path!("foo")); // duplicate
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn macro_component_style() {
+        let p = path!("users", 123, "name");
+        assert_eq!(p.to_string(), "users/123/name");
+        assert_eq!(p, path!("users/123/name"));
+    }
+
+    #[test]
+    fn macro_empty() {
+        let p = path!();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn macro_with_runtime_component() {
+        let name = PathComponent::try_new("alice").unwrap();
+        let p = path!("users", name, "profile");
+        assert_eq!(p.to_string(), "users/alice/profile");
+    }
+
+    #[test]
+    fn macro_mixed_literal_forms() {
+        // A literal containing slashes can mix with separate components
+        let p = path!("a/b", "c");
+        assert_eq!(p.to_string(), "a/b/c");
+    }
+
+    #[test]
+    fn path_component_validates() {
+        assert!(PathComponent::try_new("accounts").is_ok());
+        assert!(PathComponent::try_new("42").is_ok());
+        assert!(PathComponent::try_new("café").is_ok());
+        assert!(PathComponent::try_new("_private").is_ok());
+        assert!(PathComponent::try_new("").is_err());
+        assert!(PathComponent::try_new("my-account").is_err());
+        assert!(PathComponent::try_new("my account").is_err());
+        assert!(PathComponent::try_new(".hidden").is_err());
+        assert!(PathComponent::try_new("_").is_err());
+        assert!(PathComponent::try_new("a/b").is_err());
+    }
+
+    #[test]
+    fn path_component_encode_roundtrip() {
+        for original in [
+            "plain",
+            "my-account",
+            "hello world",
+            "slashes/and spaces",
+            "oxide-🦀",
+            "123-456",
+        ] {
+            let component = PathComponent::encode(original);
+            // Encoded form is a valid component usable in paths
+            assert!(PathComponent::try_new(component.as_str()).is_ok());
+            assert_eq!(component.decode().unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn path_component_encode_passthrough() {
+        // Valid identifiers pass through unchanged
+        let component = PathComponent::encode("plain");
+        assert_eq!(component.as_str(), "plain");
+        assert_eq!(component.decode().unwrap(), "plain");
+    }
+
+    #[test]
+    fn path_component_from_index() {
+        let c: PathComponent = 7usize.into();
+        assert_eq!(c.as_str(), "7");
+        let c: PathComponent = 7u64.into();
+        assert_eq!(c.as_str(), "7");
+    }
+
+    #[test]
+    fn child_and_push() {
+        let base = path!("users");
+        let p = base.child(PathComponent::try_new("alice").unwrap());
+        assert_eq!(p.to_string(), "users/alice");
+
+        let mut p2 = path!("items");
+        p2.push(3usize);
+        assert_eq!(p2.to_string(), "items/3");
+    }
+
+    #[test]
+    fn path_from_component_iter() {
+        let p: Path = ["a", "b", "c"]
+            .iter()
+            .map(|s| PathComponent::try_new(*s).unwrap())
+            .collect();
+        assert_eq!(p.to_string(), "a/b/c");
+    }
+
+    #[test]
+    fn validate_component_public() {
+        assert!(Path::validate_component("foo", 0).is_ok());
+        let err = Path::validate_component("bad-name", 2).unwrap_err();
+        assert!(err.to_string().contains("position 2"));
     }
 
     #[test]

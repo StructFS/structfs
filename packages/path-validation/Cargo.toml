@@ -1,0 +1,13 @@
+[package]
+name = "structfs-path-validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared path component validation rules for StructFS"
+readme = "../../README.md"
+keywords = ["path", "validation", "identifier", "uax31"]
+categories = ["data-structures"]
+
+[dependencies]
+unicode-ident = "1.0"

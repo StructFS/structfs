@@ -1,0 +1,5 @@
+error: invalid path component '.hidden': must start with a letter or underscore followed by letter/digit
+ --> tests/compile_fail/dot_prefix.rs:2:50
+  |
+2 |     let _ = structfs_core_store::path!("config", ".hidden");
+  |                                                  ^^^^^^^^^

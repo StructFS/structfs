@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "packages/ll-store",
+    "packages/path-validation",
+    "packages/path-macro",
     "packages/core-store",
     "packages/serde-store",
     "packages/json_store",
@@ -23,6 +25,8 @@ exclude = [
 # Build featherweight/guest with: cargo component build -p featherweight-guest
 default-members = [
     "packages/ll-store",
+    "packages/path-validation",
+    "packages/path-macro",
     "packages/core-store",
     "packages/serde-store",
     "packages/json_store",
@@ -44,8 +48,11 @@ repository = "https://github.com/StructFS/structfs"
 [workspace.dependencies]
 # Workspace crates - layered architecture
 structfs-ll-store = { version = "0.1.0", path = "packages/ll-store" }
+structfs-path-validation = { version = "0.1.0", path = "packages/path-validation" }
+structfs-path-macro = { version = "0.1.0", path = "packages/path-macro" }
 structfs-core-store = { version = "0.1.0", path = "packages/core-store" }
 structfs-serde-store = { version = "0.1.0", path = "packages/serde-store" }
+namecode = { version = "0.1.1", path = "namecode" }
 
 # Workspace crates - store implementations
 structfs-json-store = { version = "0.1.0", path = "packages/json_store" }

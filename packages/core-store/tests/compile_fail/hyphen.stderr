@@ -1,0 +1,5 @@
+error: invalid path component 'bad-name': invalid character '-' in identifier
+ --> tests/compile_fail/hyphen.rs:2:40
+  |
+2 |     let _ = structfs_core_store::path!("gate/bad-name");
+  |                                        ^^^^^^^^^^^^^^^

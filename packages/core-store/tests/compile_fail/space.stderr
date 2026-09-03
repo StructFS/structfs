@@ -1,0 +1,5 @@
+error: invalid path component 'has space': invalid character ' ' in identifier
+ --> tests/compile_fail/space.rs:2:40
+  |
+2 |     let _ = structfs_core_store::path!("has space");
+  |                                        ^^^^^^^^^^^

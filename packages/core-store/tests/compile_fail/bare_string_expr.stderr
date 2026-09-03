@@ -1,0 +1,7 @@
+error[E0599]: no method named `validated_str` found for struct `std::string::String` in the current scope
+ --> tests/compile_fail/bare_string_expr.rs:4:13
+  |
+4 |     let _ = structfs_core_store::path!("users", name);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `structfs_core_store::path` (in Nightly builds, run with -Z macro-backtrace for more info)

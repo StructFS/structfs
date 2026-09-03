@@ -12,7 +12,7 @@ use collection_literals::btree;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use structfs_core_store::{path, Error, NoCodec, Path, Reader, Record, Reference, Value, Writer};
+use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Reference, Value, Writer};
 use structfs_serde_store::{from_value, to_value};
 
 use crate::executor::{HttpExecutor, ReqwestExecutor};
@@ -25,6 +25,11 @@ const DOCS_PATH: &str = "docs";
 const META_PATH: &str = "meta";
 
 type RequestId = u64;
+
+/// Handle path for an outstanding request: `outstanding/{id}`.
+fn outstanding_path(request_id: RequestId) -> Path {
+    Path::from_components(vec![OUTSTANDING_PREFIX.to_string(), request_id.to_string()])
+}
 
 /// Generate documentation for the sync HTTP broker store.
 fn sync_broker_docs() -> Value {
@@ -533,7 +538,7 @@ impl<E: HttpExecutor> Writer for HttpBrokerStore<E> {
             self.handles
                 .insert(request_id, SyncRequestHandle::new(request));
 
-            return Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))));
+            return Ok(outstanding_path(request_id));
         }
 
         Err(Error::store(
@@ -1251,7 +1256,7 @@ impl Writer for AsyncHttpBrokerStore {
                 }
             });
 
-            return Ok(path!(OUTSTANDING_PREFIX).join(&path!(&format!("{}", request_id))));
+            return Ok(outstanding_path(request_id));
         }
 
         Err(Error::store(
@@ -1269,6 +1274,7 @@ impl Writer for AsyncHttpBrokerStore {
 mod tests {
     use super::*;
     use crate::executor::mock::MockExecutor;
+    use structfs_core_store::path;
 
     // ==================== HttpBrokerStore tests ====================
 
