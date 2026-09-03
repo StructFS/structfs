@@ -5,7 +5,9 @@
 //! This crate provides in-memory store implementations for StructFS.
 
 pub mod in_memory;
+pub mod persist;
 pub mod value_utils;
 
 pub use in_memory::InMemoryStore;
+pub use persist::{BackedStore, Backing, JsonFileBacking};
 pub use structfs_core_store::{path, Error, Path, Reader, Record, Value, Writer};

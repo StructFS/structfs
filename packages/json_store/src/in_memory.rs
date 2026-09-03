@@ -71,9 +71,33 @@ impl Reader for InMemoryStore {
 }
 
 impl Writer for InMemoryStore {
+    /// Write following the StructFS store conventions (see
+    /// `structfs_core_store::conformance`):
+    ///
+    /// - `Value::Null` deletes the node and its entire subtree.
+    /// - Deep writes create intermediate maps.
+    /// - Writing a map at a parent replaces the full state under it.
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         let value = data.into_value(&NoCodec)?;
-        value_utils::set_path(&mut self.root, to, value)?;
+
+        if value.is_null() {
+            if to.is_empty() {
+                self.root = Value::Null;
+            } else {
+                self.root.remove(to)?;
+            }
+            return Ok(to.clone());
+        }
+
+        if to.is_empty() {
+            self.root = value;
+            return Ok(to.clone());
+        }
+
+        if self.root.is_null() {
+            self.root = Value::map();
+        }
+        self.root.set(to, value)?;
         Ok(to.clone())
     }
 }
@@ -83,6 +107,11 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use structfs_core_store::path;
+
+    #[test]
+    fn implements_store_conventions() {
+        structfs_core_store::conformance::check_conventions(&mut InMemoryStore::new());
+    }
 
     #[test]
     fn basic_write_read() {
