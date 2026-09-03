@@ -115,12 +115,19 @@ Resolution:
 
 ## Empty Paths
 
-A path with no wiring returns "not found" for reads and rejects writes:
+A path with no wiring is **denied**, for reads and writes alike:
 
 ```
-read("/nonexistent/path") → null (not found)
-write("/nonexistent/path", data) → error (no handler)
+read("/nonexistent/path") → error (forbidden)
+write("/nonexistent/path", data) → error (forbidden)
 ```
+
+A capability system must not leak the difference between "nothing is
+there" and "you may not know": absence (`null`) is a statement a *wired*
+store makes about its own contents, never something the namespace invents
+for paths outside the Block's capabilities. (Earlier drafts returned null
+for unwired reads; see `09-posix-closure.md` for the rationale behind the
+change.)
 
 ## Namespace Operations
 

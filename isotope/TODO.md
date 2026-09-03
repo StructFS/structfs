@@ -9,7 +9,11 @@ These prevent correct implementation or understanding of the spec.
 
 ### 1.1 Concurrency Model Clarity
 
-**Status:** Needs spec text
+**Status:** Largely resolved — `09-posix-closure.md` adopts the unified
+mailbox: `/iso/server/requests` is the single event queue (requests,
+signals, timers), which is what "blocking" and multiplexed waiting mean
+for a single-threaded Block. Remaining: fold the cooperative-scheduling
+prose into `01-blocks.md`.
 
 **Problem:** The spec says Blocks are single-threaded and reads can block, but
 doesn't explain the cooperative concurrency model. Block authors will misunderstand

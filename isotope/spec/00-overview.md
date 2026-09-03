@@ -98,6 +98,7 @@ The Isotope specification defines:
 6. **Protocol** — StructFS operation semantics (see `06-protocol.md`)
 7. **Server Protocol** — How Blocks serve StructFS requests (see `07-server-protocol.md`)
 8. **Assembly Management** — Deploying and updating Assemblies (see `08-assembly-management.md`)
+9. **POSIX Closure** — Stdio, env, timers, spawn/wait, the unified mailbox (see `09-posix-closure.md`)
 
 ## Non-Goals
 

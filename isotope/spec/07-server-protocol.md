@@ -22,6 +22,16 @@ The Server Protocol bridges these perspectives. The runtime:
 The Block never "serves" directly—it just reads Requests and writes Responses.
 Like a POSIX program reading from stdin.
 
+## The Mailbox
+
+`/iso/server/requests` is the Block's **single event mailbox**. Server
+Protocol requests are its main traffic, but runtime notifications —
+signals and timer deliveries — arrive on the same queue, distinguished by
+`op` (see `09-posix-closure.md`). This is what gives Blocks `poll`
+semantics without a second waiting primitive: one blocking read yields
+whatever happens next. Events whose `op` a Block doesn't recognize should
+be ignored.
+
 ## Request Structure
 
 A Request is delivered when the Block reads from `/iso/server/requests`:

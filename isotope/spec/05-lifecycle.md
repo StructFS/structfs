@@ -205,7 +205,11 @@ When an Assembly receives shutdown:
 |------|------|-------|-------------|
 | `/iso/shutdown/requested` | bool | - | True if shutdown has been requested |
 | `/iso/shutdown/mode` | string | - | `"graceful"` or `"immediate"` |
-| `/iso/shutdown/complete` | - | {} | Block writes here to signal clean exit |
+| `/iso/shutdown/complete` | - | {} or {"code": N} | Block writes here to signal clean exit, optionally with an exit code (default 0) |
+
+A Block's terminal status is `{state: "stopped" | "failed", code}`,
+observable through `proc` handles and management reads (see
+`09-posix-closure.md`).
 
 ## Assembly Lifecycle
 

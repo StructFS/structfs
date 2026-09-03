@@ -47,12 +47,21 @@ cannot wire paths under `/iso/`.
 │   ├── int             # Random integer
 │   └── bytes/{n}       # n random bytes
 │
-└── log/                # Logging
-    ├── debug           # Write debug messages
-    ├── info            # Write info messages
-    ├── warn            # Write warnings
-    └── error           # Write errors
+├── log/                # Logging
+│   ├── debug           # Write debug messages
+│   ├── info            # Write info messages
+│   ├── warn            # Write warnings
+│   └── error           # Write errors
+│
+├── env/                # Environment variables (POSIX closure, see 09)
+├── stdio/              # stdin/stdout/stderr (POSIX closure, see 09)
+├── timers              # Mailbox timers (POSIX closure, see 09)
+└── proc/               # Spawn/wait/kill, if granted (POSIX closure, see 09)
 ```
+
+The POSIX closure (`09-posix-closure.md`) specifies `env`, `self/args`,
+`stdio`, `time/now_unix_ns`, `time/after/{ms}`, `timers`, `proc`, and
+exit codes on `shutdown/complete`.
 
 ## Server Protocol Paths
 
