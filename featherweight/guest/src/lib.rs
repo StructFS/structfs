@@ -1,11 +1,16 @@
 //! Featherweight Guest Library
 //!
-//! This crate provides the guest-side implementation for WASM Blocks.
-//! It uses wit-bindgen to generate bindings from the WIT file.
+//! The guest side of a wasm Block. The WIT boundary speaks raw bytes:
+//! paths are `list<list<u8>>` (byte components) and data is `list<u8>` in
+//! the block's declared serialization format (JSON here). The host's
+//! `CoreToLL` bridge encodes/decodes `Value`s with the codec selected
+//! from this block's `manifest()`.
 //!
-//! The WIT interface speaks raw bytes: paths are `list<list<u8>>` (byte
-//! components) and data is `list<u8>`. Guests use a serialization format
-//! (e.g. JSON) to encode/decode structured data.
+//! This crate implements a real Isotope block
+//! (`isotope/spec/07-server-protocol.md`): a kv store that loops reading
+//! `iso/server/requests`, serves each request from an in-memory map, and
+//! writes responses to the request's `respond_to` path, until shutdown
+//! unblocks the request read with `null`.
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
@@ -13,56 +18,110 @@ wit_bindgen::generate!({
     path: "wit/world.wit",
 });
 
+use std::collections::HashMap;
+
 use exports::featherweight::block::block::Guest;
 use featherweight::block::ll_store::{read, write};
 
-/// A simple hello world Block implementation.
-struct HelloBlock;
+/// Split a path string into the byte components the WIT boundary wants.
+fn path_components(path: &str) -> Vec<Vec<u8>> {
+    path.split('/')
+        .filter(|c| !c.is_empty())
+        .map(|c| c.as_bytes().to_vec())
+        .collect()
+}
 
-impl Guest for HelloBlock {
+fn read_json(path: &str) -> Result<Option<serde_json::Value>, String> {
+    match read(&path_components(path)).map_err(|e| format!("read {path}: {e}"))? {
+        Some(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("decode {path}: {e}")),
+        None => Ok(None),
+    }
+}
+
+fn write_json(path: &str, value: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|e| format!("encode {path}: {e}"))?;
+    write(&path_components(path), &bytes).map_err(|e| format!("write {path}: {e}"))?;
+    Ok(())
+}
+
+/// A kv-store Block served over the server protocol.
+struct KvBlock;
+
+impl Guest for KvBlock {
     fn manifest() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
-            "name": "hello-block",
-            "version": "0.1.0",
+            "name": "wasm-kv",
+            "version": "0.2.0",
             "serialization": "application/json",
             "paths": {
-                "input/name": { "read": "Name to greet" },
-                "output/greeting": { "write": "Generated greeting" },
-                "output/status": { "write": "Completion status" }
+                "/{key}": {
+                    "read": "Get a stored value",
+                    "write": "Store a value"
+                }
             }
         }))
         .unwrap()
     }
 
     fn run() -> Result<(), String> {
-        // Read name from input path (JSON-encoded)
-        let name = match read(&[b"input".to_vec(), b"name".to_vec()])
-            .map_err(|e| format!("Failed to read input/name: {}", e))?
-        {
-            Some(bytes) => {
-                serde_json::from_slice::<String>(&bytes).unwrap_or_else(|_| "World".to_string())
+        write_json(
+            "iso/self/interface",
+            &serde_json::json!({"name": "wasm-kv", "paths": {"/{key}": {"read": true, "write": true}}}),
+        )?;
+
+        let mut store: HashMap<String, serde_json::Value> = HashMap::new();
+
+        loop {
+            // Blocking read: parks until a request arrives; `null` means
+            // shutdown was requested.
+            let Some(request) = read_json("iso/server/requests")? else {
+                break;
+            };
+            if request.is_null() {
+                break;
             }
-            None => "World".to_string(),
-        };
 
-        // Create greeting
-        let greeting = format!("Hello, {}!", name);
+            let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            let path = request.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(respond_to) = request.get("respond_to").and_then(|v| v.as_str()) else {
+                continue;
+            };
 
-        // Write greeting to output path (JSON-encoded)
-        let data =
-            serde_json::to_vec(&greeting).map_err(|e| format!("Failed to serialize: {}", e))?;
-        write(&[b"output".to_vec(), b"greeting".to_vec()], &data)
-            .map_err(|e| format!("Failed to write output/greeting: {}", e))?;
+            let response = match op {
+                "read" => {
+                    let value = store.get(path).cloned().unwrap_or(serde_json::Value::Null);
+                    serde_json::json!({"result": "ok", "value": value})
+                }
+                "write" => {
+                    let data = request
+                        .get("data")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    if data.is_null() {
+                        store.remove(path);
+                    } else {
+                        store.insert(path.to_string(), data);
+                    }
+                    serde_json::json!({"result": "ok", "path": path})
+                }
+                other => serde_json::json!({
+                    "result": "error",
+                    "error": {
+                        "type": "store_error",
+                        "message": format!("unknown op: {other}"),
+                        "retryable": false
+                    }
+                }),
+            };
+            write_json(respond_to, &response)?;
+        }
 
-        // Also write a status message (JSON-encoded)
-        let status_data =
-            serde_json::to_vec(&"completed").map_err(|e| format!("Failed to serialize: {}", e))?;
-        write(&[b"output".to_vec(), b"status".to_vec()], &status_data)
-            .map_err(|e| format!("Failed to write output/status: {}", e))?;
-
+        write_json("iso/shutdown/complete", &serde_json::json!({}))?;
         Ok(())
     }
 }
 
 // Export the Block implementation
-export!(HelloBlock);
+export!(KvBlock);
