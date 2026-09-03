@@ -123,6 +123,59 @@ fn navigate_value(value: Value, path: &[&str]) -> Result<Value, usize> {
     Ok(current)
 }
 
+/// Action descriptor for queuing a request (served by both brokers'
+/// meta lenses).
+fn queue_action_descriptor() -> Value {
+    Value::Map(btree! {
+        "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
+        "method".into() => Value::String("write".into()),
+        "target".into() => Reference::new("").to_value(),
+        "accepts".into() => Value::Map(btree! {
+            "method".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                "required".into() => Value::Bool(true),
+                "values".into() => Value::Array(vec![
+                    Value::String("GET".into()),
+                    Value::String("POST".into()),
+                    Value::String("PUT".into()),
+                    Value::String("PATCH".into()),
+                    Value::String("DELETE".into()),
+                    Value::String("HEAD".into()),
+                    Value::String("OPTIONS".into()),
+                ]),
+            }),
+            "path".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                "required".into() => Value::Bool(true),
+            }),
+            "headers".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! { "name".into() => Value::String("map".into()) }),
+                "required".into() => Value::Bool(false),
+            }),
+            "body".into() => Value::Map(btree! {
+                "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
+                "required".into() => Value::Bool(false),
+            }),
+        }),
+        "returns".into() => Value::Map(btree! {
+            "type".into() => Value::Map(btree! { "name".into() => Value::String("request-handle".into()) }),
+            "collection".into() => Reference::new("outstanding").to_value(),
+        }),
+    })
+}
+
+/// Action descriptor for deleting a handle (served by both brokers'
+/// meta lenses).
+fn delete_action_descriptor(id: RequestId) -> Value {
+    Value::Map(btree! {
+        "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
+        "method".into() => Value::String("write".into()),
+        "target".into() => Reference::new(format!("outstanding/{}", id)).to_value(),
+        "accepts".into() => Value::String("null".into()),
+        "returns".into() => Value::String("void".into()),
+    })
+}
+
 /// State of a request handle in the sync broker.
 ///
 /// Requests transition through states: Queued -> Executed (with cached response or error).
@@ -250,7 +303,7 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
 
         // meta/queue - action descriptor for queuing requests
         if path.len() == 2 && path[1] == "queue" {
-            return Ok(Some(Record::parsed(Self::queue_action_descriptor())));
+            return Ok(Some(Record::parsed(queue_action_descriptor())));
         }
 
         // meta/outstanding - list handles with meta references
@@ -288,7 +341,7 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
 
             // meta/outstanding/{id}/delete - delete action descriptor
             if path.len() == 4 && path[3] == "delete" {
-                return Ok(Some(Record::parsed(Self::delete_action_descriptor(id))));
+                return Ok(Some(Record::parsed(delete_action_descriptor(id))));
             }
 
             // meta/outstanding/{id} - handle state + navigation
@@ -319,57 +372,6 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
             "read",
             format!("Unknown meta path: {}", path),
         ))
-    }
-
-    /// Generate action descriptor for queue operation.
-    fn queue_action_descriptor() -> Value {
-        Value::Map(btree! {
-            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
-            "method".into() => Value::String("write".into()),
-            "target".into() => Reference::new("").to_value(),
-            "accepts".into() => Value::Map(btree! {
-                "method".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
-                    "required".into() => Value::Bool(true),
-                    "values".into() => Value::Array(vec![
-                        Value::String("GET".into()),
-                        Value::String("POST".into()),
-                        Value::String("PUT".into()),
-                        Value::String("PATCH".into()),
-                        Value::String("DELETE".into()),
-                        Value::String("HEAD".into()),
-                        Value::String("OPTIONS".into()),
-                    ]),
-                }),
-                "path".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
-                    "required".into() => Value::Bool(true),
-                }),
-                "headers".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("map".into()) }),
-                    "required".into() => Value::Bool(false),
-                }),
-                "body".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
-                    "required".into() => Value::Bool(false),
-                }),
-            }),
-            "returns".into() => Value::Map(btree! {
-                "type".into() => Value::Map(btree! { "name".into() => Value::String("request-handle".into()) }),
-                "collection".into() => Reference::new("outstanding").to_value(),
-            }),
-        })
-    }
-
-    /// Generate action descriptor for delete operation.
-    fn delete_action_descriptor(id: RequestId) -> Value {
-        Value::Map(btree! {
-            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
-            "method".into() => Value::String("write".into()),
-            "target".into() => Reference::new(format!("outstanding/{}", id)).to_value(),
-            "accepts".into() => Value::String("null".into()),
-            "returns".into() => Value::String("void".into()),
-        })
     }
 }
 
@@ -866,7 +868,7 @@ impl AsyncHttpBrokerStore {
 
         // meta/queue - action descriptor for queuing requests
         if path.len() == 2 && path[1] == "queue" {
-            return Ok(Some(Record::parsed(Self::queue_action_descriptor())));
+            return Ok(Some(Record::parsed(queue_action_descriptor())));
         }
 
         // meta/outstanding - list handles with meta references
@@ -905,7 +907,7 @@ impl AsyncHttpBrokerStore {
 
             // meta/outstanding/{id}/delete - delete action descriptor
             if path.len() == 4 && path[3] == "delete" {
-                return Ok(Some(Record::parsed(Self::delete_action_descriptor(id))));
+                return Ok(Some(Record::parsed(delete_action_descriptor(id))));
             }
 
             // meta/outstanding/{id} - handle state + navigation
@@ -936,57 +938,6 @@ impl AsyncHttpBrokerStore {
             "read",
             format!("Unknown meta path: {}", path),
         ))
-    }
-
-    /// Generate action descriptor for queue operation.
-    fn queue_action_descriptor() -> Value {
-        Value::Map(btree! {
-            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
-            "method".into() => Value::String("write".into()),
-            "target".into() => Reference::new("").to_value(),
-            "accepts".into() => Value::Map(btree! {
-                "method".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
-                    "required".into() => Value::Bool(true),
-                    "values".into() => Value::Array(vec![
-                        Value::String("GET".into()),
-                        Value::String("POST".into()),
-                        Value::String("PUT".into()),
-                        Value::String("PATCH".into()),
-                        Value::String("DELETE".into()),
-                        Value::String("HEAD".into()),
-                        Value::String("OPTIONS".into()),
-                    ]),
-                }),
-                "path".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
-                    "required".into() => Value::Bool(true),
-                }),
-                "headers".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("map".into()) }),
-                    "required".into() => Value::Bool(false),
-                }),
-                "body".into() => Value::Map(btree! {
-                    "type".into() => Value::Map(btree! { "name".into() => Value::String("string".into()) }),
-                    "required".into() => Value::Bool(false),
-                }),
-            }),
-            "returns".into() => Value::Map(btree! {
-                "type".into() => Value::Map(btree! { "name".into() => Value::String("request-handle".into()) }),
-                "collection".into() => Reference::new("outstanding").to_value(),
-            }),
-        })
-    }
-
-    /// Generate action descriptor for delete operation.
-    fn delete_action_descriptor(id: RequestId) -> Value {
-        Value::Map(btree! {
-            "type".into() => Value::Map(btree! { "name".into() => Value::String("action".into()) }),
-            "method".into() => Value::String("write".into()),
-            "target".into() => Reference::new(format!("outstanding/{}", id)).to_value(),
-            "accepts".into() => Value::String("null".into()),
-            "returns".into() => Value::String("void".into()),
-        })
     }
 }
 

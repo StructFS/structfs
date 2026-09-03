@@ -88,20 +88,43 @@ the mailbox. Both are cancellable by shutdown.
 ### Process control
 
 ```
-/iso/proc               # Write an Assembly definition (as a Value)
+/iso/proc               # Write an Assembly definition (as a Value), or
+                        #   {"definition": ..., "grants": {...}}
                         #   -> proc/outstanding/{id}   (spawn)
 /iso/proc/outstanding/{id}        # Read: {name, state, code?}   (status)
 /iso/proc/outstanding/{id}/wait   # Blocking read: parks until terminal,
                                   #   returns {state, code?}     (wait)
+/iso/proc/outstanding/{id}/store/... # Read/write: the child's public
+                                  #   store (the parent's channel to it)
 /iso/proc/outstanding/{id}        # Write Null: shut down and release (kill)
 ```
 
 Spawn/wait/kill are the handle pattern: `wait(2)` is a blocking read of
-a handle, `kill(2)` is the handle release. `/iso/proc` is present only
-for Blocks whose definition grants it (`spawn: true`) — the ability to
-create processes is a capability like any other. Spawned Assemblies are
-isolated: they receive `/iso/` and their own definition's wiring, nothing
-of the spawner's namespace (a grant mechanism is future work).
+a handle, `kill(2)` is the handle release, and a released or abandoned
+handle store shuts its children down (no orphans). `/iso/proc` is
+present only for Blocks whose definition grants it (`spawn: true`) — the
+ability to create processes is a capability like any other.
+
+#### Grants
+
+A spawner may bind the child's declared imports to slices of its own
+namespace:
+
+```json
+{
+    "definition": { ...an Assembly definition with imports... },
+    "grants": { "logger": "services/logs" }
+}
+```
+
+Each grant path must resolve inside the spawner's wired namespace —
+**a Block can only delegate capabilities it holds**. The Assembly stays
+the root of authority: `spawn: true` is granted by the Assembly, and
+spawn-time grants can only attenuate the spawner's own capabilities,
+never widen them. The child sees each grant as an import store rooted at
+the granted path; result paths never reveal anything above the grant.
+Without grants, a spawned Assembly receives only `/iso/` and its own
+definition's wiring.
 
 The same protocol, served by the runtime at its management surface,
 is how Assemblies are deployed at the top level (spec 08): the system
@@ -163,11 +186,30 @@ A WASI shim (implemented separately) maps host calls onto this surface:
   (spec 07 open question 1) remains open but will be capability-shaped,
   not uid-shaped.
 
+## Blocking Paths Are Declared
+
+`read /iso/meta` returns per-path descriptors
+`{readable, writable, blocking}`. The `blocking` attribute names the
+paths whose reads may legitimately park (`server/requests`,
+`stdio/stdin`, `time/after/{ms}`, proc waits), so callers can set
+per-operation deadlines instead of one oversized global timeout — a
+wedged store should not be indistinguishable from a parked one. See
+`docs/patterns/meta.md`.
+
+## Byte Streams
+
+Resolved by the byte-stream pattern (`docs/patterns/bytestream.md`):
+ranged reads at `at/{offset}/len/{n}` (matching `structfs-sys` file
+handles) with `read(2)` semantics — a parked read returns at least one
+byte or an empty result exactly at end-of-stream, offsets are
+caller-held cursors, and stale offsets clamp. This is the convention an
+`fd_read`/`fd_write` shim maps onto.
+
 ## Open Questions
 
-1. **Byte streams**: `fd_read` with offset/length over large values wants
-   a stream convention at the LL layer (cursored reads, EOF signaling).
-2. **Capability grants at spawn**: passing slices of the spawner's
-   namespace to a spawned Assembly (the `SCM_RIGHTS` analogue).
-3. **Stdio as byte streams**: line orientation is a strawman; terminals
-   want raw mode eventually.
+1. **Stdio as byte streams**: line orientation is a strawman; terminals
+   want raw mode eventually. The byte-stream pattern is the natural
+   refinement target.
+2. **Assembly-level delegation control**: whether a Block's definition
+   should restrict *which* of its capabilities may be re-granted
+   (`spawn: {grantable: [...]}`), beyond the attenuation-only rule.

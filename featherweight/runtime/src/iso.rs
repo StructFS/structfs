@@ -64,7 +64,7 @@ pub struct IsoSurface {
     next_timer: AtomicU64,
 }
 
-const SECTIONS: [(&str, &str); 9] = [
+const SECTIONS: [(&str, &str); 10] = [
     ("server", "Server protocol: the event mailbox, responses"),
     ("self", "Block identity: id, state, args, interface"),
     ("shutdown", "Lifecycle control: requested, mode, complete"),
@@ -77,7 +77,17 @@ const SECTIONS: [(&str, &str); 9] = [
     ("env", "Environment variables"),
     ("stdio", "Standard streams: stdin, stdout, stderr"),
     ("timers", "Mailbox timers: write {ms, tag}"),
+    ("meta", "Path descriptors: readable/writable/blocking"),
 ];
+
+/// One meta descriptor: `{readable, writable, blocking}`.
+fn descriptor(readable: bool, writable: bool, blocking: bool) -> Value {
+    Value::Map(BTreeMap::from([
+        ("readable".to_string(), Value::Bool(readable)),
+        ("writable".to_string(), Value::Bool(writable)),
+        ("blocking".to_string(), Value::Bool(blocking)),
+    ]))
+}
 
 impl IsoSurface {
     pub(crate) fn new(config: IsoConfig) -> Self {
@@ -115,6 +125,62 @@ impl IsoSurface {
         }
     }
 
+    /// The meta lens: which paths exist, and — the part callers need to
+    /// set deadlines sanely — which ones may legitimately park.
+    fn meta(&self) -> Value {
+        let mut map = BTreeMap::from([
+            // Parking reads: the reason per-operation deadlines can't be
+            // one global number.
+            ("server/requests".to_string(), descriptor(true, false, true)),
+            ("stdio/stdin".to_string(), descriptor(true, false, true)),
+            ("time/after/{ms}".to_string(), descriptor(true, false, true)),
+            // Immediate surface.
+            (
+                "server/requests/pending".to_string(),
+                descriptor(true, false, false),
+            ),
+            (
+                "server/responses/{token}".to_string(),
+                descriptor(false, true, false),
+            ),
+            ("self/id".to_string(), descriptor(true, false, false)),
+            ("self/state".to_string(), descriptor(true, false, false)),
+            ("self/args".to_string(), descriptor(true, false, false)),
+            ("self/interface".to_string(), descriptor(true, true, false)),
+            (
+                "shutdown/requested".to_string(),
+                descriptor(true, false, false),
+            ),
+            (
+                "shutdown/complete".to_string(),
+                descriptor(false, true, false),
+            ),
+            ("time/now".to_string(), descriptor(true, false, false)),
+            (
+                "time/now_unix_ns".to_string(),
+                descriptor(true, false, false),
+            ),
+            ("random/uuid".to_string(), descriptor(true, false, false)),
+            ("env".to_string(), descriptor(true, false, false)),
+            ("stdio/stdout".to_string(), descriptor(false, true, false)),
+            ("stdio/stderr".to_string(), descriptor(false, true, false)),
+            ("timers".to_string(), descriptor(false, true, false)),
+            ("log/{level}".to_string(), descriptor(false, true, false)),
+        ]);
+        if self.proc.is_some() {
+            map.insert("proc".to_string(), descriptor(true, true, false));
+            map.insert(
+                "proc/outstanding/{id}/wait".to_string(),
+                descriptor(true, false, true),
+            );
+            map.insert(
+                "proc/outstanding/{id}/store".to_string(),
+                descriptor(true, true, true),
+            );
+        }
+        Value::Map(map)
+    }
+
     /// Serve a read. May park (the mailbox, stdin, `time/after`, proc
     /// waits), so this is async; the namespace bridges it onto the
     /// block's thread.
@@ -131,6 +197,8 @@ impl IsoSurface {
             return proc.clone().read_detached(&rel).await;
         }
         let value = match (path.len(), path[0].as_str()) {
+            // === meta lens ===
+            (1, "meta") => Some(self.meta()),
             // === server (the mailbox) ===
             (1, "server") => Some(Value::Map(BTreeMap::from([
                 (
@@ -542,6 +610,35 @@ mod tests {
             crate::protocol::decode_read_response(rx.await.unwrap()).unwrap(),
             Some(Value::Integer(1))
         );
+    }
+
+    #[tokio::test]
+    async fn meta_declares_blocking_paths() {
+        let (_cell, iso) = surface();
+        let meta = read_value(&iso, &path!("meta")).await.unwrap();
+        let map = match meta {
+            Value::Map(map) => map,
+            _ => panic!("expected meta map"),
+        };
+        // The gateway lesson: parked reads are declared, so callers can
+        // set per-operation deadlines instead of one global timeout.
+        for blocking in ["server/requests", "stdio/stdin", "time/after/{ms}"] {
+            assert_eq!(
+                map.get(blocking)
+                    .and_then(|d| d.get(&path!("blocking")))
+                    .cloned(),
+                Some(Value::Bool(true)),
+                "{blocking} must declare blocking"
+            );
+        }
+        assert_eq!(
+            map.get("self/id")
+                .and_then(|d| d.get(&path!("blocking")))
+                .cloned(),
+            Some(Value::Bool(false))
+        );
+        // No spawn grant: no proc descriptors.
+        assert!(!map.contains_key("proc"));
     }
 
     #[tokio::test]

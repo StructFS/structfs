@@ -65,7 +65,7 @@ pub use block::{
 };
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
-pub use namespace::{host_store, HostStore, Namespace, Target, WiringTable};
+pub use namespace::{host_store, GrantStore, HostStore, Namespace, Target, WiringTable};
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
 pub use runtime::{AssemblyInstance, Runtime, StdioProvider};
 pub use spawn::{ProcStore, SpawnProtocol};

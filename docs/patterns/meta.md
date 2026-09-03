@@ -91,6 +91,23 @@ write /ctx/sys/fs/meta/handles/0/position 500
 This is consistent with StructFS's two-verb model: if something is observable
 via read, it can be modified via write.
 
+## The `blocking` Attribute
+
+A meta descriptor should declare whether reads of a path may
+legitimately **park** (wait for data), alongside `readable`/`writable`:
+
+```json
+{"readable": true, "writable": false, "blocking": true}
+```
+
+Without this, callers cannot distinguish a parked read from a wedged
+store, and end up with one oversized global timeout covering every
+operation (a lesson from deployments: a mailbox read that parks for
+minutes forced a ten-minute deadline onto everything). With it, callers
+set tight deadlines on immediate paths and long or infinite ones only
+where the store says parking is part of the contract. Featherweight's
+`/iso/meta` implements this shape.
+
 ## Open Questions
 
 This pattern is exploratory. Some things we don't know yet:

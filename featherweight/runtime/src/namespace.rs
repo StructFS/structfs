@@ -63,6 +63,62 @@ impl WiringTable {
     }
 }
 
+/// A slice of a namespace, packaged as a host store.
+///
+/// Operations join `base` and route to the captured target. This is how
+/// spawn-time grants hand a child an attenuation of the spawner's
+/// capabilities: the child mounts this store wherever its own definition
+/// says, and can never see outside `base`.
+pub struct GrantStore {
+    ctx: Arc<RtCtx>,
+    target: Target,
+    base: Path,
+}
+
+impl GrantStore {
+    pub(crate) fn new(ctx: Arc<RtCtx>, target: Target, base: Path) -> Self {
+        Self { ctx, target, base }
+    }
+}
+
+impl Reader for GrantStore {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        let rel = self.base.join(from);
+        match &self.target {
+            Target::Block(cell) => {
+                let cell = cell.clone();
+                self.ctx
+                    .block_on(self.ctx.call_read(&cell, rel))
+                    .map(|v| v.map(Record::parsed))
+            }
+            Target::Store(store) => store.clone().read(&rel),
+        }
+    }
+}
+
+impl Writer for GrantStore {
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+        let rel = self.base.join(to);
+        let result = match &self.target {
+            Target::Block(cell) => {
+                let cell = cell.clone();
+                let value = data.into_value(&structfs_core_store::NoCodec)?;
+                self.ctx.block_on(self.ctx.call_write(&cell, rel, value))?
+            }
+            Target::Store(store) => store.clone().write(&rel, data)?,
+        };
+        // Result paths are expressed relative to the grant, never
+        // revealing the base (the confinement rule Rooted also follows).
+        result.strip_prefix(&self.base).ok_or_else(|| {
+            Error::store(
+                "grant",
+                "write",
+                format!("target returned path outside the grant: {}", result),
+            )
+        })
+    }
+}
+
 /// A block's namespace, as a synchronous store.
 ///
 /// This is what a native block's `run` receives and what a wasm block's

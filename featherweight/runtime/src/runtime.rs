@@ -155,6 +155,7 @@ impl RtCtx {
                 self.runtime.clone(),
                 block.base_dir.clone(),
                 self.handle.clone(),
+                Some(block.wiring.clone()),
             )
         });
         let iso = Arc::new(IsoSurface::new(IsoConfig {
@@ -353,6 +354,11 @@ pub struct RuntimeInner {
 }
 
 impl RuntimeInner {
+    /// The shared runtime context (for grant stores and spawn surfaces).
+    pub(crate) fn ctx(&self) -> Arc<RtCtx> {
+        self.ctx.clone()
+    }
+
     fn lock_builtins(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, Arc<dyn NativeBlockFactory>>> {
@@ -586,6 +592,9 @@ impl Runtime {
             Arc::downgrade(&self.inner),
             base_dir.to_path_buf(),
             self.inner.ctx.handle.clone(),
+            // The host has no block namespace; grants are a spawner
+            // concept.
+            None,
         )
     }
 }

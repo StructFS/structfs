@@ -619,6 +619,135 @@ async fn signals_reach_the_mailbox() {
     assembly.shutdown(Duration::from_secs(2)).await;
 }
 
+/// Spawns a child with a grant, exercises it in both directions, and
+/// serves the results.
+struct GrantSpawner;
+
+impl NativeBlock for GrantSpawner {
+    fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
+        // Seed the parent's kv, which the grant will expose.
+        ns.write(
+            &path!("services/kv/shared"),
+            Record::parsed(Value::from("from parent")),
+        )?;
+
+        // Spawn a child whose declared import is bound to a slice of THIS
+        // block's namespace. The child's proxy forwards services/kv to
+        // the import.
+        let request = structfs_serde_store::json_to_value(serde_json::json!({
+            "definition": {
+                "assembly": "granted-child",
+                "blocks": {"p": "builtin:proxy"},
+                "public": "p",
+                "imports": {"store": "A kv slice from the parent"},
+                "wiring": ["p:/services/kv -> $store"]
+            },
+            "grants": {"store": "services/kv"}
+        }));
+        let handle = ns.write(&path!("iso/proc"), Record::parsed(request))?;
+
+        // Parent -> child -> grant -> parent's kv: read the seeded value
+        // through the child's public store.
+        let through_child = ns
+            .read(&handle.join(&path!("store/shared")))?
+            .and_then(|r| r.as_value().cloned())
+            .unwrap_or(Value::Null);
+
+        // Child writes through the grant land in the parent's kv.
+        ns.write(
+            &handle.join(&path!("store/from_child")),
+            Record::parsed(Value::Integer(42)),
+        )?;
+        let own_view = ns
+            .read(&path!("services/kv/from_child"))?
+            .and_then(|r| r.as_value().cloned())
+            .unwrap_or(Value::Null);
+
+        // kill(2) the child; a spawner's dropped handle store would also
+        // release it, but explicit release is deterministic.
+        ns.write(&handle, Record::parsed(Value::Null))?;
+
+        // Attenuation: granting a path outside this block's namespace is
+        // denied.
+        let bad = structfs_serde_store::json_to_value(serde_json::json!({
+            "definition": {
+                "assembly": "never",
+                "blocks": {"p": "builtin:proxy"},
+                "public": "p",
+                "imports": {"store": "x"},
+                "wiring": ["p:/services/kv -> $store"]
+            },
+            "grants": {"store": "unwired/secret"}
+        }));
+        let denied = ns.write(&path!("iso/proc"), Record::parsed(bad)).is_err();
+
+        let mut results = std::collections::BTreeMap::new();
+        results.insert("through_child".to_string(), through_child);
+        results.insert("own_view".to_string(), own_view);
+        results.insert("denied".to_string(), Value::Bool(denied));
+        let results = Value::Map(results);
+
+        native::serve_only_requests(ns, |_ns, _request| protocol::ok_value(results.clone()))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_grants_attenuate_the_spawner_namespace() {
+    let mut runtime = runtime();
+    runtime.register_builtin(
+        "proxy",
+        Arc::new(|| Box::new(ProxyBlock) as Box<dyn NativeBlock>),
+    );
+    runtime.register_builtin(
+        "grant_spawner",
+        Arc::new(|| Box::new(GrantSpawner) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "grants",
+            "blocks": {"spawner": {"artifact": "builtin:grant_spawner", "spawn": true},
+                       "kv": "builtin:kv"},
+            "public": "spawner",
+            "wiring": ["spawner:/services/kv -> kv"]}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &base_dir())
+        .unwrap();
+
+    let results = assembly.read(path!("report")).await.unwrap().unwrap();
+    match results {
+        Value::Map(map) => {
+            // The child reached the parent's kv through the grant...
+            assert_eq!(map.get("through_child"), Some(&Value::from("from parent")));
+            // ...and its writes landed there.
+            assert_eq!(map.get("own_view"), Some(&Value::Integer(42)));
+            // Granting outside the spawner's namespace was denied.
+            assert_eq!(map.get("denied"), Some(&Value::Bool(true)));
+        }
+        other => panic!("expected results map, got {other:?}"),
+    }
+
+    assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn management_surface_rejects_grants() {
+    use structfs_core_store::DetachedWriter;
+
+    let runtime = runtime();
+    let mut mgmt = runtime.management_store(&base_dir());
+    let request = structfs_serde_store::json_to_value(serde_json::json!({
+        "definition": {"assembly": "x", "blocks": {"kv": "builtin:kv"}, "public": "kv",
+                        "imports": {"s": "d"}},
+        "grants": {"s": "anything"}
+    }));
+    let err = mgmt
+        .write_detached(&path!(""), Record::parsed(request))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::PermissionDenied { .. }));
+}
+
 /// Exits with a declared code.
 struct ExitingBlock;
 
