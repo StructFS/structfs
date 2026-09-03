@@ -28,6 +28,7 @@ extern crate self as structfs_core_store;
 pub use bytes::Bytes;
 
 mod bridge;
+mod combinators;
 mod error;
 mod format;
 mod lazy_record;
@@ -43,6 +44,7 @@ mod traits;
 mod value;
 
 pub use bridge::{CoreToLL, LLToCore};
+pub use combinators::{Cascade, ReadOnly, Rooted, Shared};
 pub use error::{CodecOperation, Error};
 pub use format::Format;
 pub use lazy_record::LazyRecord;
