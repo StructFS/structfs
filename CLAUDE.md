@@ -39,7 +39,11 @@ isotope/              # The Isotope virtual-OS specification
 - **`Reader::read_children`**: Enumerate child names at a prefix (defaulted
   from the map convention; stores can override)
 - **Combinators**: `ReadOnly`, `Cascade` (layering), `Shared` (Arc<Mutex>
-  handle), `Rooted` (subtree confinement) in `core-store`
+  handle), `Rooted` (subtree confinement), `Masked` (component-wise read
+  redaction) in `core-store`
+- **Append logs**: `LogStore` + `AppendBacking`/`JsonlFileBacking` in
+  `json_store` — write to `append`, page with the `entries/from/{n}`
+  cursor tail; the HTTP async broker is a `HandleStore` instantiation
 - **PathPattern**: Component-wise Exact/Prefix/PrefixSuffix matching
 - **Typed access**: `read_typed`/`write_typed` on any store (codec-free, in
   `serde-store`); `Path`/`Value`/`Record`/`Format` all implement serde
