@@ -57,6 +57,31 @@ pub trait Reader: Send + Sync {
     /// `Ok(None)` if the path doesn't exist,
     /// or `Err` if an error occurred.
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error>;
+
+    /// Enumerate the child names directly under a path.
+    ///
+    /// Returns `Ok(None)` if the path doesn't exist, and `Ok(Some(names))`
+    /// otherwise — an empty vec for leaf values.
+    ///
+    /// The default implementation reads the path and projects children from
+    /// the parsed value: map keys, or indices for arrays. Stores that can
+    /// enumerate more cheaply (or that serve `Record::Raw`) should override
+    /// this.
+    fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
+        let Some(record) = self.read(from)? else {
+            return Ok(None);
+        };
+        match record.as_value() {
+            Some(Value::Map(map)) => Ok(Some(map.keys().cloned().collect())),
+            Some(Value::Array(arr)) => Ok(Some((0..arr.len()).map(|i| i.to_string()).collect())),
+            Some(_) => Ok(Some(Vec::new())),
+            None => Err(Error::store(
+                "reader",
+                "read_children",
+                "cannot enumerate children of a raw record; the store must override read_children",
+            )),
+        }
+    }
 }
 
 /// Write records to paths.
@@ -155,6 +180,10 @@ impl<T: Reader + ?Sized> Reader for &mut T {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         (*self).read(from)
     }
+
+    fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
+        (*self).read_children(from)
+    }
 }
 
 impl<T: Writer + ?Sized> Writer for &mut T {
@@ -166,6 +195,10 @@ impl<T: Writer + ?Sized> Writer for &mut T {
 impl<T: Reader + ?Sized> Reader for Box<T> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         self.as_mut().read(from)
+    }
+
+    fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
+        self.as_mut().read_children(from)
     }
 }
 
@@ -399,5 +432,91 @@ mod tests {
         let mut store = TestStore::new();
         let result = store.read(&path!("nonexistent")).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_children_default_impl() {
+        use crate::path;
+        use std::collections::BTreeMap;
+
+        let mut store = TestStore::new();
+
+        // Map value: children are the keys
+        let mut map = BTreeMap::new();
+        map.insert("alice".to_string(), Value::from(1i64));
+        map.insert("bob".to_string(), Value::from(2i64));
+        store
+            .write(&path!("users"), Record::parsed(Value::Map(map)))
+            .unwrap();
+        assert_eq!(
+            store.read_children(&path!("users")).unwrap(),
+            Some(vec!["alice".to_string(), "bob".to_string()])
+        );
+
+        // Array value: children are indices
+        store
+            .write(
+                &path!("items"),
+                Record::parsed(Value::Array(vec![Value::from("a"), Value::from("b")])),
+            )
+            .unwrap();
+        assert_eq!(
+            store.read_children(&path!("items")).unwrap(),
+            Some(vec!["0".to_string(), "1".to_string()])
+        );
+
+        // Leaf value: empty children
+        store
+            .write(&path!("leaf"), Record::parsed(Value::from("scalar")))
+            .unwrap();
+        assert_eq!(store.read_children(&path!("leaf")).unwrap(), Some(vec![]));
+
+        // Missing path: None
+        assert_eq!(store.read_children(&path!("missing")).unwrap(), None);
+    }
+
+    #[test]
+    fn read_children_raw_record_errors() {
+        use crate::path;
+
+        let mut store = TestStore::new();
+        store
+            .write(
+                &path!("raw"),
+                Record::raw(Bytes::from_static(b"{}"), Format::JSON),
+            )
+            .unwrap();
+        assert!(store.read_children(&path!("raw")).is_err());
+    }
+
+    #[test]
+    fn read_children_delegates_through_wrappers() {
+        use crate::path;
+
+        /// Store that overrides read_children without storing map values.
+        struct ListingStore;
+
+        impl Reader for ListingStore {
+            fn read(&mut self, _from: &Path) -> Result<Option<Record>, Error> {
+                Ok(None)
+            }
+
+            fn read_children(&mut self, _from: &Path) -> Result<Option<Vec<String>>, Error> {
+                Ok(Some(vec!["custom".to_string()]))
+            }
+        }
+
+        let mut store = ListingStore;
+        let by_ref: &mut dyn Reader = &mut store;
+        assert_eq!(
+            by_ref.read_children(&path!("x")).unwrap(),
+            Some(vec!["custom".to_string()])
+        );
+
+        let mut boxed: Box<dyn Reader> = Box::new(ListingStore);
+        assert_eq!(
+            boxed.read_children(&path!("x")).unwrap(),
+            Some(vec!["custom".to_string()])
+        );
     }
 }
