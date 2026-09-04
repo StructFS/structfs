@@ -88,7 +88,7 @@ impl<S: Reader + Writer + Send + 'static, C: Codec + Send + Sync + 'static>
 ///
 /// Returns `None` for all reads and echoes the path back for writes.
 /// The guest's `manifest()` function should not need store access.
-struct NoOpStore;
+pub(crate) struct NoOpStore;
 
 impl Reader for NoOpStore {
     fn read(

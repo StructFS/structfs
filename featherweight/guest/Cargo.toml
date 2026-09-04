@@ -4,19 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Guest library for building Featherweight WASM Blocks"
+description = "Guest SDK and reference block for the core-wasm Block ABI binding (isotope/spec/11)"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[package.metadata.component]
-package = "featherweight:block"
-
-[package.metadata.component.target]
-path = "../wit/world.wit"
-world = "block-world"

@@ -10,6 +10,7 @@ use structfs_serde_store::JsonCodec;
 
 use crate::assembly::{AssemblyDef, WireTarget};
 use crate::block::{BlockCell, BlockId, BlockState, ShutdownMode};
+use crate::core_wasm::{is_component, CoreWasmBlock};
 use crate::error::{Result, RuntimeError};
 use crate::iso::{IsoConfig, IsoSurface, LogSink, StderrLog};
 use crate::namespace::{host_store, HostStore, Namespace, Target, WiringTable};
@@ -19,12 +20,37 @@ use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
 use crate::wasm_block::WasmBlock;
 
+/// A wasm artifact in either binding of the Block ABI: a component
+/// (spec 10's component binding) or a plain core module (spec 11).
+pub(crate) enum WasmArtifact {
+    Component(WasmBlock),
+    Core(CoreWasmBlock),
+}
+
+impl WasmArtifact {
+    fn from_file(path: &std::path::Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        Ok(if is_component(&bytes) {
+            WasmArtifact::Component(WasmBlock::new(bytes))
+        } else {
+            WasmArtifact::Core(CoreWasmBlock::new(bytes))
+        })
+    }
+
+    fn manifest(&self) -> Result<Vec<u8>> {
+        match self {
+            WasmArtifact::Component(wasm) => wasm.manifest(),
+            WasmArtifact::Core(wasm) => wasm.manifest(),
+        }
+    }
+}
+
 /// How a block's code is executed.
 pub(crate) enum Driver {
     /// A native Rust block from the builtin registry.
     Native(Arc<dyn NativeBlockFactory>),
-    /// A wasm component, with its declared serialization format.
-    Wasm(Arc<WasmBlock>, Format),
+    /// A wasm artifact, with its declared serialization format.
+    Wasm(Arc<WasmArtifact>, Format),
 }
 
 /// Everything the runtime knows about one startable block.
@@ -183,9 +209,22 @@ impl RtCtx {
                     let mut native = factory.create();
                     native.run(&mut namespace).map_err(|e| e.to_string())
                 }
-                Driver::Wasm(wasm, format) => wasm
-                    .run(block.cell.id.clone(), namespace, JsonCodec, format.clone())
-                    .map_err(|e| e.to_string()),
+                Driver::Wasm(artifact, format) => match artifact.as_ref() {
+                    WasmArtifact::Component(wasm) => wasm
+                        .run(block.cell.id.clone(), namespace, JsonCodec, format.clone())
+                        .map_err(|e| e.to_string()),
+                    WasmArtifact::Core(wasm) => wasm
+                        .run(block.cell.id.clone(), namespace, JsonCodec, format.clone())
+                        .map_err(|e| e.to_string())
+                        .map(|code| {
+                            // Spec 11: run's return value is the exit
+                            // code, unless the block already declared
+                            // one via shutdown/complete.
+                            if code != 0 && !block.cell.shutdown_complete() {
+                                block.cell.mark_shutdown_complete(code as i64);
+                            }
+                        }),
+                },
             };
             finalize(&block, result);
         });
@@ -399,8 +438,8 @@ impl RuntimeInner {
                 drivers.insert(name.clone(), Driver::Native(factory));
             } else if artifact.ends_with(".wasm") {
                 let path = base_dir.join(artifact);
-                let wasm = WasmBlock::from_file(&path)?;
-                let format = wasm_format(&wasm, block_def.serialization.as_str())?;
+                let wasm = WasmArtifact::from_file(&path)?;
+                let format = wasm_format(&wasm.manifest()?, block_def.serialization.as_str())?;
                 cells.insert(
                     name.clone(),
                     Arc::new(BlockCell::new(name.clone(), def.failure_policy(name))),
@@ -609,9 +648,8 @@ impl Default for Runtime {
 /// Resolve a wasm block's serialization format from its manifest, falling
 /// back to the assembly declaration. This closes the manifest bootstrap
 /// loop: the codec is selected before the store bridge exists.
-fn wasm_format(wasm: &WasmBlock, declared: &str) -> Result<Format> {
-    let manifest_bytes = wasm.manifest()?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+fn wasm_format(manifest_bytes: &[u8], declared: &str) -> Result<Format> {
+    let manifest: serde_json::Value = serde_json::from_slice(manifest_bytes)
         .map_err(|e| RuntimeError::Manifest(format!("manifest is not JSON: {e}")))?;
     let serialization = manifest
         .get("serialization")

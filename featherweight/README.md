@@ -71,9 +71,16 @@ read of the returned handle, and kill(2) is a Null write to it.
   no separate management API
 - **Capability discipline**: unwired paths are denied (reads and writes
   alike); filesystem/network access is granted by wiring, never ambient
-- **Wasm blocks**: the WIT boundary is the LL-store boundary (bytes only);
-  the `manifest()` export selects the codec before the store bridge exists.
-  The Block ABI is single-sourced at `featherweight/wit/world.wit`
+- **Wasm blocks, two bindings**: the **core-wasm binding** (spec 11) —
+  two imports in the `structfs` module, no bindgen or component tooling,
+  plain `cargo build --target wasm32-unknown-unknown` output runs
+  directly (`./scripts/run_wasm_block.sh` for the live demo; hand-written
+  wat guests in the tests) — and the **component binding** (the WIT at
+  `featherweight/wit/world.wit`), selected automatically by artifact
+  sniffing. `featherweight/guest` is the Rust core-binding SDK + reference
+  kv block; `featherweight/sdk/assemblyscript` is the ~60-line
+  AssemblyScript SDK. The `manifest()` export selects the codec before
+  the store bridge exists in both bindings
 - **The WASI tower** (spec 10): the runtime has no WASI dependency —
   WASI is a shim over the Block ABI. `featherweight-wasi` implements the
   syscall core (args/environ/clocks/random/stdio/exit/errno) generically

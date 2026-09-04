@@ -49,6 +49,7 @@
 
 pub mod assembly;
 pub mod block;
+pub mod core_wasm;
 mod error;
 pub mod iso;
 pub mod namespace;
@@ -63,6 +64,7 @@ pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
 pub use block::{
     BlockCell, BlockEvent, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode,
 };
+pub use core_wasm::CoreWasmBlock;
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use namespace::{host_store, GrantStore, HostStore, Namespace, Target, WiringTable};
