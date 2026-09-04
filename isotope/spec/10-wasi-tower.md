@@ -8,33 +8,54 @@ it.
 
 ## The Block ABI
 
-The canonical interface is the WIT world in `featherweight/wit/world.wit`
-(single-sourced; host and guest bindings are both generated from it):
+The Block ABI is a **semantic contract, not a WIT file**. Canonically:
 
-```wit
+```
 // guest imports (the entire system interface)
-read:  func(path: list<list<u8>>) -> result<option<list<u8>>, string>
-write: func(path: list<list<u8>>, data: list<u8>) -> result<list<list<u8>>, string>
+read(path)        -> found(data) | absent | error
+write(path, data) -> written(result-path) | error
 
 // guest exports
-manifest: func() -> list<u8>     // JSON self-description, pre-wiring
-run:      func() -> result<_, string>
+manifest()        -> bytes    // JSON self-description, pre-wiring
+run()             -> ok | error
 ```
 
-Properties the ABI guarantees:
+where `path` is a sequence of validated byte components, `data` is
+bytes in the Block's manifest-declared serialization, and `error`
+carries the protocol error taxonomy (spec 06).
 
-- **Byte-level, format-agnostic**: paths are validated byte components;
-  data is bytes in the Block's manifest-declared serialization. The ABI
-  never changes when formats do.
+Properties the ABI guarantees, in every binding:
+
+- **Byte-level, format-agnostic**: the ABI never changes when
+  serialization formats do.
 - **Stateless calls**: each call is complete in itself — no pending
   results, no call-ordering protocol, no host-side per-call state.
 - **Capability-complete**: everything reachable is reachable through the
   namespace. There is no second interface to audit.
 
-Planned ABI v2 (not yet adopted): errors as a WIT `variant` mirroring
-the protocol error taxonomy (spec 06), so typed errors survive the
-boundary; today they collapse to strings at the wasm edge only —
-native shims see the typed errors directly.
+### Bindings
+
+The contract is projected into per-host bindings; no binding is the
+definition:
+
+1. **Native**: the `NativeBlock` trait over a namespace store — the
+   reference binding (errors flow fully typed).
+2. **Core wasm** (to be specified): two stateless imports over linear
+   memory with guest-owned result buffers — the swizzle target for
+   preview1 binaries, the browser binding, and the compatibility point
+   for hand-ABI hosts. Must be specified with canonical-ABI-grade
+   ownership rules; statefulness (parked results, call ordering) is
+   prohibited.
+3. **Component model**: the WIT world in `featherweight/wit/world.wit`,
+   derived from this contract — kept for wasip2/0.3 composition and
+   wit-bindgen language coverage, not as the source of truth.
+4. **Wire**: network transports carrying the same operations (e.g. the
+   CBOR transport lineage).
+
+Typed errors are part of the contract; bindings that currently collapse
+them to strings (the component binding's `result<_, string>`) are
+lossy projections to be upgraded per-binding — a variant in WIT, a
+status code + payload in the core binding.
 
 ## The Tower
 
