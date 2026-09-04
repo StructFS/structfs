@@ -26,3 +26,6 @@ node_modules/
 
 # Local development things
 /local
+
+# Coverage artifacts
+*.profraw
