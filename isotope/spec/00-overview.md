@@ -100,6 +100,7 @@ The Isotope specification defines:
 8. **Assembly Management** — Deploying and updating Assemblies (see `08-assembly-management.md`)
 9. **POSIX Closure** — Stdio, env, timers, spawn/wait, the unified mailbox (see `09-posix-closure.md`)
 10. **The WASI Tower** — The Block ABI, and WASI as shims above it (see `10-wasi-tower.md`)
+11. **The Core-Wasm Binding** — The SDK binding: the Block ABI on plain wasm modules (see `11-core-wasm-binding.md`)
 
 ## Non-Goals
 

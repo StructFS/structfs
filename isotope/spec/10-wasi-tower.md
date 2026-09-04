@@ -40,12 +40,11 @@ definition:
 
 1. **Native**: the `NativeBlock` trait over a namespace store — the
    reference binding (errors flow fully typed).
-2. **Core wasm** (to be specified): two stateless imports over linear
-   memory with guest-owned result buffers — the swizzle target for
-   preview1 binaries, the browser binding, and the compatibility point
-   for hand-ABI hosts. Must be specified with canonical-ABI-grade
-   ownership rules; statefulness (parked results, call ordering) is
-   prohibited.
+2. **Core wasm** (`11-core-wasm-binding.md`): two stateless imports in
+   the `structfs` module over linear memory with guest-owned result
+   buffers — the SDK binding, the swizzle target for preview1 binaries,
+   the browser binding, and the compatibility point for hand-ABI hosts.
+   Statefulness (parked results, call ordering) is prohibited.
 3. **Component model**: the WIT world in `featherweight/wit/world.wit`,
    derived from this contract — kept for wasip2/0.3 composition and
    wit-bindgen language coverage, not as the source of truth.
