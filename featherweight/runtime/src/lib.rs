@@ -51,6 +51,7 @@ pub mod assembly;
 pub mod block;
 pub mod core_wasm;
 mod error;
+pub mod metering;
 pub mod iso;
 pub mod namespace;
 pub mod native;
@@ -67,6 +68,7 @@ pub use block::{
 pub use core_wasm::CoreWasmBlock;
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
+pub use metering::Metering;
 pub use namespace::{host_store, GrantStore, HostStore, Namespace, Target, WiringTable};
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
 pub use runtime::{AssemblyInstance, Runtime, StdioProvider};

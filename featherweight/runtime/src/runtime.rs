@@ -13,6 +13,7 @@ use crate::block::{BlockCell, BlockId, BlockState, ShutdownMode};
 use crate::core_wasm::{is_component, CoreWasmBlock};
 use crate::error::{Result, RuntimeError};
 use crate::iso::{IsoConfig, IsoSurface, LogSink, StderrLog};
+use crate::metering::Metering;
 use crate::namespace::{host_store, HostStore, Namespace, Target, WiringTable};
 use crate::native::NativeBlockFactory;
 use crate::protocol::{decode_read_response, decode_write_response};
@@ -82,6 +83,7 @@ pub(crate) struct RtCtx {
     blocks: Mutex<HashMap<BlockId, Arc<BlockRuntime>>>,
     log: Mutex<Arc<dyn LogSink>>,
     stdio_provider: Mutex<Arc<StdioProvider>>,
+    metering: Mutex<Metering>,
     runtime: Weak<RuntimeInner>,
 }
 
@@ -209,22 +211,44 @@ impl RtCtx {
                     let mut native = factory.create();
                     native.run(&mut namespace).map_err(|e| e.to_string())
                 }
-                Driver::Wasm(artifact, format) => match artifact.as_ref() {
-                    WasmArtifact::Component(wasm) => wasm
-                        .run(block.cell.id.clone(), namespace, JsonCodec, format.clone())
-                        .map_err(|e| e.to_string()),
-                    WasmArtifact::Core(wasm) => wasm
-                        .run(block.cell.id.clone(), namespace, JsonCodec, format.clone())
-                        .map_err(|e| e.to_string())
-                        .map(|code| {
-                            // Spec 11: run's return value is the exit
-                            // code, unless the block already declared
-                            // one via shutdown/complete.
-                            if code != 0 && !block.cell.shutdown_complete() {
-                                block.cell.mark_shutdown_complete(code as i64);
-                            }
-                        }),
-                },
+                Driver::Wasm(artifact, format) => {
+                    let metering = ctx
+                        .metering
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let cancel = block.cell.cancel.clone();
+                    match artifact.as_ref() {
+                        WasmArtifact::Component(wasm) => wasm
+                            .run(
+                                block.cell.id.clone(),
+                                namespace,
+                                JsonCodec,
+                                format.clone(),
+                                &metering,
+                                cancel,
+                            )
+                            .map_err(|e| e.to_string()),
+                        WasmArtifact::Core(wasm) => wasm
+                            .run(
+                                block.cell.id.clone(),
+                                namespace,
+                                JsonCodec,
+                                format.clone(),
+                                &metering,
+                                cancel,
+                            )
+                            .map_err(|e| e.to_string())
+                            .map(|code| {
+                                // Spec 11: run's return value is the exit
+                                // code, unless the block already declared
+                                // one via shutdown/complete.
+                                if code != 0 && !block.cell.shutdown_complete() {
+                                    block.cell.mark_shutdown_complete(code as i64);
+                                }
+                            }),
+                    }
+                }
             };
             finalize(&block, result);
         });
@@ -556,6 +580,7 @@ impl Runtime {
                 blocks: Mutex::new(HashMap::new()),
                 log: Mutex::new(Arc::new(StderrLog)),
                 stdio_provider: Mutex::new(Arc::new(|_| None)),
+                metering: Mutex::new(Metering::default()),
                 runtime: weak.clone(),
             }),
             builtins: Mutex::new(HashMap::new()),
@@ -580,6 +605,18 @@ impl Runtime {
     /// Replace the log sink (default: stderr).
     pub fn with_log_sink(self, log: Arc<dyn LogSink>) -> Self {
         *self.inner.ctx.log.lock().unwrap_or_else(|e| e.into_inner()) = log;
+        self
+    }
+
+    /// Set guest metering (fuel and epoch interruption) for wasm blocks.
+    /// Default: epoch interruption at 10ms, no fuel cap.
+    pub fn with_metering(self, metering: Metering) -> Self {
+        *self
+            .inner
+            .ctx
+            .metering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = metering;
         self
     }
 

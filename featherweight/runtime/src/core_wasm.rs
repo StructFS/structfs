@@ -11,10 +11,12 @@
 //! stateless; the typed error taxonomy crosses as negative status codes.
 
 use structfs_core_store::{Codec, Error as StoreError, Format, Path, Reader, Record, Writer};
+use structfs_handles::CancelToken;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, TypedFunc};
 
 use crate::block::BlockId;
 use crate::error::{Result, RuntimeError};
+use crate::metering::{EpochTicker, Metering};
 
 /// Spec 11 status codes.
 mod status {
@@ -245,23 +247,34 @@ impl CoreWasmBlock {
         Ok(linker)
     }
 
+    #[allow(clippy::type_complexity)]
     fn instantiate<S, C>(
         &self,
         state: CoreState<S, C>,
-    ) -> Result<(Store<CoreState<S, C>>, wasmtime::Instance)>
+        metering: &Metering,
+        cancel: CancelToken,
+    ) -> Result<(
+        Store<CoreState<S, C>>,
+        wasmtime::Instance,
+        Option<EpochTicker>,
+    )>
     where
         S: Reader + Writer + Send + 'static,
         C: Codec + Send + Sync + 'static,
     {
-        let engine = Engine::default();
+        let mut config = wasmtime::Config::new();
+        metering.configure_engine(&mut config);
+        let engine = Engine::new(&config).map_err(|e| RuntimeError::wasm("engine", e))?;
+        let ticker = metering.start_ticker(&engine);
         let module = Module::new(&engine, &self.module_bytes)
             .map_err(|e| RuntimeError::wasm("module", e))?;
         let linker = Self::linker::<S, C>(&engine)?;
         let mut store = Store::new(&engine, state);
+        metering.arm_store(&mut store, cancel)?;
         let instance = linker
             .instantiate(&mut store, &module)
             .map_err(|e| RuntimeError::wasm("instantiate", e))?;
-        Ok((store, instance))
+        Ok((store, instance, ticker))
     }
 
     /// Read the ret record and copy the payload out of guest memory.
@@ -311,6 +324,8 @@ impl CoreWasmBlock {
     }
 
     /// Retrieve the manifest (spec 01), pre-wiring.
+    ///
+    /// Fuel-bounded so a misbehaving manifest cannot hang the loader.
     pub fn manifest(&self) -> Result<Vec<u8>> {
         use structfs_core_store::NoCodec;
         let state = CoreState {
@@ -318,7 +333,12 @@ impl CoreWasmBlock {
             codec: NoCodec,
             format: Format::OCTET_STREAM,
         };
-        let (mut store, instance) = self.instantiate(state)?;
+        let metering = Metering {
+            fuel: Some(10_000_000_000),
+            epoch_interval: None,
+        };
+        let (mut store, instance, _ticker) =
+            self.instantiate(state, &metering, CancelToken::new())?;
         let ret_ptr = Self::alloc_ret(&mut store, &instance)?;
         let manifest = instance
             .get_typed_func::<i32, i32>(&mut store, "manifest")
@@ -339,7 +359,19 @@ impl CoreWasmBlock {
     /// Returns the guest's exit code. Per spec 11 the code is advisory:
     /// a `shutdown/complete {code}` the block wrote takes precedence,
     /// which the runtime enforces when recording the outcome.
-    pub fn run<S, C>(&self, _id: BlockId, root: S, codec: C, format: Format) -> Result<i32>
+    ///
+    /// `cancel` interrupts *guest execution* via epoch interruption (when
+    /// metering enables it); parked store reads are cancelled by the same
+    /// token through the store contract.
+    pub fn run<S, C>(
+        &self,
+        _id: BlockId,
+        root: S,
+        codec: C,
+        format: Format,
+        metering: &Metering,
+        cancel: CancelToken,
+    ) -> Result<i32>
     where
         S: Reader + Writer + Send + 'static,
         C: Codec + Send + Sync + 'static,
@@ -349,12 +381,14 @@ impl CoreWasmBlock {
             codec,
             format,
         };
-        let (mut store, instance) = self.instantiate(state)?;
+        let (mut store, instance, _ticker) = self.instantiate(state, metering, cancel)?;
         let run = instance
             .get_typed_func::<(), i32>(&mut store, "run")
             .map_err(|e| RuntimeError::wasm("run", e))?;
+        // `{:#}` renders the whole cause chain: fuel exhaustion and
+        // shutdown interrupts live below the trap's backtrace header.
         run.call(&mut store, ())
-            .map_err(|e| RuntimeError::wasm("run", e))
+            .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
     }
 }
 
@@ -485,7 +519,14 @@ mod tests {
         let mut store_after = {
             let shared = structfs_core_store::Shared::new(store);
             let code = block
-                .run(BlockId::new(), shared.clone(), JsonCodec, Format::JSON)
+                .run(
+                    BlockId::new(),
+                    shared.clone(),
+                    JsonCodec,
+                    Format::JSON,
+                    &Metering::disabled(),
+                    CancelToken::new(),
+                )
                 .unwrap();
             assert_eq!(code, 0, "guest reported failure");
             shared
@@ -500,9 +541,87 @@ mod tests {
     fn typed_errors_cross_as_status_codes() {
         let block = CoreWasmBlock::new(DENIED_GUEST.as_bytes().to_vec());
         let code = block
-            .run(BlockId::new(), DenyStore, JsonCodec, Format::JSON)
+            .run(
+                BlockId::new(),
+                DenyStore,
+                JsonCodec,
+                Format::JSON,
+                &Metering::disabled(),
+                CancelToken::new(),
+            )
             .unwrap();
         assert_eq!(code, 0, "guest did not observe status -2");
+    }
+
+    /// Spins forever: the metering test subject.
+    const SPIN_GUEST: &str = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "block_alloc") (param i32) (result i32) (i32.const 4096))
+          (data (i32.const 1088) "{\"serialization\":\"application/json\"}")
+          (func (export "manifest") (param $ret i32) (result i32)
+            (i32.store (local.get $ret) (i32.const 1088))
+            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 36))
+            (i32.const 0))
+          (func (export "run") (result i32)
+            (loop $spin (br $spin))
+            (i32.const 0)))
+    "#;
+
+    #[test]
+    fn fuel_cap_stops_a_spinning_guest() {
+        let block = CoreWasmBlock::new(SPIN_GUEST.as_bytes().to_vec());
+        let metering = Metering {
+            fuel: Some(1_000_000),
+            epoch_interval: None,
+        };
+        let err = block
+            .run(
+                BlockId::new(),
+                DenyStore,
+                JsonCodec,
+                Format::JSON,
+                &metering,
+                CancelToken::new(),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("fuel"),
+            "expected fuel exhaustion, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cancellation_interrupts_a_spinning_guest() {
+        let block = std::sync::Arc::new(CoreWasmBlock::new(SPIN_GUEST.as_bytes().to_vec()));
+        let cancel = CancelToken::new();
+        let metering = Metering {
+            fuel: None,
+            epoch_interval: Some(std::time::Duration::from_millis(2)),
+        };
+
+        let runner = {
+            let block = block.clone();
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                block.run(
+                    BlockId::new(),
+                    DenyStore,
+                    JsonCodec,
+                    Format::JSON,
+                    &metering,
+                    cancel,
+                )
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel.cancel();
+
+        let err = runner.join().unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("interrupted"),
+            "expected shutdown interrupt, got: {err}"
+        );
     }
 
     #[test]

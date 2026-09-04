@@ -19,6 +19,8 @@ use wasmtime::{Config, Engine, Store};
 
 use crate::block::BlockId;
 use crate::error::{Result, RuntimeError};
+use crate::metering::Metering;
+use structfs_handles::CancelToken;
 
 // Generate bindings from the canonical Block ABI (single-sourced with
 // the guest; see featherweight/wit/world.wit).
@@ -139,8 +141,14 @@ impl WasmBlock {
     pub fn manifest(&self) -> Result<Vec<u8>> {
         use structfs_core_store::NoCodec;
 
+        // Fuel-bounded so a misbehaving manifest cannot hang the loader.
+        let metering = Metering {
+            fuel: Some(10_000_000_000),
+            epoch_interval: None,
+        };
         let mut config = Config::new();
         config.wasm_component_model(true);
+        metering.configure_engine(&mut config);
         let engine = Engine::new(&config).map_err(|e| {
             RuntimeError::Store(StoreError::store("wasmtime", "engine", e.to_string()))
         })?;
@@ -161,6 +169,7 @@ impl WasmBlock {
 
         let state = WasmBlockState::new(BlockId::new(), NoOpStore, NoCodec, Format::OCTET_STREAM);
         let mut store = Store::new(&engine, state);
+        metering.arm_store(&mut store, CancelToken::new())?;
 
         let instance = BlockWorld::instantiate(&mut store, &component, &linker).map_err(|e| {
             RuntimeError::Store(StoreError::store("wasmtime", "instantiate", e.to_string()))
@@ -184,8 +193,17 @@ impl WasmBlock {
     ///
     /// The runtime wraps `root` in a `CoreToLL` bridge using the provided
     /// `codec` and `format`, so the WASM guest sees raw bytes in the
-    /// declared serialization format.
-    pub fn run<S, C>(&self, id: BlockId, root: S, codec: C, format: Format) -> Result<()>
+    /// declared serialization format. `cancel` interrupts guest execution
+    /// via epoch interruption when metering enables it.
+    pub fn run<S, C>(
+        &self,
+        id: BlockId,
+        root: S,
+        codec: C,
+        format: Format,
+        metering: &Metering,
+        cancel: CancelToken,
+    ) -> Result<()>
     where
         S: Reader + Writer + Send + 'static,
         C: Codec + Send + Sync + 'static,
@@ -193,9 +211,11 @@ impl WasmBlock {
         // Create the Wasmtime engine with component model support
         let mut config = Config::new();
         config.wasm_component_model(true);
+        metering.configure_engine(&mut config);
         let engine = Engine::new(&config).map_err(|e| {
             RuntimeError::Store(StoreError::store("wasmtime", "engine", e.to_string()))
         })?;
+        let _ticker = metering.start_ticker(&engine);
 
         // Create the component from bytes
         let component = Component::new(&engine, &self.component_bytes).map_err(|e| {
@@ -213,6 +233,7 @@ impl WasmBlock {
         // Create the store with our state
         let state = WasmBlockState::new(id, root, codec, format);
         let mut store = Store::new(&engine, state);
+        metering.arm_store(&mut store, cancel)?;
 
         // Instantiate the component
         let instance = BlockWorld::instantiate(&mut store, &component, &linker).map_err(|e| {

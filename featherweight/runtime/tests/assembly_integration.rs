@@ -428,6 +428,51 @@ async fn shell_exercises_the_os_surface() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn immediate_shutdown_kills_a_spinning_wasm_guest() {
+    // A core-binding guest that spins forever after starting. Under the
+    // default metering (10ms epoch interruption) immediate shutdown must
+    // be able to stop it — the gap metering exists to close.
+    const SPIN_WAT: &str = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "block_alloc") (param i32) (result i32) (i32.const 4096))
+          (data (i32.const 1088) "{\"serialization\":\"application/json\"}")
+          (func (export "manifest") (param $ret i32) (result i32)
+            (i32.store (local.get $ret) (i32.const 1088))
+            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 36))
+            (i32.const 0))
+          (func (export "run") (result i32)
+            (loop $spin (br $spin))
+            (i32.const 0)))
+    "#;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("spin.wasm"), SPIN_WAT).unwrap();
+
+    let runtime = runtime();
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "spin", "blocks": {"spin": "spin.wasm"}, "public": "spin"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(assembly.public_cell().state(), BlockState::Running);
+
+    // Graceful can never complete (the guest never reads its mailbox);
+    // shutdown escalates to immediate, which traps the spinning guest.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        assembly.shutdown(Duration::from_millis(200)),
+    )
+    .await
+    .expect("shutdown could not stop the spinning guest");
+    assert!(assembly.public_cell().state().is_terminal());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn yaml_and_json_definitions_are_equivalent() {
     let yaml =
         AssemblyDef::from_str("assembly: same\nblocks:\n  kv: builtin:kv\npublic: kv\n").unwrap();
