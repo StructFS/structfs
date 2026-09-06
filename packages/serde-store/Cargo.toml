@@ -19,6 +19,8 @@ structfs-ll-store = { workspace = true }
 bytes = "1.9"
 serde.workspace = true
 serde_json.workspace = true
+ciborium.workspace = true
+flexbuffers.workspace = true
 thiserror.workspace = true
 base64 = "0.22"
 async-trait = { workspace = true, optional = true }

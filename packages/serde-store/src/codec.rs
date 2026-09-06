@@ -57,6 +57,67 @@ impl Codec for JsonCodec {
     }
 }
 
+/// A codec for CBOR (`Format::CBOR`).
+///
+/// `Value` serializes structurally, so the mapping is natural — and
+/// unlike JSON, `Value::Bytes` crosses as a CBOR byte string and comes
+/// back as `Value::Bytes`, not an array of numbers.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CborCodec;
+
+impl Codec for CborCodec {
+    fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
+        if !self.supports(format) {
+            return Err(Error::UnsupportedFormat(format.clone()));
+        }
+        ciborium::from_reader(bytes.as_ref())
+            .map_err(|e| Error::decode(format.clone(), e.to_string()))
+    }
+
+    fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
+        if !self.supports(format) {
+            return Err(Error::UnsupportedFormat(format.clone()));
+        }
+        let mut buffer = Vec::new();
+        ciborium::into_writer(value, &mut buffer)
+            .map_err(|e| Error::encode(format.clone(), e.to_string()))?;
+        Ok(Bytes::from(buffer))
+    }
+
+    fn supports(&self, format: &Format) -> bool {
+        format == &Format::CBOR
+    }
+}
+
+/// A codec for FlexBuffers (`Format::FLEXBUFFERS`).
+///
+/// Like CBOR, the encoding is self-describing and byte-faithful:
+/// `Value::Bytes` crosses as a blob and round-trips exactly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FlexbuffersCodec;
+
+impl Codec for FlexbuffersCodec {
+    fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
+        if !self.supports(format) {
+            return Err(Error::UnsupportedFormat(format.clone()));
+        }
+        flexbuffers::from_slice(bytes).map_err(|e| Error::decode(format.clone(), e.to_string()))
+    }
+
+    fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
+        if !self.supports(format) {
+            return Err(Error::UnsupportedFormat(format.clone()));
+        }
+        flexbuffers::to_vec(value)
+            .map(Bytes::from)
+            .map_err(|e| Error::encode(format.clone(), e.to_string()))
+    }
+
+    fn supports(&self, format: &Format) -> bool {
+        format == &Format::FLEXBUFFERS
+    }
+}
+
 /// A codec that combines multiple codecs.
 ///
 /// Routes encode/decode to the appropriate codec based on format.
@@ -81,11 +142,21 @@ impl MultiCodec {
         mc.add(JsonCodec);
         mc
     }
+
+    /// The standard transports, all equivalent-tier: JSON, CBOR, and
+    /// FlexBuffers, routed by format.
+    pub fn standard() -> Self {
+        let mut mc = Self::new();
+        mc.add(JsonCodec);
+        mc.add(CborCodec);
+        mc.add(FlexbuffersCodec);
+        mc
+    }
 }
 
 impl Default for MultiCodec {
     fn default() -> Self {
-        Self::with_json()
+        Self::standard()
     }
 }
 
@@ -269,6 +340,99 @@ mod tests {
         let codec = JsonCodec;
         let debug = format!("{:?}", codec);
         assert!(debug.contains("JsonCodec"));
+    }
+
+    fn sample() -> Value {
+        Value::Map(
+            [
+                ("name".to_string(), Value::from("Alice")),
+                ("age".to_string(), Value::Integer(30)),
+                ("score".to_string(), Value::Float(0.5)),
+                ("active".to_string(), Value::Bool(true)),
+                ("note".to_string(), Value::Null),
+                (
+                    "tags".to_string(),
+                    Value::Array(vec![Value::from("a"), Value::Integer(-7)]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    #[test]
+    fn cbor_codec_roundtrip() {
+        let codec = CborCodec;
+        let bytes = codec.encode(&sample(), &Format::CBOR).unwrap();
+        assert_eq!(codec.decode(&bytes, &Format::CBOR).unwrap(), sample());
+    }
+
+    #[test]
+    fn flexbuffers_codec_roundtrip() {
+        let codec = FlexbuffersCodec;
+        let bytes = codec.encode(&sample(), &Format::FLEXBUFFERS).unwrap();
+        assert_eq!(
+            codec.decode(&bytes, &Format::FLEXBUFFERS).unwrap(),
+            sample()
+        );
+    }
+
+    #[test]
+    fn bytes_survive_the_binary_transports() {
+        // The property JSON lacks: Value::Bytes round-trips as bytes,
+        // not as an array of numbers.
+        let value = Value::Map(
+            [("payload".to_string(), Value::Bytes(vec![0, 159, 146, 150]))]
+                .into_iter()
+                .collect(),
+        );
+        for (codec, format) in [
+            (&CborCodec as &dyn Codec, Format::CBOR),
+            (&FlexbuffersCodec as &dyn Codec, Format::FLEXBUFFERS),
+        ] {
+            let bytes = codec.encode(&value, &format).unwrap();
+            assert_eq!(
+                codec.decode(&bytes, &format).unwrap(),
+                value,
+                "bytes mangled by {format}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_codecs_reject_other_formats() {
+        assert!(matches!(
+            CborCodec.encode(&Value::Null, &Format::JSON),
+            Err(Error::UnsupportedFormat(_))
+        ));
+        assert!(matches!(
+            FlexbuffersCodec.decode(&Bytes::from_static(b"x"), &Format::CBOR),
+            Err(Error::UnsupportedFormat(_))
+        ));
+    }
+
+    #[test]
+    fn binary_codecs_report_decode_errors() {
+        let garbage = Bytes::from_static(&[0xff, 0xfe, 0xfd]);
+        assert!(matches!(
+            CborCodec.decode(&garbage, &Format::CBOR),
+            Err(Error::Codec { .. })
+        ));
+        assert!(matches!(
+            FlexbuffersCodec.decode(&Bytes::from_static(&[]), &Format::FLEXBUFFERS),
+            Err(Error::Codec { .. })
+        ));
+    }
+
+    #[test]
+    fn standard_multi_codec_routes_every_transport() {
+        let codec = MultiCodec::standard();
+        for format in [Format::JSON, Format::CBOR, Format::FLEXBUFFERS] {
+            assert!(codec.supports(&format), "missing transport: {format}");
+            let bytes = codec.encode(&sample(), &format).unwrap();
+            assert_eq!(codec.decode(&bytes, &format).unwrap(), sample());
+        }
+        assert!(!codec.supports(&Format::PROTOBUF));
     }
 
     #[test]

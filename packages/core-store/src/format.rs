@@ -28,6 +28,9 @@ impl Format {
     /// CBOR (`application/cbor`)
     pub const CBOR: Format = Format(Cow::Borrowed("application/cbor"));
 
+    /// FlexBuffers (`application/x-flexbuffers`; no registered MIME type)
+    pub const FLEXBUFFERS: Format = Format(Cow::Borrowed("application/x-flexbuffers"));
+
     /// Opaque binary data (`application/octet-stream`)
     pub const OCTET_STREAM: Format = Format(Cow::Borrowed("application/octet-stream"));
 
@@ -173,6 +176,7 @@ mod tests {
         // Cover all constant definitions
         assert_eq!(Format::MSGPACK.as_str(), "application/msgpack");
         assert_eq!(Format::CBOR.as_str(), "application/cbor");
+        assert_eq!(Format::FLEXBUFFERS.as_str(), "application/x-flexbuffers");
         assert_eq!(Format::OCTET_STREAM.as_str(), "application/octet-stream");
         assert_eq!(Format::VALUE.as_str(), "application/x-structfs-value");
     }

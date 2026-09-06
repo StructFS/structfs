@@ -97,7 +97,9 @@ cargo run -p structfs-repl
 - Keep solutions simple and focused - avoid over-engineering
 - Prefer editing existing files over creating new ones
 - Use `thiserror` for error types
-- Use `serde` for serialization with JSON as the primary format
+- Use `serde` for serialization; JSON, CBOR, and FlexBuffers are
+  equivalent-tier transports (`MultiCodec::standard()` in `serde-store`),
+  with JSON the human-facing default
 
 ## Commit Messages
 
