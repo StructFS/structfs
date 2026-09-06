@@ -16,6 +16,11 @@ Given a stream at some handle path `{h}`:
 | `read {h}/len` | Bytes so far | `Integer` |
 | `read {h}/closed` | Terminal state | `Bool` |
 | `write {h}/append` `Bytes` | Append | Returns the write path |
+| `write {h}/at/{offset}` `Bytes` | Positioned write (random-access stores MAY) | Returns the write path |
+
+Random-access stores (files) additionally follow the store conventions:
+a `Null` write to `{h}` deletes it (which is how `O_TRUNC` is
+expressed), and a `Bytes` write to `{h}` replaces its contents.
 
 The `at/{offset}/len/{n}` shape matches the file-handle paths
 `structfs-sys` already serves — one convention for files and streams.

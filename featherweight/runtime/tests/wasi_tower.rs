@@ -10,8 +10,10 @@ use std::time::Duration;
 use featherweight_runtime::{
     register_builtins, AssemblyDef, BlockState, NativeBlock, Runtime, ScriptedStdio, Stdio,
 };
-use featherweight_wasi::{errno, WasiIso, CLOCK_MONOTONIC, CLOCK_REALTIME};
-use structfs_core_store::Error;
+use featherweight_wasi::{
+    errno, MemFiles, OpenFlags, WasiIso, CLOCK_MONOTONIC, CLOCK_REALTIME, SEEK_SET,
+};
+use structfs_core_store::{path, Error};
 
 /// A "POSIX program": knows nothing about StructFS — only the WASI-ish
 /// surface the shim provides.
@@ -40,6 +42,42 @@ fn posix_main(
     let noise = wasi.random_get(8)?;
     wasi.fd_write(1, format!("random: {} bytes\n", noise.len()).as_bytes())?;
 
+    // files: discover the preopen, then a create/write/reopen/read
+    // round trip — every byte moves as byte-stream store traffic.
+    let dirfd = *wasi.preopen_fds().first().ok_or(errno::NOENT)?;
+    let dir = wasi.fd_prestat_dir_name(dirfd)?;
+    let fd = wasi.path_open(
+        dirfd,
+        "out.txt",
+        OpenFlags {
+            write: true,
+            create: true,
+            ..Default::default()
+        },
+    )?;
+    wasi.fd_write(fd, b"file contents")?;
+    wasi.fd_close(fd)?;
+    let fd = wasi.path_open(
+        dirfd,
+        "out.txt",
+        OpenFlags {
+            read: true,
+            ..Default::default()
+        },
+    )?;
+    let size = wasi.fd_filestat_size(fd)?;
+    wasi.fd_seek(fd, 5, SEEK_SET)?;
+    let tail = wasi.fd_read(fd, 64)?;
+    wasi.fd_write(
+        1,
+        format!(
+            "file {dir}/out.txt [{size}]: {}\n",
+            String::from_utf8_lossy(&tail)
+        )
+        .as_bytes(),
+    )?;
+    wasi.fd_close(fd)?;
+
     // cat(1): stdin -> stdout until EOF (read(2) returns 0)
     loop {
         let bytes = wasi.fd_read(0, 64)?;
@@ -57,7 +95,8 @@ struct PosixBlock;
 
 impl NativeBlock for PosixBlock {
     fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
-        let mut wasi = WasiIso::new(&mut *ns);
+        let mut wasi =
+            WasiIso::with_preopens(&mut *ns, vec![("/data".to_string(), path!("files"))]);
         let code = posix_main(&mut wasi).unwrap_or(70);
         wasi.proc_exit(code)
             .map_err(|e| Error::store("posix", "exit", format!("errno {e}")))?;
@@ -84,11 +123,18 @@ async fn posix_program_runs_on_the_iso_surface() {
             "blocks": {"posix": {"artifact": "builtin:posix",
                                  "args": ["prog", "--demo"],
                                  "env": {"HOME": "/blocks"}}},
-            "public": "posix"}"#,
+            "public": "posix",
+            "imports": {"data": "The preopened file tree"},
+            "wiring": ["posix:/files -> $data"]}"#,
     )
     .unwrap();
+    let mut imports = HashMap::new();
+    imports.insert(
+        "data".to_string(),
+        featherweight_runtime::host_store(MemFiles::new()),
+    );
     let assembly = runtime
-        .instantiate(&def, HashMap::new(), std::env::temp_dir().as_path())
+        .instantiate(&def, imports, std::env::temp_dir().as_path())
         .unwrap();
 
     tokio::time::timeout(Duration::from_secs(10), assembly.wait_public_terminal())
@@ -111,6 +157,10 @@ async fn posix_program_runs_on_the_iso_surface() {
     assert!(
         output.contains("random: 8 bytes"),
         "random missing: {output}"
+    );
+    assert!(
+        output.contains("file /data/out.txt [13]: contents\n"),
+        "file round trip missing: {output}"
     );
     assert!(
         output.contains("cat: hello tower\n"),
