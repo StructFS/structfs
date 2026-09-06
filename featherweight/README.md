@@ -81,6 +81,11 @@ read of the returned handle, and kill(2) is a Null write to it.
   kv block; `featherweight/sdk/assemblyscript` is the ~60-line
   AssemblyScript SDK. The `manifest()` export selects the codec before
   the store bridge exists in both bindings
+- **The browser host** (`featherweight/host/browser`): the core binding
+  hosted in dependency-free JavaScript — the same `kv.wasm` runs
+  resident in a Web Worker, its mailbox read parked in `Atomics.wait`
+  (`./scripts/browser_host_test.sh` for the Node tests; `node
+  featherweight/host/browser/serve.mjs` for the live demo)
 - **The WASI tower** (spec 10): the runtime has no WASI dependency —
   WASI is a shim over the Block ABI. `featherweight-wasi` implements the
   syscall core (args/environ/clocks/random/stdio/exit/errno) generically

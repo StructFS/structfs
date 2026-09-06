@@ -122,6 +122,11 @@ remains preferable where wasip2 composition or wit-bindgen coverage is
 wanted; this binding is preferable everywhere an SDK author starts from
 scratch — which is the case this binding exists for.
 
+Reference hosts: `featherweight/runtime/src/core_wasm.rs` (wasmtime)
+and `featherweight/host/browser` (dependency-free JavaScript, browser
+and Node) — the same guest binaries run under both, which is the
+host-neutrality this binding claims, demonstrated.
+
 ## Reference SDK sketch (AssemblyScript)
 
 ```ts

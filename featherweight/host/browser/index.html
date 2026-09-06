@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>featherweight browser host</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-width: 42rem; margin: 3rem auto; padding: 0 1rem;
+  }
+  h1 { font-size: 1.1rem; }
+  fieldset { border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+             margin-bottom: 1rem; }
+  input { font: inherit; width: 10rem; }
+  input#value { width: 16rem; }
+  button { font: inherit; }
+  #log { white-space: pre-wrap; border-top: 1px solid
+         color-mix(in srgb, currentColor 30%, transparent); padding-top: .5rem; }
+  .err { color: #c33; }
+</style>
+</head>
+<body>
+<h1>featherweight browser host — wasm-kv, resident</h1>
+<p>The kv block below is the same <code>kv.wasm</code> the native
+runtime executes: a core-binding guest (spec 11) parked on its mailbox
+in a worker, every interaction a server-protocol request (spec 07).</p>
+
+<fieldset>
+  <legend>kv</legend>
+  <label>key <input id="key" value="greeting"></label>
+  <label>value (JSON) <input id="value" value='"hello"'></label>
+  <button id="set">write</button>
+  <button id="get">read</button>
+  <button id="del">delete</button>
+  <button id="stop">shutdown</button>
+</fieldset>
+
+<div id="log"></div>
+
+<script type="module">
+import { WorkerHost } from "./worker-host.mjs";
+
+const log = (text, cls = "") => {
+  const line = document.createElement("div");
+  line.textContent = text;
+  if (cls) line.className = cls;
+  document.getElementById("log").prepend(line);
+};
+
+if (!crossOriginIsolated) {
+  log("SharedArrayBuffer needs COOP/COEP headers — serve this page " +
+      "with `node serve.mjs`.", "err");
+}
+
+const wasm = await (await fetch("./kv.wasm")).arrayBuffer();
+const host = await WorkerHost.start({
+  createWorker: () => new Worker(new URL("./worker.mjs", import.meta.url),
+                                 { type: "module" }),
+  wasm,
+  onStdio: (stream, text) => log(`[${stream}] ${text}`),
+  onLog: (level, value) => log(`[log/${level}] ${JSON.stringify(value)}`),
+});
+log(`block resident: ${JSON.stringify(host.manifest)}`);
+
+const key = () => document.getElementById("key").value;
+const act = async (op, data) => {
+  try {
+    const response = await host.request(op, key(), data);
+    log(`${op} ${key()} -> ${JSON.stringify(response)}`);
+  } catch (error) {
+    log(String(error), "err");
+  }
+};
+
+document.getElementById("set").onclick = () => {
+  try { act("write", JSON.parse(document.getElementById("value").value)); }
+  catch { log("value is not valid JSON", "err"); }
+};
+document.getElementById("get").onclick = () => act("read");
+document.getElementById("del").onclick = () => act("write");
+document.getElementById("stop").onclick = async () =>
+  log(`guest exited with code ${await host.shutdown()}`);
+</script>
+</body>
+</html>
