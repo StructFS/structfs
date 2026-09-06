@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use structfs_core_store::{Error, Format, MemoryStore, Path, ReadOnly, Value};
-use structfs_serde_store::JsonCodec;
+use structfs_serde_store::MultiCodec;
 
 use crate::assembly::{AssemblyDef, WireTarget};
 use crate::block::{BlockCell, BlockId, BlockState, ShutdownMode};
@@ -223,7 +223,7 @@ impl RtCtx {
                             .run(
                                 block.cell.id.clone(),
                                 namespace,
-                                JsonCodec,
+                                MultiCodec::standard(),
                                 format.clone(),
                                 &metering,
                                 cancel,
@@ -233,7 +233,7 @@ impl RtCtx {
                             .run(
                                 block.cell.id.clone(),
                                 namespace,
-                                JsonCodec,
+                                MultiCodec::standard(),
                                 format.clone(),
                                 &metering,
                                 cancel,
@@ -692,10 +692,47 @@ fn wasm_format(manifest_bytes: &[u8], declared: &str) -> Result<Format> {
         .get("serialization")
         .and_then(|v| v.as_str())
         .unwrap_or(declared);
-    if serialization != "application/json" {
-        return Err(RuntimeError::Manifest(format!(
-            "unsupported serialization '{serialization}' (strawman supports application/json)"
-        )));
+    match serialization {
+        "application/json" => Ok(Format::JSON),
+        "application/cbor" => Ok(Format::CBOR),
+        "application/x-flexbuffers" => Ok(Format::FLEXBUFFERS),
+        other => Err(RuntimeError::Manifest(format!(
+            "unsupported serialization '{other}' (supported: application/json, \
+             application/cbor, application/x-flexbuffers)"
+        ))),
     }
-    Ok(Format::JSON)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_format_accepts_every_transport() {
+        for (declared, expected) in [
+            ("application/json", Format::JSON),
+            ("application/cbor", Format::CBOR),
+            ("application/x-flexbuffers", Format::FLEXBUFFERS),
+        ] {
+            let manifest = format!(r#"{{"serialization": "{declared}"}}"#);
+            assert_eq!(
+                wasm_format(manifest.as_bytes(), "application/json").unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_format_falls_back_to_the_declaration() {
+        assert_eq!(
+            wasm_format(b"{}", "application/cbor").unwrap(),
+            Format::CBOR
+        );
+    }
+
+    #[test]
+    fn wasm_format_rejects_unknown_transports() {
+        let err = wasm_format(br#"{"serialization": "application/protobuf"}"#, "x").unwrap_err();
+        assert!(err.to_string().contains("unsupported serialization"));
+    }
 }

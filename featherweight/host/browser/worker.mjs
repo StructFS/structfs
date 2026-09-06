@@ -44,7 +44,14 @@ onMessage(async ({ wasm, sab, args, env }) => {
     });
 
     const guest = await instantiate(wasm, iso);
-    post({ type: "ready", manifest: guest.manifest() });
+    const manifest = guest.manifest();
+    const serialization = manifest.serialization ?? "application/json";
+    if (serialization !== "application/json") {
+      throw new Error(
+        `this host speaks application/json; the guest declares ${serialization}`,
+      );
+    }
+    post({ type: "ready", manifest });
     const code = guest.run();
     post({ type: "exit", code, shutdownComplete: iso.shutdownComplete });
   } catch (error) {

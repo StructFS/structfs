@@ -473,6 +473,60 @@ async fn immediate_shutdown_kills_a_spinning_wasm_guest() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_block_declaring_cbor_runs_end_to_end() {
+    // The manifest declares application/cbor; the runtime must select
+    // the CBOR codec for the whole boundary. The guest writes the CBOR
+    // empty map (0xa0) to iso/shutdown/complete — one byte that only
+    // decodes under the right transport.
+    const CBOR_WAT: &str = r#"
+        (module
+          (import "structfs" "write"
+            (func $write (param i32 i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (global $bump (mut i32) (i32.const 4096))
+          (func (export "block_alloc") (param $len i32) (result i32)
+            (local $ptr i32)
+            (local.set $ptr (global.get $bump))
+            (global.set $bump (i32.add (global.get $bump) (local.get $len)))
+            (local.get $ptr))
+          (data (i32.const 1040) "iso/shutdown/complete")
+          (data (i32.const 1064) "\a0")
+          (data (i32.const 1088) "{\"serialization\":\"application/cbor\"}")
+          (func (export "manifest") (param $ret i32) (result i32)
+            (i32.store (local.get $ret) (i32.const 1088))
+            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 36))
+            (i32.const 0))
+          (func (export "run") (result i32)
+            (if (i32.ne
+                  (call $write (i32.const 1040) (i32.const 21)
+                    (i32.const 1064) (i32.const 1) (i32.const 1024))
+                  (i32.const 0))
+              (then (return (i32.const 1))))
+            (i32.const 0)))
+    "#;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cbor.wasm"), CBOR_WAT).unwrap();
+
+    let runtime = runtime();
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "cbor", "blocks": {"cbor": "cbor.wasm"}, "public": "cbor"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), assembly.wait_public_terminal())
+        .await
+        .expect("cbor block did not finish");
+    assert_eq!(assembly.public_cell().state(), BlockState::Stopped);
+    assert_eq!(assembly.public_cell().exit_code(), 0);
+
+    assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn yaml_and_json_definitions_are_equivalent() {
     let yaml =
         AssemblyDef::from_str("assembly: same\nblocks:\n  kv: builtin:kv\npublic: kv\n").unwrap();

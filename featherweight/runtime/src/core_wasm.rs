@@ -538,6 +538,45 @@ mod tests {
     }
 
     #[test]
+    fn every_transport_crosses_the_boundary() {
+        use structfs_serde_store::MultiCodec;
+
+        // The echo guest moves the payload bytes verbatim, so a
+        // round trip proves host encode -> guest -> host decode for
+        // each transport. The binary transports carry Value::Bytes
+        // faithfully — the JSON tier cannot.
+        let cases = [
+            (Format::JSON, Value::from("hello over json")),
+            (Format::CBOR, Value::Bytes(vec![0, 159, 146, 150])),
+            (Format::FLEXBUFFERS, Value::Bytes(vec![255, 0, 7])),
+        ];
+        for (format, value) in cases {
+            let mut store = MemoryStore::new();
+            store
+                .write(&path!("input"), Record::parsed(value.clone()))
+                .unwrap();
+
+            let block = CoreWasmBlock::new(ECHO_GUEST.as_bytes().to_vec());
+            let shared = structfs_core_store::Shared::new(store);
+            let code = block
+                .run(
+                    BlockId::new(),
+                    shared.clone(),
+                    MultiCodec::standard(),
+                    format.clone(),
+                    &Metering::disabled(),
+                    CancelToken::new(),
+                )
+                .unwrap();
+            assert_eq!(code, 0, "guest reported failure under {format}");
+
+            let mut after = shared.clone();
+            let output = after.read(&path!("output")).unwrap().unwrap();
+            assert_eq!(output.as_value(), Some(&value), "mangled by {format}");
+        }
+    }
+
+    #[test]
     fn typed_errors_cross_as_status_codes() {
         let block = CoreWasmBlock::new(DENIED_GUEST.as_bytes().to_vec());
         let code = block

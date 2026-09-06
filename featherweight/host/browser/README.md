@@ -58,3 +58,7 @@ store.write(path, value) // -> result path (a string)
 Paths cross as strings, payloads as JSON (the manifest's declared
 serialization). `RawJson` wraps pre-serialized text for values
 JavaScript numbers would mangle (nanosecond timestamps).
+
+This host speaks `application/json` only; guests declaring another
+transport (the native runtime also supports CBOR and FlexBuffers) are
+rejected at startup rather than silently mis-decoded.

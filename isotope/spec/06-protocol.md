@@ -114,9 +114,10 @@ blocks:
 Common formats:
 
 - `application/json` — JSON encoding
+- `application/cbor` — CBOR encoding
+- `application/x-flexbuffers` — FlexBuffers encoding
 - `application/protobuf` — Protocol Buffers encoding
 - `application/msgpack` — MessagePack encoding
-- `application/cbor` — CBOR encoding
 
 The runtime uses this declaration to encode all Values delivered to the Block
 and decode all Values the Block writes. The Block sees only bytes in its

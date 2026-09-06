@@ -95,6 +95,9 @@ read of the returned handle, and kill(2) is a Null write to it.
 ## Strawman limits
 
 Documented in `docs/plans/2026-09-03-handles-and-featherweight.md`:
-JSON serialization only, no hash verification or registries, no
-`extends`, no restart policy, no deadlock detection, and the shell talks
-to the terminal directly (the store model has no tty story yet).
+no hash verification or registries, no `extends`, no restart policy, no
+deadlock detection, and the shell talks to the terminal directly (the
+store model has no tty story yet). Blocks declare their transport in
+the manifest — JSON, CBOR, and FlexBuffers are supported equivalently
+(`MultiCodec::standard()`); cross-format translation between blocks is
+untested, and the browser host speaks JSON only.
