@@ -121,6 +121,26 @@ fn parse_path(bytes: &[u8]) -> std::result::Result<Path, String> {
     Path::parse(text).map_err(|e| e.to_string())
 }
 
+/// A no-op store for use during manifest retrieval.
+///
+/// Returns `None` for all reads and echoes the path back for writes.
+/// The guest's `manifest()` function should not need store access.
+/// Public for binding adapters, which face the same bootstrap: the
+/// manifest is retrieved before any store bridge exists.
+pub struct NoOpStore;
+
+impl Reader for NoOpStore {
+    fn read(&mut self, _path: &Path) -> std::result::Result<Option<Record>, StoreError> {
+        Ok(None)
+    }
+}
+
+impl Writer for NoOpStore {
+    fn write(&mut self, path: &Path, _record: Record) -> std::result::Result<Path, StoreError> {
+        Ok(path.clone())
+    }
+}
+
 /// A block in the core-wasm binding.
 pub struct CoreWasmBlock {
     module_bytes: Vec<u8>,
@@ -329,7 +349,7 @@ impl CoreWasmBlock {
     pub fn manifest(&self) -> Result<Vec<u8>> {
         use structfs_core_store::NoCodec;
         let state = CoreState {
-            store: crate::wasm_block::NoOpStore,
+            store: NoOpStore,
             codec: NoCodec,
             format: Format::OCTET_STREAM,
         };
@@ -660,6 +680,22 @@ mod tests {
         assert!(
             err.to_string().contains("interrupted"),
             "expected shutdown interrupt, got: {err}"
+        );
+    }
+
+    #[test]
+    fn no_op_store_read_returns_none() {
+        let mut store = NoOpStore;
+        assert!(store.read(&path!("some/path")).unwrap().is_none());
+    }
+
+    #[test]
+    fn no_op_store_write_echoes_path() {
+        let mut store = NoOpStore;
+        let record = Record::raw(bytes::Bytes::from_static(b"data"), Format::OCTET_STREAM);
+        assert_eq!(
+            store.write(&path!("some/path"), record).unwrap(),
+            path!("some/path")
         );
     }
 

@@ -13,7 +13,15 @@ structfs-serde-store = { workspace = true }
 structfs-handles = { workspace = true }
 bytes = "1.9"
 
-wasmtime = { workspace = true, features = ["component-model"] }
+# Minimal engine: the core runtime speaks only the core-wasm binding
+# (spec 11). No component-model — the WIT adapter (featherweight-component)
+# brings that with its own wasmtime features.
+wasmtime = { workspace = true, default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "parallel-compilation",
+    "wat",
+] }
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

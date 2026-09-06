@@ -3,9 +3,11 @@
 //! A strawman Isotope runtime (`isotope/spec/`): blocks are pico-processes
 //! whose entire world is StructFS reads and writes.
 //!
-//! - **Blocks** run native Rust ([`NativeBlock`]) or wasm components
-//!   ([`WasmBlock`]) on blocking threads, against a per-block
-//!   [`Namespace`].
+//! - **Blocks** run native Rust ([`NativeBlock`]) or core-binding wasm
+//!   ([`CoreWasmBlock`]) on blocking threads, against a per-block
+//!   [`Namespace`]. Other artifact kinds (e.g. WIT components via the
+//!   `featherweight-component` adapter) register through
+//!   [`Runtime::register_loader`].
 //! - **`/iso/`** ([`IsoSurface`]) is the syscall surface: identity,
 //!   lifecycle, time, randomness, logging, and the server protocol.
 //! - **The server protocol** ([`protocol`]) makes every block a store:
@@ -59,19 +61,17 @@ pub mod protocol;
 mod runtime;
 pub mod spawn;
 pub mod stdio;
-pub mod wasm_block;
 
 pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
 pub use block::{
     BlockCell, BlockEvent, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode,
 };
-pub use core_wasm::CoreWasmBlock;
+pub use core_wasm::{CoreWasmBlock, NoOpStore};
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use metering::Metering;
 pub use namespace::{host_store, GrantStore, HostStore, Namespace, Target, WiringTable};
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
-pub use runtime::{AssemblyInstance, Runtime, StdioProvider};
+pub use runtime::{ArtifactLoader, AssemblyInstance, Runtime, StdioProvider, WasmBlockDriver};
 pub use spawn::{ProcStore, SpawnProtocol};
 pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
-pub use wasm_block::WasmBlock;

@@ -71,16 +71,19 @@ read of the returned handle, and kill(2) is a Null write to it.
   no separate management API
 - **Capability discipline**: unwired paths are denied (reads and writes
   alike); filesystem/network access is granted by wiring, never ambient
-- **Wasm blocks, two bindings**: the **core-wasm binding** (spec 11) —
-  two imports in the `structfs` module, no bindgen or component tooling,
-  plain `cargo build --target wasm32-unknown-unknown` output runs
-  directly (`./scripts/run_wasm_block.sh` for the live demo; hand-written
-  wat guests in the tests) — and the **component binding** (the WIT at
-  `featherweight/wit/world.wit`), selected automatically by artifact
-  sniffing. `featherweight/guest` is the Rust core-binding SDK + reference
-  kv block; `featherweight/sdk/assemblyscript` is the ~60-line
+- **Wasm blocks**: the core runtime speaks exactly one wasm binding —
+  the **core-wasm binding** (spec 11): two imports in the `structfs`
+  module, no bindgen or component tooling, plain `cargo build --target
+  wasm32-unknown-unknown` output runs directly
+  (`./scripts/run_wasm_block.sh` for the live demo; hand-written wat
+  guests in the tests). Other bindings are **adapters** registered via
+  `Runtime::register_loader`: `featherweight-component` teaches the
+  runtime to run WIT component-model artifacts as blocks (the `fw` CLI
+  registers it; the core has zero idea what WIT is).
+  `featherweight/guest` is the Rust core-binding SDK + reference kv
+  block; `featherweight/sdk/assemblyscript` is the ~60-line
   AssemblyScript SDK. The `manifest()` export selects the codec before
-  the store bridge exists in both bindings
+  the store bridge exists in every binding
 - **The browser host** (`featherweight/host/browser`): the core binding
   hosted in dependency-free JavaScript — the same `kv.wasm` runs
   resident in a Web Worker, its mailbox read parked in `Atomics.wait`

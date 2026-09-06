@@ -60,10 +60,12 @@ isotope/              # The Isotope virtual-OS specification
 - **Isotope runtime** (`featherweight/`): blocks serve stores via the
   server protocol (requests read from `iso/server/requests`), assemblies
   wire per-block capability namespaces, `fw shell` runs the demo. The
-  Block ABI is a semantic contract (spec 10) with two wasm bindings:
-  core-wasm (spec 11, module `structfs`, no tooling — the SDK binding)
-  and the WIT component binding (`featherweight/wit/world.wit`); WASI is
-  a shim above the ABI (`featherweight-wasi`), never a runtime dep
+  Block ABI is a semantic contract (spec 10); the runtime core speaks
+  only the core-wasm binding (spec 11, module `structfs`, no tooling —
+  the SDK binding). Other bindings are adapters via
+  `Runtime::register_loader`: `featherweight-component` runs WIT
+  component artifacts (the core has no WIT knowledge); WASI is a shim
+  above the ABI (`featherweight-wasi`), never a runtime dep
 - **Async**: `AsyncReader`/`AsyncWriter` (borrowed futures) plus
   `DetachedReader`/`DetachedWriter` (futures that don't borrow the store,
   for concurrent in-flight operations)

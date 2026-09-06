@@ -89,6 +89,9 @@ fn main() {
         .expect("tokio runtime");
     let mut runtime = Runtime::with_handle(rt.handle().clone());
     register_builtins(&mut runtime);
+    // The WIT component binding is an adapter, not a core concern: the
+    // CLI opts in so component artifacts run alongside core modules.
+    featherweight_component::register(&mut runtime);
 
     let assembly = match runtime.instantiate(&def, HashMap::new(), &base_dir) {
         Ok(assembly) => assembly,

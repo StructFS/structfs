@@ -115,12 +115,14 @@ them.)
 ## Relation to the other bindings
 
 Identical semantics to the native trait binding and the component
-binding (spec 10 lists all four); hosts SHOULD implement core-module
-and component loading side by side and select by artifact inspection
-(a component's layer field distinguishes it). The component binding
-remains preferable where wasip2 composition or wit-bindgen coverage is
-wanted; this binding is preferable everywhere an SDK author starts from
-scratch — which is the case this binding exists for.
+binding (spec 10 lists all four). This is the one wasm binding a
+runtime core implements; other bindings attach as artifact-loader
+adapters that recognize their own artifact kind (a component's layer
+field distinguishes it) — the core never learns their tooling. The
+component binding remains preferable where wasip2 composition or
+wit-bindgen coverage is wanted; this binding is preferable everywhere
+an SDK author starts from scratch — which is the case this binding
+exists for.
 
 Reference hosts: `featherweight/runtime/src/core_wasm.rs` (wasmtime)
 and `featherweight/host/browser` (dependency-free JavaScript, browser

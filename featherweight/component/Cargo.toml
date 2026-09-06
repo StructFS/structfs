@@ -1,0 +1,19 @@
+[package]
+name = "featherweight-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WIT component-model binding adapter: run wasm components as Isotope blocks"
+
+[dependencies]
+featherweight-runtime = { version = "0.1.0", path = "../runtime" }
+structfs-core-store = { workspace = true }
+structfs-ll-store = { workspace = true }
+structfs-serde-store = { workspace = true }
+structfs-handles = { workspace = true }
+bytes = "1.9"
+wasmtime = { workspace = true, features = ["component-model"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

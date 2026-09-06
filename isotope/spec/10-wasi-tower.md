@@ -45,9 +45,13 @@ definition:
    buffers — the SDK binding, the swizzle target for preview1 binaries,
    the browser binding, and the compatibility point for hand-ABI hosts.
    Statefulness (parked results, call ordering) is prohibited.
-3. **Component model**: the WIT world in `featherweight/wit/world.wit`,
-   derived from this contract — kept for wasip2/0.3 composition and
-   wit-bindgen language coverage, not as the source of truth.
+3. **Component model**: the WIT world in
+   `featherweight/component/wit/world.wit`, derived from this contract —
+   kept for wasip2/0.3 composition and wit-bindgen language coverage,
+   not as the source of truth. Adapter-tier: a runtime core implements
+   the core-wasm binding and knows nothing of WIT; component support
+   plugs in as an artifact-loader adapter
+   (`featherweight-component`).
 4. **Wire**: network transports carrying the same operations (e.g. the
    CBOR transport lineage).
 

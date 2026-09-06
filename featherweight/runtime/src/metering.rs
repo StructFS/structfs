@@ -52,8 +52,9 @@ impl Metering {
         }
     }
 
-    /// Apply engine-level settings.
-    pub(crate) fn configure_engine(&self, config: &mut wasmtime::Config) {
+    /// Apply engine-level settings. Public for binding adapters, which
+    /// build their own engines but must meter guests identically.
+    pub fn configure_engine(&self, config: &mut wasmtime::Config) {
         if self.fuel.is_some() {
             config.consume_fuel(true);
         }
@@ -64,7 +65,7 @@ impl Metering {
 
     /// Arm a store: fuel budget, and an epoch deadline whose callback
     /// traps the guest once `cancel` fires.
-    pub(crate) fn arm_store<T>(
+    pub fn arm_store<T>(
         &self,
         store: &mut wasmtime::Store<T>,
         cancel: CancelToken,
@@ -91,7 +92,7 @@ impl Metering {
 
     /// Start the epoch ticker for an engine, if interruption is enabled.
     /// The ticker stops when the returned guard drops.
-    pub(crate) fn start_ticker(&self, engine: &wasmtime::Engine) -> Option<EpochTicker> {
+    pub fn start_ticker(&self, engine: &wasmtime::Engine) -> Option<EpochTicker> {
         let interval = self.epoch_interval?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
@@ -110,7 +111,7 @@ impl Metering {
 }
 
 /// Stops the epoch ticker thread on drop.
-pub(crate) struct EpochTicker {
+pub struct EpochTicker {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }

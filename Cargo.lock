@@ -775,8 +775,23 @@ dependencies = [
 name = "featherweight"
 version = "0.1.0"
 dependencies = [
+ "featherweight-component",
  "featherweight-runtime",
  "tokio",
+]
+
+[[package]]
+name = "featherweight-component"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "featherweight-runtime",
+ "structfs-core-store",
+ "structfs-handles",
+ "structfs-ll-store",
+ "structfs-serde-store",
+ "tempfile",
+ "wasmtime",
 ]
 
 [[package]]

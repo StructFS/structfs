@@ -12,4 +12,5 @@ path = "src/main.rs"
 
 [dependencies]
 featherweight-runtime = { version = "0.1.0", path = "runtime" }
+featherweight-component = { version = "0.1.0", path = "component" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

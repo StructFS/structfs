@@ -19,30 +19,79 @@ use crate::native::NativeBlockFactory;
 use crate::protocol::{decode_read_response, decode_write_response};
 use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
-use crate::wasm_block::WasmBlock;
+use structfs_handles::CancelToken;
 
-/// A wasm artifact in either binding of the Block ABI: a component
-/// (spec 10's component binding) or a plain core module (spec 11).
-pub(crate) enum WasmArtifact {
-    Component(WasmBlock),
-    Core(CoreWasmBlock),
+/// A loaded wasm artifact in some binding of the Block ABI: it serves
+/// its manifest pre-wiring and runs over the block's namespace.
+///
+/// Binding adapters implement this to teach the runtime new artifact
+/// kinds; the core knows only the Block ABI (spec 10) and its own
+/// core-wasm binding (spec 11) — everything else registers through
+/// [`Runtime::register_loader`].
+pub trait WasmBlockDriver: Send + Sync {
+    /// The block's JSON manifest (spec 01), retrieved pre-wiring.
+    fn manifest(&self) -> Result<Vec<u8>>;
+
+    /// Run the block over its namespace in the declared format; returns
+    /// the guest's exit code. The code is advisory per spec 11 — a
+    /// `shutdown/complete` the block wrote takes precedence.
+    fn run(
+        &self,
+        id: BlockId,
+        namespace: Namespace,
+        format: Format,
+        metering: &Metering,
+        cancel: CancelToken,
+    ) -> Result<i32>;
 }
 
-impl WasmArtifact {
-    fn from_file(path: &std::path::Path) -> Result<Self> {
-        let bytes = std::fs::read(path)?;
-        Ok(if is_component(&bytes) {
-            WasmArtifact::Component(WasmBlock::new(bytes))
-        } else {
-            WasmArtifact::Core(CoreWasmBlock::new(bytes))
-        })
+/// Recognizes and loads wasm artifacts for one binding of the Block ABI.
+pub trait ArtifactLoader: Send + Sync {
+    /// Whether these artifact bytes belong to this loader's binding.
+    fn matches(&self, bytes: &[u8]) -> bool;
+
+    /// Load the artifact into a runnable driver.
+    fn load(&self, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>>;
+}
+
+/// The built-in loader: the core-wasm binding (spec 11). Claims any
+/// artifact that is not a wasm component (core modules, and wat text in
+/// tests) and runs it over the standard transports.
+struct CoreWasmLoader;
+
+impl ArtifactLoader for CoreWasmLoader {
+    fn matches(&self, bytes: &[u8]) -> bool {
+        !is_component(bytes)
     }
 
+    fn load(&self, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
+        Ok(Arc::new(CoreWasmDriver(CoreWasmBlock::new(bytes))))
+    }
+}
+
+struct CoreWasmDriver(CoreWasmBlock);
+
+impl WasmBlockDriver for CoreWasmDriver {
     fn manifest(&self) -> Result<Vec<u8>> {
-        match self {
-            WasmArtifact::Component(wasm) => wasm.manifest(),
-            WasmArtifact::Core(wasm) => wasm.manifest(),
-        }
+        self.0.manifest()
+    }
+
+    fn run(
+        &self,
+        id: BlockId,
+        namespace: Namespace,
+        format: Format,
+        metering: &Metering,
+        cancel: CancelToken,
+    ) -> Result<i32> {
+        self.0.run(
+            id,
+            namespace,
+            MultiCodec::standard(),
+            format,
+            metering,
+            cancel,
+        )
     }
 }
 
@@ -51,7 +100,7 @@ pub(crate) enum Driver {
     /// A native Rust block from the builtin registry.
     Native(Arc<dyn NativeBlockFactory>),
     /// A wasm artifact, with its declared serialization format.
-    Wasm(Arc<WasmArtifact>, Format),
+    Wasm(Arc<dyn WasmBlockDriver>, Format),
 }
 
 /// Everything the runtime knows about one startable block.
@@ -211,43 +260,30 @@ impl RtCtx {
                     let mut native = factory.create();
                     native.run(&mut namespace).map_err(|e| e.to_string())
                 }
-                Driver::Wasm(artifact, format) => {
+                Driver::Wasm(driver, format) => {
                     let metering = ctx
                         .metering
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
                     let cancel = block.cell.cancel.clone();
-                    match artifact.as_ref() {
-                        WasmArtifact::Component(wasm) => wasm
-                            .run(
-                                block.cell.id.clone(),
-                                namespace,
-                                MultiCodec::standard(),
-                                format.clone(),
-                                &metering,
-                                cancel,
-                            )
-                            .map_err(|e| e.to_string()),
-                        WasmArtifact::Core(wasm) => wasm
-                            .run(
-                                block.cell.id.clone(),
-                                namespace,
-                                MultiCodec::standard(),
-                                format.clone(),
-                                &metering,
-                                cancel,
-                            )
-                            .map_err(|e| e.to_string())
-                            .map(|code| {
-                                // Spec 11: run's return value is the exit
-                                // code, unless the block already declared
-                                // one via shutdown/complete.
-                                if code != 0 && !block.cell.shutdown_complete() {
-                                    block.cell.mark_shutdown_complete(code as i64);
-                                }
-                            }),
-                    }
+                    driver
+                        .run(
+                            block.cell.id.clone(),
+                            namespace,
+                            format.clone(),
+                            &metering,
+                            cancel,
+                        )
+                        .map_err(|e| e.to_string())
+                        .map(|code| {
+                            // Spec 11: run's return value is the exit
+                            // code, unless the block already declared
+                            // one via shutdown/complete.
+                            if code != 0 && !block.cell.shutdown_complete() {
+                                block.cell.mark_shutdown_complete(code as i64);
+                            }
+                        })
                 }
             };
             finalize(&block, result);
@@ -414,6 +450,7 @@ impl AssemblyInstance {
 pub struct RuntimeInner {
     ctx: Arc<RtCtx>,
     builtins: Mutex<HashMap<String, Arc<dyn NativeBlockFactory>>>,
+    loaders: Mutex<Vec<Arc<dyn ArtifactLoader>>>,
 }
 
 impl RuntimeInner {
@@ -426,6 +463,20 @@ impl RuntimeInner {
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, Arc<dyn NativeBlockFactory>>> {
         self.builtins.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Load a wasm artifact through the registered binding loaders.
+    fn load_artifact(&self, artifact: &str, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
+        let loaders = self.loaders.lock().unwrap_or_else(|e| e.into_inner());
+        for loader in loaders.iter() {
+            if loader.matches(&bytes) {
+                return loader.load(bytes);
+            }
+        }
+        Err(RuntimeError::assembly(format!(
+            "no registered artifact loader recognizes '{artifact}' \
+             (adapters add bindings via Runtime::register_loader)"
+        )))
     }
 
     /// Instantiate an assembly definition. See [`Runtime::instantiate`].
@@ -462,13 +513,13 @@ impl RuntimeInner {
                 drivers.insert(name.clone(), Driver::Native(factory));
             } else if artifact.ends_with(".wasm") {
                 let path = base_dir.join(artifact);
-                let wasm = WasmArtifact::from_file(&path)?;
-                let format = wasm_format(&wasm.manifest()?, block_def.serialization.as_str())?;
+                let driver = self.load_artifact(artifact, std::fs::read(&path)?)?;
+                let format = wasm_format(&driver.manifest()?, block_def.serialization.as_str())?;
                 cells.insert(
                     name.clone(),
                     Arc::new(BlockCell::new(name.clone(), def.failure_policy(name))),
                 );
-                drivers.insert(name.clone(), Driver::Wasm(Arc::new(wasm), format));
+                drivers.insert(name.clone(), Driver::Wasm(driver, format));
             } else if artifact.ends_with(".json")
                 || artifact.ends_with(".yaml")
                 || artifact.ends_with(".yml")
@@ -584,6 +635,7 @@ impl Runtime {
                 runtime: weak.clone(),
             }),
             builtins: Mutex::new(HashMap::new()),
+            loaders: Mutex::new(vec![Arc::new(CoreWasmLoader)]),
         });
         Self { inner }
     }
@@ -630,6 +682,17 @@ impl Runtime {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = provider;
         self
+    }
+
+    /// Register a binding adapter's artifact loader. Registered loaders
+    /// are consulted before the built-in core-wasm loader, in
+    /// registration order.
+    pub fn register_loader(&mut self, loader: Arc<dyn ArtifactLoader>) {
+        self.inner
+            .loaders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(0, loader);
     }
 
     /// Register a native block under `builtin:{name}`.
