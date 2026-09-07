@@ -65,6 +65,25 @@ title: The Model
 </section>
 
 <section class="concept-section">
+  <h2 id="store-conventions">Store conventions</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Four rules give every tree the same feel, no matter what's behind it.</p>
+    <p class="concept-detail">The interface says nothing about what paths mean. These conventions do, and every conforming store follows them:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">read</span> /users <span class="ex-result">→ {"alice": {...}, "bob": {...}}</span> <span class="ex-result" style="margin-left: 1rem;">a prefix reads as a map of its children</span><br>
+    <span class="ex-prompt">write</span> /users/alice null <span class="ex-result" style="margin-left: 1rem;">writing Null deletes the subtree</span><br>
+    <span class="ex-prompt">write</span> /users {"carol": {...}} <span class="ex-result" style="margin-left: 1rem;">writing a map replaces the subtree</span><br>
+    <span class="ex-prompt">write</span> /a/b/c/d 42 <span class="ex-result" style="margin-left: 1rem;">deep writes create intermediates</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">No DELETE verb because Null is the delete. No MKDIR because intermediates appear on demand. No LIST because reading a prefix <em>is</em> listing (stores can also enumerate child names directly, without materializing values). The conventions are certified by a conformance suite, so "conforming store" is a testable claim, not a vibe.</p>
+  </div>
+</section>
+
+<section class="concept-section">
   <h2 id="write-returns-a-path">Write returns a path</h2>
   <div class="concept-prose">
     <p class="concept-lead">This is the mechanism that makes two operations sufficient for complex systems.</p>
@@ -86,11 +105,39 @@ title: The Model
 </section>
 
 <section class="concept-section">
+  <h2 id="typed-errors">Typed errors</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Errors are part of the interface, and they're typed by what the caller can do about them.</p>
+    <p class="concept-detail">A read or write that fails returns one of a small taxonomy: <code>NotFound</code>, <code>PermissionDenied</code>, <code>Conflict</code>, <code>Overloaded</code>, <code>DeadlineExceeded</code>, <code>Cancelled</code>, <code>ResourceLimit</code>, or an invalid path. Each names a distinct caller response: give up, back off and retry, re-read and reconcile, shed load.</p>
+    <p class="concept-detail">Because the taxonomy is small and semantic, it survives every boundary: a store behind a mount, behind a proxy, behind a wasm sandbox, or across a network reports the same eight conditions. The caller can't tell what implementation is behind a path, and the error model is what keeps that true under failure: a missing key and a missing endpoint are both just <code>NotFound</code>.</p>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2 id="the-composition-algebra">The composition algebra</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Because every store has the same shape, stores can wrap stores. A small set of combinators covers most wiring.</p>
+  </div>
+
+  <div class="concept-tree">
+    ReadOnly(store) <span class="tree-label">← writes become PermissionDenied</span><br>
+    Rooted(store, prefix) <span class="tree-label">← confine to a subtree; nothing outside is addressable</span><br>
+    Cascade([a, b, c]) <span class="tree-label">← layered reads: first hit wins</span><br>
+    Masked(store, patterns) <span class="tree-label">← component-wise redaction of reads</span><br>
+    Shared(store) <span class="tree-label">← one store, many owners</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">Each combinator is itself a store, so they nest: a read-only view of a rooted slice of a cascade is three wrappers, not a feature request. And because a path is a capability, the combinators are <em>attenuation</em>: handing a component <code>Rooted(store, "theirs")</code> grants exactly that subtree, structurally. Access control falls out of composition instead of being layered on top.</p>
+  </div>
+</section>
+
+<section class="concept-section">
   <h2 id="structured-values">Structured values</h2>
   <div class="concept-prose">
     <p class="concept-lead">Classic filesystems deal in bytes. Infinite flexibility, zero interoperability.</p>
     <p class="concept-detail">StructFS deals in structured values: the same types your programming language already gives you, and the same model that every serialization format converges on. JSON, CBOR, MessagePack, Protocol Buffers: they all encode the same core shapes. StructFS makes that shared model native. When a store returns a value, it's already structured. When you write a value, there's no encoding step. The structure <em>is</em> the data.</p>
-    <p class="concept-detail">This is the departure from Plan 9. 9P gives you a universal namespace over byte streams; you still need to agree on a wire format between every producer and consumer. StructFS gives you a universal namespace over structured data. The serialization format is an implementation detail of the transport, not a concern of the interface.</p>
+    <p class="concept-detail">This is the departure from Plan 9. 9P gives you a universal namespace over byte streams; you still need to agree on a wire format between every producer and consumer. StructFS gives you a universal namespace over structured data. The serialization format is an implementation detail of the transport, not a concern of the interface. The <a href="/implementations/">reference implementation</a> makes the point concrete: JSON, CBOR, and FlexBuffers are supported as equivalent-tier transports, selected per boundary, with the same values crossing all three.</p>
   </div>
 </section>
 

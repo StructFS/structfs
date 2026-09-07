@@ -39,20 +39,45 @@ title: Implementations
   <div class="consequence-grid" style="margin-top: 1rem;">
     <div class="consequence-card">
       <h3>Core store</h3>
-      <p>Path routing, value types, mount management. The foundation all stores build on.</p>
+      <p><code>structfs-core-store</code>: the Reader/Writer traits, Path and Value types, mount management, typed errors, and the combinators (read-only, cascade, rooted, masked, shared). The foundation all stores build on.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Paths</h3>
+      <p><code>structfs-path-validation</code> and <code>structfs-path-macro</code>: the component grammar, <a href="https://namecode.dev">Namecode</a> encoding for arbitrary strings, and a <code>path!</code> macro that validates literals at compile time.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Serde store</h3>
+      <p><code>structfs-serde-store</code>: typed access (<code>read_typed</code>/<code>write_typed</code>) on any store, and the transport codecs — JSON, CBOR, and FlexBuffers, all equivalent-tier.</p>
+    </div>
+    <div class="consequence-card">
+      <h3>Handles</h3>
+      <p><code>structfs-handles</code>: the <a href="/patterns/#the-handle-protocol">handle protocol</a> as a primitive — <code>outstanding/{id}</code> scaffolding, atomic tail reads, parking, cancellation. Certified by its own conformance suite.</p>
     </div>
     <div class="consequence-card">
       <h3>JSON store</h3>
-      <p>In-memory tree of structured values. Fast, ephemeral, no dependencies. The default for experimentation.</p>
+      <p><code>structfs-json-store</code>: in-memory tree of structured values with optional file persistence and <a href="/patterns/#append-logs">append logs</a>. The default for experimentation.</p>
     </div>
     <div class="consequence-card">
       <h3>HTTP</h3>
-      <p>HTTP client store (reads become GETs, writes become POSTs) and broker store (write queues, read executes).</p>
+      <p><code>structfs-http</code>: HTTP client store (reads become GETs, writes become POSTs) and broker store (write queues, read executes).</p>
     </div>
     <div class="consequence-card">
       <h3>System primitives</h3>
-      <p>Environment variables, time, random numbers, process info, filesystem handles: OS functionality as stores.</p>
+      <p><code>structfs-sys</code>: environment variables, time, random numbers, process info, filesystem handles: OS functionality as stores.</p>
     </div>
+    <div class="consequence-card">
+      <h3>Facade</h3>
+      <p><code>structfs</code>: one crate that re-exports the family behind feature flags (<code>serde</code>, <code>json</code>, <code>http</code>, <code>sys</code>, <code>async</code>, <code>full</code>). Start here.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2 id="isotope">Isotope and featherweight</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">If everything is a store, what does an operating surface look like?</p>
+    <p class="concept-detail"><a href="https://github.com/StructFS/structfs/tree/main/isotope/spec">Isotope</a> is a virtual-OS specification built on the StructFS model: <em>blocks</em> are pico-processes whose entire world is store reads and writes. A block's "syscall surface" is a store at <code>/iso/</code> (identity, time, randomness, stdio, lifecycle), its capabilities are the paths wired into its namespace (unwired paths are denied — reads and writes alike), and serving requests means reading a mailbox path. Assemblies compose blocks the way mounts compose stores, and nest fractally.</p>
+    <p class="concept-detail"><a href="https://github.com/StructFS/structfs/tree/main/featherweight">Featherweight</a> is the strawman runtime that makes the spec concrete: assembly instantiation with capability wiring, a two-function wasm Block ABI (any language that targets wasm can implement it in an afternoon — no bindgen, no component tooling), a WASI compatibility shim layered <em>above</em> the ABI, adapters for WIT components, and a dependency-free browser host that runs the same guest binaries in a Web Worker. The crates are being prepared for release.</p>
   </div>
 </section>
 

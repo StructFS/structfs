@@ -4,7 +4,7 @@ title: Patterns
 ---
 
 <h1>Patterns</h1>
-<p class="page-intro">The <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a> shows how two operations scale to arbitrary complexity through conventions at each level. These are the conventions that have emerged so far: value-level, interface-level, and structural.</p>
+<p class="page-intro">The <a href="/concepts/#the-representation-hierarchy">representation hierarchy</a> shows how two operations scale to arbitrary complexity through conventions at each level. These are the conventions that have emerged so far: value-level, interface-level, protocol-level, and structural.</p>
 
 <section class="concept-section">
   <h2 id="references">References</h2>
@@ -86,6 +86,104 @@ title: Patterns
       <h3>Parameters are paths</h3>
       <p>Page size, ordering, cursor: all path components. <code>/users/by/name/after/bob/limit/20</code>. Pagination addresses work like every other address.</p>
     </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2 id="byte-streams">Byte streams</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Structured values cover most traffic. File I/O, sockets, stdio, and response bodies need bytes in ranges.</p>
+    <p class="concept-detail">The byte-stream convention serves a stream through ordinary paths. For a stream at <code>{h}</code>, a ranged read parks until at least one byte past the offset exists or the stream is closed, then returns up to <code>n</code> bytes:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">read</span> {h}/at/0/len/4096<br>
+    <span class="ex-result">→ Bytes (≤ 4096; empty means end-of-stream)</span><br>
+    <br>
+    <span class="ex-prompt">read</span> {h}/len <span class="ex-result">→ bytes so far</span><br>
+    <span class="ex-prompt">write</span> {h}/append <span class="ex-result">→ append bytes</span><br>
+    <span class="ex-prompt">write</span> {h}/at/{offset} <span class="ex-result">→ positioned write (random-access stores)</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The semantics are exactly <code>read(2)</code>: a non-empty result may be short (advance your offset and read again), an <strong>empty result means end-of-stream</strong>, and offsets past the end clamp to empty rather than erroring. Because terminality travels with the read, there is no race between a data read and a separate "is it done?" check.</p>
+    <p class="concept-detail">Random-access stores (files) also follow the store conventions: writing <code>Null</code> to <code>{h}</code> deletes it (this is how <code>O_TRUNC</code> is expressed), and writing <code>Bytes</code> replaces the contents. In the hierarchy this is a <strong>protocol</strong>: one convention covers files, streams, and everything POSIX-shaped above them.</p>
+  </div>
+
+  <div class="pattern-principles">
+    <div class="pattern-principle">
+      <h3>The offset is the cursor</h3>
+      <p>There is no server-side read position. Every reader tracks its own offset, so many readers consume one stream independently, and a retry re-reads the same range idempotently.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Empty means done</h3>
+      <p>End-of-stream is an empty read, not an error and not a separate flag. The read(2) contract, kept exactly.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Parking, not polling</h3>
+      <p>A read at the end of an open stream waits for more bytes. No busy loops, no subscription mechanism: the read itself is the wait.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2 id="the-handle-protocol">The handle protocol</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">A codified contract for deferred operations: write a request, get a handle, read the handle for results.</p>
+    <p class="concept-detail"><a href="/stores/#handle-based-protocols">Handle-based stores</a> and the <a href="/stores/#the-broker-pattern">broker pattern</a> describe the general shape. The handle protocol pins down the rules so every broker-shaped store behaves identically:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">write</span> /http {"method": "GET", "path": "https://example.com"}<br>
+    <span class="ex-result">→ /http/outstanding/0</span><br>
+    <br>
+    <span class="ex-prompt">read</span> /http/outstanding <span class="ex-result">→ list open handles</span><br>
+    <span class="ex-prompt">read</span> /http/outstanding/0<br>
+    <span class="ex-result">→ {"status": 200, "headers": {...}, "body": ...} (parks until complete)</span><br>
+    <br>
+    <span class="ex-prompt">write</span> /http/outstanding/0 null <span class="ex-result">→ release the handle</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The rules: handle ids are minted by the store and never reused; a write to an existing handle path is a conflict, never an overwrite; writing <code>Null</code> releases the handle and cancels its work; and releasing fails any parked reads while leaving writes open, so a producer can always finish its teardown.</p>
+    <p class="concept-detail">A handle that streams serves <strong>atomic tail reads</strong> under a protocol-defined sub-path: one read returns <code>{"items": [...], "next": 3, "status": "open"}</code> — items, the next cursor, and the terminal status together. A consumer can never observe "stream closed" while items it hasn't seen still exist; the close-out race is structurally impossible.</p>
+  </div>
+
+  <div class="pattern-principles">
+    <div class="pattern-principle">
+      <h3>No overwrites</h3>
+      <p>Handle paths are store-minted. Writing to one that exists is a conflict. Ids are never reused, so a stale handle path can't silently address new work.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Null releases</h3>
+      <p>The store convention (writing Null deletes) doubles as cancellation. Release fails parked reads; writes stay open for teardown.</p>
+    </div>
+    <div class="pattern-principle">
+      <h3>Tails are atomic</h3>
+      <p>Items and terminal status arrive in one read. Pagination and completion share an envelope: <code>{items, next, status}</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="concept-section">
+  <h2 id="append-logs">Append logs</h2>
+  <div class="concept-prose">
+    <p class="concept-lead">Ledgers, usage records, event journals: data that grows at the end and never changes in the middle.</p>
+    <p class="concept-detail">An append log is a store with one writable path and a read surface shaped for catching up:</p>
+  </div>
+
+  <div class="concept-exchange">
+    <span class="ex-prompt">write</span> /ledger/append {"event": "deposit", "amount": 100}<br>
+    <span class="ex-result">→ /ledger/entries/0</span><br>
+    <br>
+    <span class="ex-prompt">read</span> /ledger/len <span class="ex-result">→ 1</span><br>
+    <span class="ex-prompt">read</span> /ledger/entries/from/0<br>
+    <span class="ex-result">→ {"items": [{"event": "deposit", "amount": 100}], "next": 1, "status": "open"}</span>
+  </div>
+
+  <div class="concept-prose" style="margin-top: 1rem;">
+    <p class="concept-detail">The tail read returns the same <code>{items, next, status}</code> envelope as a handle's stream, so a consumer pages with a cursor instead of re-reading the whole log. Store the <code>next</code> value, come back later, resume from it. A log has no terminal state, so <code>status</code> stays <code>"open"</code>; the same envelope over a finite stream ends with <code>"done"</code>.</p>
+    <p class="concept-detail">This is <a href="#pagination">pagination</a> aimed at time instead of space: the cursor survives across sessions, and appends between reads are exactly what the next page returns.</p>
   </div>
 </section>
 

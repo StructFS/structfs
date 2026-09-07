@@ -85,6 +85,28 @@ The tree is the wiring diagram of your system. You can rewire it without touchin
 {.concept-detail}
 :::
 
+## Store conventions {#store-conventions}
+
+::: concept-prose
+Four rules give every tree the same feel, no matter what's behind it.
+{.concept-lead}
+
+The interface says nothing about what paths mean. These conventions do, and every conforming store follows them:
+{.concept-detail}
+:::
+
+::: concept-exchange
+<span class="ex-prompt">read</span> /users <span class="ex-result">→ {"alice": {...}, "bob": {...}}</span> <span class="ex-result" style="margin-left: 1rem;">a prefix reads as a map of its children</span><br>
+<span class="ex-prompt">write</span> /users/alice null <span class="ex-result" style="margin-left: 1rem;">writing Null deletes the subtree</span><br>
+<span class="ex-prompt">write</span> /users {"carol": {...}} <span class="ex-result" style="margin-left: 1rem;">writing a map replaces the subtree</span><br>
+<span class="ex-prompt">write</span> /a/b/c/d 42 <span class="ex-result" style="margin-left: 1rem;">deep writes create intermediates</span>
+:::
+
+::: concept-prose
+No DELETE verb because Null is the delete. No MKDIR because intermediates appear on demand. No LIST because reading a prefix *is* listing (stores can also enumerate child names directly, without materializing values). The conventions are certified by a conformance suite, so "conforming store" is a testable claim, not a vibe.
+{.concept-detail}
+:::
+
 ## Write returns a path {#write-returns-a-path}
 
 ::: concept-prose
@@ -111,6 +133,39 @@ The same pattern models file handles, subscriptions, sessions, transactions: any
 {.concept-detail}
 :::
 
+## Typed errors {#typed-errors}
+
+::: concept-prose
+Errors are part of the interface, and they're typed by what the caller can do about them.
+{.concept-lead}
+
+A read or write that fails returns one of a small taxonomy: `NotFound`, `PermissionDenied`, `Conflict`, `Overloaded`, `DeadlineExceeded`, `Cancelled`, `ResourceLimit`, or an invalid path. Each names a distinct caller response: give up, back off and retry, re-read and reconcile, shed load.
+{.concept-detail}
+
+Because the taxonomy is small and semantic, it survives every boundary: a store behind a mount, behind a proxy, behind a wasm sandbox, or across a network reports the same eight conditions. The caller can't tell what implementation is behind a path, and the error model is what keeps that true under failure: a missing key and a missing endpoint are both just `NotFound`.
+{.concept-detail}
+:::
+
+## The composition algebra {#the-composition-algebra}
+
+::: concept-prose
+Because every store has the same shape, stores can wrap stores. A small set of combinators covers most wiring.
+{.concept-lead}
+:::
+
+::: concept-tree
+ReadOnly(store) <span class="tree-label">← writes become PermissionDenied</span><br>
+Rooted(store, prefix) <span class="tree-label">← confine to a subtree; nothing outside is addressable</span><br>
+Cascade([a, b, c]) <span class="tree-label">← layered reads: first hit wins</span><br>
+Masked(store, patterns) <span class="tree-label">← component-wise redaction of reads</span><br>
+Shared(store) <span class="tree-label">← one store, many owners</span>
+:::
+
+::: concept-prose
+Each combinator is itself a store, so they nest: a read-only view of a rooted slice of a cascade is three wrappers, not a feature request. And because a path is a capability, the combinators are *attenuation*: handing a component `Rooted(store, "theirs")` grants exactly that subtree, structurally. Access control falls out of composition instead of being layered on top.
+{.concept-detail}
+:::
+
 ## Structured values {#structured-values}
 
 ::: concept-prose
@@ -120,7 +175,7 @@ Classic filesystems deal in bytes. Infinite flexibility, zero interoperability.
 StructFS deals in structured values: the same types your programming language already gives you, and the same model that every serialization format converges on. JSON, CBOR, MessagePack, Protocol Buffers: they all encode the same core shapes. StructFS makes that shared model native. When a store returns a value, it's already structured. When you write a value, there's no encoding step. The structure *is* the data.
 {.concept-detail}
 
-This is the departure from Plan 9. 9P gives you a universal namespace over byte streams; you still need to agree on a wire format between every producer and consumer. StructFS gives you a universal namespace over structured data. The serialization format is an implementation detail of the transport, not a concern of the interface.
+This is the departure from Plan 9. 9P gives you a universal namespace over byte streams; you still need to agree on a wire format between every producer and consumer. StructFS gives you a universal namespace over structured data. The serialization format is an implementation detail of the transport, not a concern of the interface. The [reference implementation](/implementations/) makes the point concrete: JSON, CBOR, and FlexBuffers are supported as equivalent-tier transports, selected per boundary, with the same values crossing all three.
 {.concept-detail}
 :::
 
