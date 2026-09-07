@@ -1,0 +1,51 @@
+---
+layout: base.njk
+---
+
+<section class="hero">
+  <h1>Isotope</h1>
+  <p class="tagline">A virtual operating system. One interface.</p>
+  <p class="subtitle">Every system interaction — process control, IPC, files, time, randomness — is a read or write on a path. Specified as Isotope. Running today as <strong>featherweight</strong>.</p>
+  <div class="hero-actions">
+    <a href="/demo/" class="btn btn-primary">Run a block in your browser</a>
+    <a href="/spec/" class="btn btn-secondary">Read the spec</a>
+  </div>
+</section>
+
+<section class="features">
+  <div class="feature-grid">
+    <div class="feature-card">
+      <h3>Blocks are pico-processes</h3>
+      <p>A block's entire world is <a href="https://structfs.com">StructFS</a> reads and writes. No syscalls, no sockets, no ambient authority — if it isn't a path in your namespace, it doesn't exist.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Namespaces are capabilities</h3>
+      <p>What a block can touch is exactly what its assembly wired in. Unwired paths are denied — reads and writes alike. Filesystem and network access are grants, never defaults.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Assemblies compose fractally</h3>
+      <p>An assembly wires blocks together and is itself a block. Nest them, spawn them, observe them — through the same read/write interface as everything else.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Every block is a store</h3>
+      <p>Serving requests <em>is</em> reading your mailbox. The server protocol makes any block addressable by path, from any other block, in any language.</p>
+    </div>
+    <div class="feature-card">
+      <h3>A two-function ABI</h3>
+      <p><code>read</code> and <code>write</code>. That is the whole Block ABI — implementable by hand in any language that targets wasm, no bindgen, no component tooling. <a href="/abi/">An SDK is an afternoon.</a></p>
+    </div>
+    <div class="feature-card">
+      <h3>WASI is a shim, not a base</h3>
+      <p>The runtime has no WASI dependency. POSIX-style programs run through a compatibility layer that bottoms out in the same two functions. <a href="/spec/wasi-tower/">The tower</a>, inverted.</p>
+    </div>
+  </div>
+</section>
+
+<section class="install-section">
+  <h2>Honest framing</h2>
+  <p>Isotope is a <a href="/spec/">specification</a>; <strong>featherweight</strong> is its working strawman runtime — real blocks, real namespaces, real wasm guests with metering, and a <a href="/demo/">browser host</a>, with the strawman limits <a href="https://github.com/structfs/structfs/tree/main/featherweight#strawman-limits">documented rather than hidden</a>.</p>
+  <pre><code>git clone https://github.com/StructFS/structfs
+cd structfs
+cargo run -p featherweight -- shell</code></pre>
+  <p>See the <a href="/quickstart/">quickstart</a> for the demo assembly and building your first wasm block.</p>
+</section>

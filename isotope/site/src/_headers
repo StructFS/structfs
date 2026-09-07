@@ -1,0 +1,7 @@
+# Cross-origin isolation, site-wide: the resident demo needs
+# SharedArrayBuffer, which requires COOP + COEP. Every asset this site
+# loads is same-origin, so the blanket policy is safe — but any future
+# cross-origin embed must carry CORP/CORS headers or it will be blocked.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

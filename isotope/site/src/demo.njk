@@ -1,0 +1,114 @@
+---
+layout: base.njk
+title: Live demo
+permalink: /demo/
+---
+<div class="doc-page">
+  <h1>A block, resident in your browser</h1>
+  <p>This page runs <code>kv.wasm</code> — the same core-binding guest
+  the native runtime executes with wasmtime — inside a Web Worker,
+  parked on its mailbox between requests. The host is
+  <a href="https://github.com/structfs/structfs/tree/main/featherweight/host/browser">~120 lines
+  of dependency-free JavaScript</a>; every button below becomes a
+  server-protocol request (<a href="/spec/server-protocol/">spec 07</a>)
+  on the block's namespace.</p>
+
+  <div id="demo-status" class="demo-status">loading the block&hellip;</div>
+
+  <fieldset class="demo-kv" id="demo-controls" disabled>
+    <legend>wasm-kv</legend>
+    <label>key <input id="key" value="greeting"></label>
+    <label>value (JSON) <input id="value" value='"hello"'></label>
+    <div class="demo-buttons">
+      <button id="set">write</button>
+      <button id="get">read</button>
+      <button id="del">delete</button>
+      <button id="stop">shutdown</button>
+    </div>
+  </fieldset>
+
+  <div id="demo-log" class="demo-log"></div>
+</div>
+
+<script type="module">
+  const statusEl = document.getElementById("demo-status");
+  const controls = document.getElementById("demo-controls");
+  const logEl = document.getElementById("demo-log");
+  const log = (text, cls = "") => {
+    const line = document.createElement("div");
+    line.textContent = text;
+    if (cls) line.className = cls;
+    logEl.prepend(line);
+  };
+  const key = () => document.getElementById("key").value;
+
+  let request;   // (op, path, data) => Promise<response envelope>
+  let shutdown;  // () => Promise<exit code>
+
+  try {
+    const wasm = await (await fetch("/demo/kv.wasm")).arrayBuffer();
+
+    if (crossOriginIsolated) {
+      // Resident mode: the block stays parked on its mailbox in a
+      // worker (Atomics.wait), so its state survives between requests.
+      const { WorkerHost } = await import("/demo/worker-host.mjs");
+      const host = await WorkerHost.start({
+        createWorker: () =>
+          new Worker("/demo/worker.mjs", { type: "module" }),
+        wasm,
+        onStdio: (stream, text) => log(`[${stream}] ${text}`),
+        onLog: (level, value) => log(`[log/${level}] ${JSON.stringify(value)}`),
+      });
+      statusEl.textContent =
+        `resident: ${JSON.stringify(host.manifest)}`;
+      request = (op, path, data) => host.request(op, path, data);
+      shutdown = () => host.shutdown();
+    } else {
+      // No cross-origin isolation (e.g. a local dev server without
+      // COOP/COEP headers): batch mode. Each request re-instantiates
+      // the block, so state does not persist — the spec-mandated
+      // statelessness makes even this degradation well-defined.
+      const { instantiate } = await import("/demo/structfs-host.mjs");
+      const { IsoStore } = await import("/demo/iso-store.mjs");
+      statusEl.textContent =
+        "batch mode: no COOP/COEP headers here, so SharedArrayBuffer is " +
+        "unavailable and the block cannot stay resident. Each request " +
+        "runs a fresh instance (state resets).";
+      request = async (op, path, data) => {
+        const iso = new IsoStore({
+          onStdio: (stream, text) => log(`[${stream}] ${text}`),
+        });
+        const id = iso.enqueue(op, path, data ?? null);
+        const guest = await instantiate(wasm, iso);
+        guest.run();
+        return iso.responses.get(id);
+      };
+      shutdown = async () => 0;
+    }
+    controls.disabled = false;
+  } catch (error) {
+    statusEl.textContent = `failed to start the block: ${error}`;
+    statusEl.classList.add("err");
+  }
+
+  const act = async (op, data) => {
+    try {
+      const response = await request(op, key(), data);
+      log(`${op} ${key()} -> ${JSON.stringify(response)}`);
+    } catch (error) {
+      log(String(error), "err");
+    }
+  };
+
+  document.getElementById("set").onclick = () => {
+    try { act("write", JSON.parse(document.getElementById("value").value)); }
+    catch { log("value is not valid JSON", "err"); }
+  };
+  document.getElementById("get").onclick = () => act("read");
+  document.getElementById("del").onclick = () => act("write");
+  document.getElementById("stop").onclick = async () => {
+    log(`guest exited with code ${await shutdown()}`);
+    controls.disabled = true;
+    statusEl.textContent = "block shut down — reload to start it again.";
+  };
+</script>

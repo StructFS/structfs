@@ -1,0 +1,18 @@
+---
+layout: base.njk
+title: Specification
+permalink: /spec/
+---
+<div class="doc-page">
+  <h1>The Isotope Specification</h1>
+  <p>The spec is the source of truth; this site renders it directly from
+  <a href="https://github.com/structfs/structfs/tree/main/isotope/spec">the repository</a>.
+  Chapters 00–08 define the model; 09–11 close the tower down to POSIX
+  and wasm.</p>
+
+  <ol class="spec-toc" start="0">
+    {%- for chapter in collections.spec %}
+    <li value="{{ chapter.data.chapterNumber | int }}"><a href="{{ chapter.url }}">{{ chapter.data.title }}</a></li>
+    {%- endfor %}
+  </ol>
+</div>

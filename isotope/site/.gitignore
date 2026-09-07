@@ -1,0 +1,5 @@
+_site/
+node_modules/
+# Copied in by build.sh from ../spec and featherweight/ — never edit here.
+src/spec/*.md
+src/demo/

@@ -1,0 +1,20 @@
+---
+layout: base.njk
+---
+<div class="doc-page">
+  <nav class="spec-chapters">
+    <a href="/spec/">Spec</a>
+    {%- for chapter in collections.spec %}
+    <a href="{{ chapter.url }}"{% if chapter.url == page.url %} aria-current="page"{% endif %}>{{ chapter.data.chapterNumber }}</a>
+    {%- endfor %}
+  </nav>
+
+  {{ content | safe }}
+
+  <nav class="spec-pager">
+    {%- set prev = collections.spec | getPreviousCollectionItem %}
+    {%- set next = collections.spec | getNextCollectionItem %}
+    {% if prev %}<a href="{{ prev.url }}" class="pager-prev">&larr; {{ prev.data.title }}</a>{% endif %}
+    {% if next %}<a href="{{ next.url }}" class="pager-next">{{ next.data.title }} &rarr;</a>{% endif %}
+  </nav>
+</div>

@@ -1,0 +1,54 @@
+name: Deploy isotope site
+
+# workflow_dispatch-only until the Cloudflare Pages project exists.
+# Once `isotope-site` is created in Cloudflare (see isotope/site/README.md),
+# enable auto-deploys by adding:
+#
+#   push:
+#     branches: [main]
+#     paths:
+#       - "isotope/site/**"
+#       - "isotope/spec/**"
+#       - "featherweight/host/browser/**"
+#       - "featherweight/guest/**"
+#       - ".github/workflows/deploy-isotope-site.yml"
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: structfs_com
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          persist-credentials: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build site (spec + browser host + kv.wasm + 11ty)
+        run: ./isotope/site/build.sh
+
+      - name: Deploy to Cloudflare Pages
+        run: pnpm dlx wrangler pages deploy isotope/site/_site --project-name=isotope-site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
