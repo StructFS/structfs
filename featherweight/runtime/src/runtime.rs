@@ -427,7 +427,7 @@ impl AssemblyInstance {
 
     /// Shut the assembly down: graceful first, escalating to immediate
     /// for blocks that don't stop within `timeout`
-    /// (`isotope/spec/05-lifecycle.md`).
+    /// ([spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md)).
     pub async fn shutdown(&self, timeout: Duration) {
         let cells = self.all_cells();
         for cell in &cells {

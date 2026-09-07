@@ -42,31 +42,32 @@ default-members = [
     "featherweight",
     "featherweight/runtime",
     "featherweight/component",
+    "featherweight/guest",
     "featherweight/wasi",
     "namecode",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/StructFS/structfs"
 
 [workspace.dependencies]
 # Workspace crates - layered architecture
-structfs-ll-store = { version = "0.1.0", path = "packages/ll-store" }
-structfs-path-validation = { version = "0.1.0", path = "packages/path-validation" }
-structfs-path-macro = { version = "0.1.0", path = "packages/path-macro" }
-structfs-core-store = { version = "0.1.0", path = "packages/core-store" }
-structfs-serde-store = { version = "0.1.0", path = "packages/serde-store" }
+structfs-ll-store = { version = "0.2.0", path = "packages/ll-store" }
+structfs-path-validation = { version = "0.2.0", path = "packages/path-validation" }
+structfs-path-macro = { version = "0.2.0", path = "packages/path-macro" }
+structfs-core-store = { version = "0.2.0", path = "packages/core-store" }
+structfs-serde-store = { version = "0.2.0", path = "packages/serde-store" }
 namecode = { version = "0.1.1", path = "namecode" }
 
 # Workspace crates - store implementations
-structfs-json-store = { version = "0.1.0", path = "packages/json_store" }
-structfs-handles = { version = "0.1.0", path = "packages/handles" }
-structfs-http = { version = "0.1.0", path = "packages/http" }
-structfs-repl = { version = "0.1.0", path = "packages/repl" }
-structfs-sys = { version = "0.1.0", path = "packages/sys" }
+structfs-json-store = { version = "0.2.0", path = "packages/json_store" }
+structfs-handles = { version = "0.2.0", path = "packages/handles" }
+structfs-http = { version = "0.2.0", path = "packages/http" }
+structfs-repl = { version = "0.2.0", path = "packages/repl" }
+structfs-sys = { version = "0.2.0", path = "packages/sys" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -100,7 +101,8 @@ nu-ansi-term = "0.50"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
 
-# Featherweight runtime
-wasmtime = "40"
+# Featherweight runtime. default-features = false so the core runtime can
+# stay minimal; the component adapter re-enables the defaults it needs.
+wasmtime = { version = "40", default-features = false }
 uuid = { version = "1.11", features = ["v4"] }
 tracing = "0.1"

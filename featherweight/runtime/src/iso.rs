@@ -1,5 +1,7 @@
-//! The `/iso/` system store (`isotope/spec/04-system-paths.md` and
-//! `09-posix-closure.md`).
+//! The `/iso/` system store
+//! ([spec 04](https://github.com/StructFS/structfs/blob/main/isotope/spec/04-system-paths.md)
+//! and
+//! [spec 09](https://github.com/StructFS/structfs/blob/main/isotope/spec/09-posix-closure.md)).
 //!
 //! Every block's namespace mounts this surface at `iso/`. It is Isotope's
 //! syscall interface: identity, lifecycle, time, randomness, logging,

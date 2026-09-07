@@ -1,6 +1,7 @@
 //! # featherweight-wasi
 //!
-//! The WASI-over-Isotope shim core (`isotope/spec/10-wasi-tower.md`).
+//! The WASI-over-Isotope shim core
+//! ([spec 10](https://github.com/StructFS/structfs/blob/main/isotope/spec/10-wasi-tower.md)).
 //!
 //! Isotope does not depend on WASI; WASI is a compatibility layer that
 //! bottoms out in the Block ABI's two functions. This crate implements

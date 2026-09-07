@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Featherweight Isotope runtime CLI: run assemblies and the demo shell"
+readme = "README.md"
+keywords = ["isotope", "wasm", "runtime", "cli", "store"]
+categories = ["command-line-utilities", "wasm", "virtualization"]
+# The JS browser host and AssemblyScript SDK live in this directory but
+# are not part of the CLI crate's package.
+exclude = ["host/", "sdk/"]
 
 [[bin]]
 name = "fw"
 path = "src/main.rs"
 
 [dependencies]
-featherweight-runtime = { version = "0.1.0", path = "runtime" }
-featherweight-component = { version = "0.1.0", path = "component" }
+featherweight-runtime = { version = "0.2.0", path = "runtime" }
+featherweight-component = { version = "0.2.0", path = "component" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

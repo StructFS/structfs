@@ -1,11 +1,11 @@
 //! Featherweight Guest Library — the core-wasm binding
-//! (`isotope/spec/11-core-wasm-binding.md`).
+//! ([spec 11](https://github.com/StructFS/structfs/blob/main/isotope/spec/11-core-wasm-binding.md)).
 //!
 //! This crate is both the Rust guest SDK for the core binding (the
 //! `sdk` module — two imports from the `structfs` module, a
 //! `block_alloc` export, and safe wrappers) and the reference guest: a
 //! kv store served over the Isotope server protocol
-//! (`isotope/spec/07-server-protocol.md`).
+//! ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)).
 //!
 //! Build with plain `cargo build --target wasm32-unknown-unknown` — no
 //! componentization, no bindgen. The whole ABI surface is the `sdk`

@@ -5,9 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Guest SDK and reference block for the core-wasm Block ABI binding (isotope/spec/11)"
+readme = "README.md"
+keywords = ["isotope", "wasm", "guest", "sdk", "store"]
+categories = ["wasm", "api-bindings"]
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde = { workspace = true }

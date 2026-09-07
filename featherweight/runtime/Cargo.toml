@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Strawman Isotope runtime: blocks, assemblies, namespaces, and the /iso store over StructFS"
+readme = "README.md"
+keywords = ["isotope", "wasm", "runtime", "store", "capability"]
+categories = ["wasm", "virtualization", "asynchronous"]
 
 [dependencies]
 structfs-core-store = { workspace = true, features = ["async"] }
@@ -32,6 +35,6 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-featherweight-wasi = { version = "0.1.0", path = "../wasi" }
+featherweight-wasi = { version = "0.2.0", path = "../wasi" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

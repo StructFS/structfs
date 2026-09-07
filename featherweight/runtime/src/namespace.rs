@@ -1,4 +1,5 @@
-//! Per-block namespaces (`isotope/spec/03-namespaces.md`).
+//! Per-block namespaces
+//! ([spec 03](https://github.com/StructFS/structfs/blob/main/isotope/spec/03-namespaces.md)).
 //!
 //! A block's namespace is its complete view of the world: `iso/` is the
 //! runtime, everything else is wired by the assembly. Paths are rewritten

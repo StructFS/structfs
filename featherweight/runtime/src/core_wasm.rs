@@ -1,4 +1,5 @@
-//! Host side of the core-wasm binding (`isotope/spec/11-core-wasm-binding.md`).
+//! Host side of the core-wasm binding
+//! ([spec 11](https://github.com/StructFS/structfs/blob/main/isotope/spec/11-core-wasm-binding.md)).
 //!
 //! Plain wasm core modules import two functions from the `structfs`
 //! module and export `memory`, `block_alloc`, `manifest`, and `run`.

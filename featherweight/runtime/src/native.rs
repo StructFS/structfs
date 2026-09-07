@@ -34,7 +34,8 @@ where
     }
 }
 
-/// The canonical block run loop (`isotope/spec/07-server-protocol.md`):
+/// The canonical block run loop
+/// ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)):
 /// read mailbox events until shutdown unblocks with Null, dispatch each
 /// to the handler, write responses for requests, then signal shutdown
 /// complete (exit code 0).

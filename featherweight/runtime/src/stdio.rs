@@ -1,4 +1,5 @@
-//! Standard streams for blocks (`isotope/spec/09-posix-closure.md`).
+//! Standard streams for blocks
+//! ([spec 09](https://github.com/StructFS/structfs/blob/main/isotope/spec/09-posix-closure.md)).
 //!
 //! `iso/stdio/{stdin,stdout,stderr}` are served through one of these
 //! backends. Which block gets which backend is a runtime decision: the

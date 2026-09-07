@@ -119,7 +119,8 @@ impl WasmBlock {
     /// The manifest is a JSON blob declaring the block's name, version,
     /// serialization format, and path interface. The runtime calls this
     /// **before wiring** to discover what codec the block speaks—the store
-    /// bridge can't be set up without it (see `isotope/rationale/04-why-manifest.md`).
+    /// bridge can't be set up without it (see
+    /// [why-manifest](https://github.com/StructFS/structfs/blob/main/isotope/rationale/04-why-manifest.md)).
     ///
     /// Creates a minimal Wasmtime environment with a no-op store,
     /// instantiates the component, and calls the guest's `manifest()` export.

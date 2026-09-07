@@ -1,4 +1,5 @@
-//! Server-protocol envelopes (`isotope/spec/07-server-protocol.md`).
+//! Server-protocol envelopes
+//! ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)).
 //!
 //! Requests flow runtime -> block as `{op, path, data, respond_to}`;
 //! responses flow block -> runtime as `{result, value?, path?, error?}`.
@@ -52,7 +53,7 @@ impl RequestEnvelope {
 }
 
 /// One decoded mailbox event, as seen by a serving block
-/// (`isotope/spec/09-posix-closure.md`).
+/// ([spec 09](https://github.com/StructFS/structfs/blob/main/isotope/spec/09-posix-closure.md)).
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventEnvelope {
     /// Shutdown was requested: the mailbox read unblocked with Null.

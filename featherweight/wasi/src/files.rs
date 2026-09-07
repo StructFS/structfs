@@ -1,5 +1,6 @@
 //! `MemFiles`: an in-memory byte-file store following the byte-stream
-//! pattern (`docs/patterns/bytestream.md`).
+//! pattern
+//! ([bytestream](https://github.com/StructFS/structfs/blob/main/docs/patterns/bytestream.md)).
 //!
 //! The reference target for the shim's fd layer, and a working example
 //! of the pattern: files are byte values addressed by path, with ranged

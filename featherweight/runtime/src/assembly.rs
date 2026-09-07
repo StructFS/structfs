@@ -1,4 +1,5 @@
-//! Assembly definitions (`isotope/spec/02-assemblies.md`).
+//! Assembly definitions
+//! ([spec 02](https://github.com/StructFS/structfs/blob/main/isotope/spec/02-assemblies.md)).
 //!
 //! An assembly definition is an immutable value: blocks, a public block,
 //! wiring, config, failure policies, and imports. YAML and JSON are both

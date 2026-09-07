@@ -44,7 +44,8 @@ impl std::fmt::Display for BlockId {
     }
 }
 
-/// The six lifecycle states from `isotope/spec/05-lifecycle.md`.
+/// The six lifecycle states from
+/// [spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockState {
     Created,
@@ -75,7 +76,8 @@ impl BlockState {
 }
 
 /// What happens to the assembly when this block fails
-/// (`isotope/spec/02-assemblies.md` failure modes; restart is out of
+/// ([spec 02](https://github.com/StructFS/structfs/blob/main/isotope/spec/02-assemblies.md)
+/// failure modes; restart is out of
 /// scope for the strawman).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FailurePolicy {
@@ -86,7 +88,8 @@ pub enum FailurePolicy {
     Isolate,
 }
 
-/// Shutdown mode (`isotope/spec/05-lifecycle.md`).
+/// Shutdown mode
+/// ([spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownMode {
     Graceful,
@@ -103,7 +106,7 @@ impl ShutdownMode {
 }
 
 /// A server-protocol request queued for a block
-/// (`isotope/spec/07-server-protocol.md`).
+/// ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)).
 #[derive(Debug, Clone)]
 pub struct ServerRequest {
     /// `"read"` or `"write"`.
@@ -133,7 +136,8 @@ impl ServerRequest {
 }
 
 /// One event on the block's unified mailbox
-/// (`isotope/spec/09-posix-closure.md`): served requests interleaved
+/// ([spec 09](https://github.com/StructFS/structfs/blob/main/isotope/spec/09-posix-closure.md)):
+/// served requests interleaved
 /// with runtime notifications.
 #[derive(Debug, Clone)]
 pub enum BlockEvent {

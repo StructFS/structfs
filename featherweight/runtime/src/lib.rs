@@ -1,6 +1,8 @@
 //! # featherweight-runtime
 //!
-//! A strawman Isotope runtime (`isotope/spec/`): blocks are pico-processes
+//! A strawman Isotope runtime
+//! ([the spec](https://github.com/StructFS/structfs/tree/main/isotope/spec)):
+//! blocks are pico-processes
 //! whose entire world is StructFS reads and writes.
 //!
 //! - **Blocks** run native Rust ([`NativeBlock`]) or core-binding wasm

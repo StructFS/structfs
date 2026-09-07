@@ -1,5 +1,5 @@
 //! Process control: spawn/wait/kill as the handle pattern
-//! (`isotope/spec/09-posix-closure.md`).
+//! ([spec 09](https://github.com/StructFS/structfs/blob/main/isotope/spec/09-posix-closure.md)).
 //!
 //! One protocol serves two surfaces:
 //!
