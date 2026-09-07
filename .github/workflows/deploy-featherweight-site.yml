@@ -1,15 +1,16 @@
-name: Deploy isotope site
+name: Deploy featherweight site
 
 # workflow_dispatch-only until the Cloudflare Pages project exists.
-# Once `isotope-site` is created in Cloudflare (see isotope/site/README.md),
-# enable auto-deploys by adding:
+# Once `featherweight-site` is created in Cloudflare (see
+# featherweight/site/README.md), enable auto-deploys by adding:
 #
 #   push:
 #     branches: [main]
 #     paths:
-#       - "isotope/site/**"
-#       - "isotope/spec/**"
-#       - ".github/workflows/deploy-isotope-site.yml"
+#       - "featherweight/site/**"
+#       - "featherweight/host/browser/**"
+#       - "featherweight/guest/**"
+#       - ".github/workflows/deploy-featherweight-site.yml"
 on:
   workflow_dispatch:
 
@@ -26,6 +27,11 @@ jobs:
           token: ${{ github.token }}
           persist-credentials: true
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -37,11 +43,11 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Build site (spec + 11ty)
-        run: ./isotope/site/build.sh
+      - name: Build site (browser host + kv.wasm + 11ty)
+        run: ./featherweight/site/build.sh
 
       - name: Deploy to Cloudflare Pages
-        run: pnpm dlx wrangler pages deploy isotope/site/_site --project-name=isotope-site
+        run: pnpm dlx wrangler pages deploy featherweight/site/_site --project-name=featherweight-site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

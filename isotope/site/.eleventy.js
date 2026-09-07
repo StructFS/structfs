@@ -9,13 +9,8 @@ module.exports = function (eleventyConfig) {
   // Syntax highlighting (build-time, no client JS)
   eleventyConfig.addPlugin(syntaxHighlight);
 
-  // Pass through static assets. src/demo/ holds the browser-host
-  // modules and kv.wasm, copied in by build.sh.
+  // Pass through static assets.
   eleventyConfig.addPassthroughCopy("src/css");
-  eleventyConfig.addPassthroughCopy("src/demo");
-  // Cloudflare Pages headers: COOP/COEP for SharedArrayBuffer (the
-  // resident demo). Site-wide — every asset here is same-origin.
-  eleventyConfig.addPassthroughCopy({ "src/_headers": "_headers" });
 
   // Markdown: heading anchors, plus a link rewrite so the spec's
   // chapter-to-chapter links (`01-blocks.md`, `10-wasi-tower.md#bindings`)

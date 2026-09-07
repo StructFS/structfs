@@ -1,0 +1,57 @@
+---
+layout: base.njk
+title: Implementations
+permalink: /implementations/
+---
+<div class="doc-page">
+  <h1>Implementations</h1>
+  <p>Isotope is implementation-neutral by design. The spec's
+  <a href="/spec/overview/#non-goals">non-goals</a> leave the execution
+  engine, scheduling, persistence, and wire format to each runtime;
+  what a runtime must provide is the model — blocks, assemblies,
+  namespaces, the <code>/iso/</code> surface
+  (<a href="/spec/system-paths/">spec 04</a>), the
+  <a href="/spec/server-protocol/">server protocol</a>, and the
+  <a href="/abi/">Block ABI</a> in at least one binding.</p>
+
+  <h2 id="featherweight">featherweight — the reference implementation</h2>
+  <p><a href="https://featherweight.structfs.com">Featherweight</a> is a
+  single-node runtime in Rust over StructFS, developed alongside this
+  spec and tracking it as it evolves. It implements assemblies with
+  capability wiring, the full <code>/iso/</code> surface, the core-wasm
+  binding (with the component binding as a registered adapter), the
+  WASI shim, guest metering, and the JSON/CBOR/FlexBuffers transports.
+  Its focus is the single-node case: composing many small, isolated
+  blocks in one process.</p>
+  <p><a href="https://github.com/structfs/structfs/tree/main/featherweight">Source</a>
+  · <a href="https://featherweight.structfs.com/quickstart/">quickstart</a>
+  · <a href="https://featherweight.structfs.com/demo/">live demo</a></p>
+
+  <h2 id="browser-host">The browser host</h2>
+  <p>A second, independent host of the
+  <a href="/spec/core-wasm-binding/">core-wasm binding</a>:
+  <a href="https://github.com/structfs/structfs/tree/main/featherweight/host/browser">~120
+  lines of dependency-free JavaScript</a> that runs the same guest
+  binaries wasmtime runs — in a browser or in Node, with a parked
+  mailbox via <code>Atomics.wait</code>. Two hosts with no shared code
+  executing identical artifacts is the binding's host-neutrality claim,
+  demonstrated. <a href="https://featherweight.structfs.com/demo/">It
+  powers the live demo.</a></p>
+
+  <h2 id="conformance">Conformance</h2>
+  <p>The spec's normative language (MUST/SHOULD) is the contract; there
+  is no certification program at this stage. At the store level,
+  implementations can lean on the StructFS
+  <a href="https://github.com/structfs/structfs/tree/main/packages/core-store">conformance
+  suites</a>, which certify the store conventions every Isotope surface
+  builds on. An implementation that serves the <code>/iso/</code> paths,
+  speaks the server protocol, and executes Block-ABI guests can run the
+  same assemblies featherweight runs — that is the practical test
+  today.</p>
+
+  <h2 id="your-own">Writing one</h2>
+  <p>Start from <a href="/abi/">the ABI page</a>: the host side of the
+  core-wasm binding is two functions and a delivery convention. The
+  browser host is the existence proof for how small a host can be; the
+  spec chapters 04–07 define what the runtime around it must serve.</p>
+</div>

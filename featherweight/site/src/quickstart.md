@@ -9,7 +9,7 @@ templateClass: doc-page
 
 # Quickstart
 
-Featherweight is the strawman Isotope runtime that lives in the
+Featherweight lives in the
 [StructFS repository](https://github.com/StructFS/structfs). Everything
 below runs from a clone:
 
@@ -78,7 +78,7 @@ failure:
 The `wiring` lines are the capability grants: block-local path prefixes
 mapped to sibling blocks (or `$imports` from the parent). An assembly is
 itself a block, so definitions nest — the fractal property
-([spec 02](/spec/assemblies/)).
+([spec 02](https://isotope.structfs.com/spec/assemblies/)).
 
 ## Your first wasm block
 
@@ -111,14 +111,15 @@ cargo run -p featherweight -- run kv-demo.yaml
 ```
 
 The wasm block serves reads and writes over the [server
-protocol](/spec/server-protocol/) — its whole interface to the world is
-the two-function [Block ABI](/abi/). The same artifact runs unmodified
-under the [browser host](/demo/).
+protocol](https://isotope.structfs.com/spec/server-protocol/) — its
+whole interface to the world is the two-function
+[Block ABI](https://isotope.structfs.com/abi/). The same artifact runs
+unmodified under the [browser host](/demo/).
 
 ## What a block sees
 
 Inside a block, `/iso/` is the syscall surface
-([spec 04](/spec/system-paths/)):
+([spec 04](https://isotope.structfs.com/spec/system-paths/)):
 
 | Path | Meaning |
 |------|---------|
@@ -132,6 +133,6 @@ Inside a block, `/iso/` is the syscall surface
 POSIX-style programs get all of this through the WASI shim
 (`featherweight-wasi`), which is a guest-side compatibility layer over
 the same paths — the runtime itself has no WASI dependency
-([spec 10](/spec/wasi-tower/)).
+([spec 10](https://isotope.structfs.com/spec/wasi-tower/)).
 
 </div>

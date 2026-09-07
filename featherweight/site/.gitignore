@@ -1,0 +1,5 @@
+_site/
+node_modules/
+# Copied in by build.sh from featherweight/host/browser + the compiled
+# kv guest — never edit here.
+src/demo/

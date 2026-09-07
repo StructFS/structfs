@@ -8,8 +8,8 @@ echo "==> Cleaning build artifacts..."
 rm -rf "$SITE_DIR/_site"
 echo "    removed _site/"
 
-rm -f "$SITE_DIR/src/spec/"*.md
-echo "    removed src/spec/*.md (copied)"
+rm -rf "$SITE_DIR/src/demo"
+echo "    removed src/demo/ (copied)"
 
 rm -rf "$SITE_DIR/node_modules"
 echo "    removed node_modules/"

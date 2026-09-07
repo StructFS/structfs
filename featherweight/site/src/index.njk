@@ -1,0 +1,59 @@
+---
+layout: base.njk
+---
+
+<section class="hero">
+  <h1>featherweight</h1>
+  <p class="tagline">The Isotope reference implementation.</p>
+  <p class="subtitle">A single-node runtime for the <a href="https://isotope.structfs.com">Isotope specification</a>, written in Rust over <a href="https://structfs.com">StructFS</a>: real blocks, real capability namespaces, real wasm guests.</p>
+  <div class="hero-actions">
+    <a href="/quickstart/" class="btn btn-primary">Quickstart</a>
+    <a href="/demo/" class="btn btn-secondary">Run a block in your browser</a>
+  </div>
+</section>
+
+<section class="features">
+  <h2>What works today</h2>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <h3>Assemblies and wiring</h3>
+      <p>Declare blocks and their capability grants in JSON or YAML; assemblies nest fractally, spawn children, and shut down gracefully — with escalation when graceful isn't enough.</p>
+    </div>
+    <div class="feature-card">
+      <h3>The core-wasm binding</h3>
+      <p>Plain <code>cargo build --target wasm32-unknown-unknown</code> output runs directly — two imports, no bindgen, no component tooling. Other bindings plug in as adapters; <code>featherweight-component</code> runs WIT components.</p>
+    </div>
+    <div class="feature-card">
+      <h3>The WASI shim</h3>
+      <p>POSIX-style programs run through <code>featherweight-wasi</code>: args, env, clocks, stdio, and file descriptors, all bottoming out in store reads and writes. The runtime itself has no WASI dependency.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Guest metering</h3>
+      <p>Fuel caps and epoch interruption govern guest execution; a spinning block can be stopped, while parked store reads are never punished.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Three transports</h3>
+      <p>Blocks declare JSON, CBOR, or FlexBuffers in their manifest; the boundary follows. The binary transports carry bytes as bytes.</p>
+    </div>
+    <div class="feature-card">
+      <h3>A browser host too</h3>
+      <p>The same guest binaries run under wasmtime natively and in a Web Worker in your browser — <a href="/demo/">the live demo</a> keeps a block resident on its mailbox with <code>Atomics.wait</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="install-section">
+  <h2>The project</h2>
+  <p>Featherweight is one implementation of Isotope — the one that tracks
+  the spec as it evolves. Its focus is the single-node case: a fast
+  runtime for composing many small, isolated blocks in one process. It
+  is pre-1.0 and changes with the spec; its current limits are
+  <a href="https://github.com/structfs/structfs/tree/main/featherweight#strawman-limits">documented
+  rather than hidden</a>.</p>
+  <pre><code>git clone https://github.com/StructFS/structfs
+cd structfs
+cargo run -p featherweight -- shell</code></pre>
+  <p>See the <a href="/quickstart/">quickstart</a> for the demo assembly
+  and building your first wasm block, and the <a href="/sdks/">SDKs
+  page</a> for writing blocks in Rust, AssemblyScript, or JavaScript.</p>
+</section>

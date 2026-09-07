@@ -5,14 +5,14 @@
   padding: 0;
 }
 
-/* === Light theme === */
+/* === Light theme (featherweight: sky/steel accent) === */
 :root {
-  --bg: #f0f0ec;
+  --bg: #f0f1f3;
   --bg-card: #ffffff;
   --text: #1c1917;
   --text-muted: #6b7280;
-  --accent: #166534;
-  --accent-hover: #14532d;
+  --accent: #1d4ed8;
+  --accent-hover: #1e40af;
   --accent-text: #fff;
   --border: #e5e7eb;
   --code-bg: #f3f4f6;
@@ -24,35 +24,35 @@
   --font-mono: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", Menlo, Consolas, monospace;
 }
 
-/* === Dark forest theme — explicit === */
+/* === Dark slate theme — explicit === */
 :root[data-theme="dark"] {
-  --bg: #0b1210;
-  --bg-card: #121e1a;
-  --text: #dce5df;
-  --text-muted: #7d9485;
-  --accent: #4ade80;
-  --accent-hover: #22c55e;
-  --accent-text: #0b1210;
-  --border: #1e3228;
-  --code-bg: #0f1a16;
-  --code-text: #c6d8cd;
+  --bg: #0b1016;
+  --bg-card: #121a24;
+  --text: #dde3ea;
+  --text-muted: #7e8ea1;
+  --accent: #60a5fa;
+  --accent-hover: #3b82f6;
+  --accent-text: #0b1016;
+  --border: #1e2c3d;
+  --code-bg: #0f1620;
+  --code-text: #c8d4e0;
   --green: #4ade80;
   --red: #f87171;
 }
 
-/* === Dark forest theme — system preference === */
+/* === Dark slate theme — system preference === */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0b1210;
-    --bg-card: #121e1a;
-    --text: #dce5df;
-    --text-muted: #7d9485;
-    --accent: #4ade80;
-    --accent-hover: #22c55e;
-    --accent-text: #0b1210;
-    --border: #1e3228;
-    --code-bg: #0f1a16;
-    --code-text: #c6d8cd;
+    --bg: #0b1016;
+    --bg-card: #121a24;
+    --text: #dde3ea;
+    --text-muted: #7e8ea1;
+    --accent: #60a5fa;
+    --accent-hover: #3b82f6;
+    --accent-text: #0b1016;
+    --border: #1e2c3d;
+    --code-bg: #0f1620;
+    --code-text: #c8d4e0;
     --green: #4ade80;
     --red: #f87171;
   }
@@ -677,46 +677,62 @@ h1, h2, h3, h4 {
   }
 }
 
-/* === Isotope additions: spec navigation === */
-.spec-chapters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin: 1.5rem 0 2rem;
+/* === The live demo === */
+.demo-status {
   font-family: var(--font-mono);
   font-size: 0.85rem;
+  color: var(--text-muted);
+  background: var(--code-bg);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+  margin: 1.5rem 0;
+  word-break: break-word;
 }
-.spec-chapters a {
-  padding: 0.15rem 0.55rem;
+.demo-kv {
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  text-decoration: none;
-  color: var(--text-muted);
+  padding: 1rem 1.25rem 1.25rem;
+  margin-bottom: 1.5rem;
 }
-.spec-chapters a:first-child {
-  color: var(--text);
-  font-weight: 600;
-}
-.spec-chapters a[aria-current="page"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
-}
-.spec-pager {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  margin: 3rem 0 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--border);
-}
-.spec-pager .pager-next { margin-left: auto; }
-.spec-toc {
-  margin: 1.5rem 0 2rem 1.5rem;
-  line-height: 2;
-}
-.spec-toc li::marker {
+.demo-kv legend {
   font-family: var(--font-mono);
+  padding: 0 0.4rem;
   color: var(--text-muted);
 }
-
+.demo-kv label {
+  display: inline-block;
+  margin: 0.4rem 1.25rem 0.6rem 0;
+  font-size: 0.9rem;
+}
+.demo-kv input {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  width: 11rem;
+}
+.demo-buttons button {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.35rem 0.9rem;
+  margin-right: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+}
+.demo-buttons button:hover { border-color: var(--accent); }
+.demo-log {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+  line-height: 1.7;
+}
+.demo-log .err, .demo-status.err { color: var(--red); }

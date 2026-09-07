@@ -5,10 +5,10 @@ layout: base.njk
 <section class="hero">
   <h1>Isotope</h1>
   <p class="tagline">A virtual operating system. One interface.</p>
-  <p class="subtitle">Every system interaction — process control, IPC, files, time, randomness — is a read or write on a path. Specified as Isotope. Running today as <strong>featherweight</strong>.</p>
+  <p class="subtitle">An open specification: every system interaction — process control, IPC, files, time, randomness — is a read or write on a path. Any runtime can implement it.</p>
   <div class="hero-actions">
-    <a href="/demo/" class="btn btn-primary">Run a block in your browser</a>
-    <a href="/spec/" class="btn btn-secondary">Read the spec</a>
+    <a href="/spec/" class="btn btn-primary">Read the spec</a>
+    <a href="/implementations/" class="btn btn-secondary">Implementations</a>
   </div>
 </section>
 
@@ -36,16 +36,21 @@ layout: base.njk
     </div>
     <div class="feature-card">
       <h3>WASI is a shim, not a base</h3>
-      <p>The runtime has no WASI dependency. POSIX-style programs run through a compatibility layer that bottoms out in the same two functions. <a href="/spec/wasi-tower/">The tower</a>, inverted.</p>
+      <p>A conforming runtime needs no WASI dependency. POSIX-style programs run through a compatibility layer that bottoms out in the same two functions. <a href="/spec/wasi-tower/">The tower</a>, inverted.</p>
     </div>
   </div>
 </section>
 
 <section class="install-section">
-  <h2>Honest framing</h2>
-  <p>Isotope is a <a href="/spec/">specification</a>; <strong>featherweight</strong> is its working strawman runtime — real blocks, real namespaces, real wasm guests with metering, and a <a href="/demo/">browser host</a>, with the strawman limits <a href="https://github.com/structfs/structfs/tree/main/featherweight#strawman-limits">documented rather than hidden</a>.</p>
-  <pre><code>git clone https://github.com/StructFS/structfs
-cd structfs
-cargo run -p featherweight -- shell</code></pre>
-  <p>See the <a href="/quickstart/">quickstart</a> for the demo assembly and building your first wasm block.</p>
+  <h2>Spec and implementations</h2>
+  <p>Isotope is a <a href="/spec/">specification</a> — the model, the
+  <code>/iso/</code> surface, the protocols, and the Block ABI with its
+  bindings. It deliberately does not pick an execution engine, a
+  scheduler, or a wire format; those belong to
+  <a href="/implementations/">implementations</a>. The reference
+  implementation is
+  <a href="https://featherweight.structfs.com">featherweight</a>, a
+  single-node runtime in Rust — including
+  <a href="https://featherweight.structfs.com/demo/">a block you can run
+  in your browser</a>.</p>
 </section>

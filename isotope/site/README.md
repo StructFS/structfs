@@ -1,36 +1,26 @@
 # The Isotope site
 
-The website for the Isotope spec and the featherweight runtime,
-following the same Eleventy + Cloudflare Pages pattern as `site/`
-(structfs.com) and `namecode/site/`.
+The website for the Isotope specification, following the same
+Eleventy + Cloudflare Pages pattern as `site/` (structfs.com),
+`namecode/site/`, and `featherweight/site/`. This site is the spec's:
+the model, the rendered chapters, the ABI, and the implementations
+catalog. The featherweight project (quickstart, live demo, SDKs) has
+its own site at `featherweight/site/`.
 
 ## Build
 
 ```bash
-./build.sh     # copies spec + browser host in, builds kv.wasm, runs 11ty
+./build.sh     # copies the spec chapters in, runs 11ty
 ./dev.sh       # build, then serve with live reload
 ./clean.sh
 ```
 
-Needs: Rust with the `wasm32-unknown-unknown` target, Node 20+, pnpm.
+Needs: Node 20+, pnpm. (No Rust — the spec site has no wasm to build.)
 
-`src/spec/*.md` and `src/demo/` are **copied in by build.sh** (from
-`../spec` and `featherweight/host/browser` + the compiled kv guest) and
-gitignored — the site can never drift from the spec or the host. Edit
-the originals, never the copies.
-
-## The live demo and COOP/COEP
-
-`/demo/` runs kv.wasm resident in a Web Worker, which needs
-`SharedArrayBuffer` and therefore cross-origin isolation. `src/_headers`
-applies COOP/COEP site-wide on Cloudflare Pages. The Eleventy dev server
-sends no such headers, so locally the demo degrades to batch mode (each
-request re-instantiates the block); `pnpm dlx wrangler pages dev _site`
-serves the production headers if you need the resident mode locally.
-
-Because of the site-wide `Cross-Origin-Embedder-Policy: require-corp`,
-any future cross-origin embed (fonts, images, iframes from other
-domains) must carry CORP/CORS headers or the browser will block it.
+`src/spec/*.md` is **copied in by build.sh** from `../spec` and
+gitignored — the site can never drift from the spec. Edit the spec,
+never the copies. Note: the dev server watches the copies, so spec
+edits need a `./build.sh` re-run to appear.
 
 ## Deploying
 
