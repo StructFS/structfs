@@ -7,15 +7,16 @@
 
 /* === Light theme === */
 :root {
-  --bg: #f0f0ec;
+  --bg: #eef1f2;
   --bg-card: #ffffff;
-  --text: #1c1917;
-  --text-muted: #6b7280;
-  --accent: #166534;
-  --accent-hover: #14532d;
+  --text: #16191b;
+  --text-muted: #64707a;
+  --accent: #0e7490;
+  --accent-hover: #155e75;
   --accent-text: #fff;
-  --border: #e5e7eb;
-  --code-bg: #f3f4f6;
+  --accent-2: #ca8a04;
+  --border: #e2e8ea;
+  --code-bg: #f1f4f5;
   --code-text: #1f2937;
   --green: #16a34a;
   --red: #dc2626;
@@ -24,35 +25,37 @@
   --font-mono: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", Menlo, Consolas, monospace;
 }
 
-/* === Dark forest theme — explicit === */
+/* === Dark reactor-pool theme — explicit === */
 :root[data-theme="dark"] {
-  --bg: #0b1210;
-  --bg-card: #121e1a;
-  --text: #dce5df;
-  --text-muted: #7d9485;
-  --accent: #4ade80;
-  --accent-hover: #22c55e;
-  --accent-text: #0b1210;
-  --border: #1e3228;
-  --code-bg: #0f1a16;
-  --code-text: #c6d8cd;
+  --bg: #0a1114;
+  --bg-card: #101b21;
+  --text: #dbe6ea;
+  --text-muted: #7e97a3;
+  --accent: #22d3ee;
+  --accent-hover: #67e8f9;
+  --accent-text: #06141a;
+  --accent-2: #facc15;
+  --border: #1b2f3a;
+  --code-bg: #0d181e;
+  --code-text: #c5d6de;
   --green: #4ade80;
   --red: #f87171;
 }
 
-/* === Dark forest theme — system preference === */
+/* === Dark reactor-pool theme — system preference === */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0b1210;
-    --bg-card: #121e1a;
-    --text: #dce5df;
-    --text-muted: #7d9485;
-    --accent: #4ade80;
-    --accent-hover: #22c55e;
-    --accent-text: #0b1210;
-    --border: #1e3228;
-    --code-bg: #0f1a16;
-    --code-text: #c6d8cd;
+    --bg: #0a1114;
+    --bg-card: #101b21;
+    --text: #dbe6ea;
+    --text-muted: #7e97a3;
+    --accent: #22d3ee;
+    --accent-hover: #67e8f9;
+    --accent-text: #06141a;
+    --accent-2: #facc15;
+    --border: #1b2f3a;
+    --code-bg: #0d181e;
+    --code-text: #c5d6de;
     --green: #4ade80;
     --red: #f87171;
   }
@@ -144,6 +147,11 @@ h1, h2, h3, h4 {
 .nav-logo:hover {
   text-decoration: none;
   color: var(--accent);
+}
+
+::selection {
+  background: var(--accent-2);
+  color: #16191b;
 }
 
 .nav-right {
@@ -246,12 +254,13 @@ h1, h2, h3, h4 {
 
 .btn-secondary {
   background: transparent;
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-2);
+  border-color: var(--accent-2);
 }
 .btn-secondary:hover:not(:disabled) {
-  background: var(--accent);
-  color: var(--accent-text);
+  background: var(--accent-2);
+  /* Dark ink on uranium yellow in both themes — white fails contrast. */
+  color: #16191b;
 }
 
 .btn-ghost {
@@ -279,7 +288,7 @@ h1, h2, h3, h4 {
 
 .tagline {
   font-size: 1.25rem;
-  color: var(--accent);
+  color: var(--accent-2);
   margin-top: 0.5rem;
   font-weight: 500;
 }

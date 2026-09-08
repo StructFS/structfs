@@ -1,7 +1,7 @@
 /* Syntax highlighting — light */
 :root {
   --syn-keyword: #7c3aed;
-  --syn-string: #166534;
+  --syn-string: #a16207;
   --syn-comment: #9ca3af;
   --syn-function: #1d4ed8;
   --syn-number: #b45309;
@@ -9,35 +9,35 @@
   --syn-punctuation: #4b5563;
   --syn-type: #0e7490;
   --syn-attr: #9333ea;
-  --syn-variable: #1c1917;
+  --syn-variable: #16191b;
 }
 
-/* Syntax highlighting — dark forest */
+/* Syntax highlighting — dark, reactor pool */
 [data-theme="dark"] {
   --syn-keyword: #c084fc;
-  --syn-string: #4ade80;
-  --syn-comment: #5c7a68;
+  --syn-string: #facc15;
+  --syn-comment: #5c7683;
   --syn-function: #7dd3fc;
   --syn-number: #fbbf24;
-  --syn-operator: #7d9485;
-  --syn-punctuation: #a3c4b0;
+  --syn-operator: #7e97a3;
+  --syn-punctuation: #a0bcc9;
   --syn-type: #67e8f9;
   --syn-attr: #d8b4fe;
-  --syn-variable: #dce5df;
+  --syn-variable: #dbe6ea;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --syn-keyword: #c084fc;
-    --syn-string: #4ade80;
-    --syn-comment: #5c7a68;
+    --syn-string: #facc15;
+    --syn-comment: #5c7683;
     --syn-function: #7dd3fc;
     --syn-number: #fbbf24;
-    --syn-operator: #7d9485;
-    --syn-punctuation: #a3c4b0;
+    --syn-operator: #7e97a3;
+    --syn-punctuation: #a0bcc9;
     --syn-type: #67e8f9;
     --syn-attr: #d8b4fe;
-    --syn-variable: #dce5df;
+    --syn-variable: #dbe6ea;
   }
 }
 
