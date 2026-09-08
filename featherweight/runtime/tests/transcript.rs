@@ -64,8 +64,9 @@ impl NativeBlock for Probe {
 }
 
 /// Transcripts shared between the recording and replaying runtimes: stores in
-/// memory, keyed by block name — the transcript never touches a disk here,
-/// which is the point of it being a store.
+/// memory, keyed by the runtime's assembly-scoped transcript keys — the
+/// transcript never touches a disk here, which is the point of it being
+/// a store.
 fn shared_transcripts() -> (
     Arc<Mutex<HashMap<String, HostStore>>>,
     Arc<TranscriptProvider>,
@@ -106,8 +107,11 @@ async fn run_assembly(runtime: &Runtime, def: &str) -> Arc<featherweight_runtime
     assembly.public_cell().clone()
 }
 
+// Record and replay definitions share one assembly name: transcript keys
+// are assembly-scoped (`probed/probe`), and a replay must present the
+// same identity the recording had.
 const WIRED: &str = r#"{
-    "assembly": "recorded",
+    "assembly": "probed",
     "blocks": {"probe": "builtin:probe", "kv": "builtin:kv"},
     "public": "probe",
     "wiring": ["probe:/services/kv -> kv"]
@@ -116,7 +120,7 @@ const WIRED: &str = r#"{
 /// The replay assembly has no kv block and no wiring at all: the transcript is
 /// the world.
 const UNWIRED: &str = r#"{
-    "assembly": "replayed",
+    "assembly": "probed",
     "blocks": {"probe": "builtin:probe"},
     "public": "probe"
 }"#;
@@ -246,7 +250,7 @@ async fn seeded_runs_transcribe_identically() {
         );
         let cell = run_assembly(&runtime, UNWIRED).await;
         assert_eq!(cell.state(), BlockState::Stopped);
-        let mut store = provider("probe").unwrap();
+        let mut store = provider("probed/probe").unwrap();
         store
             .read(&path!(""))
             .unwrap()
@@ -260,4 +264,136 @@ async fn seeded_runs_transcribe_identically() {
     let other = transcript_of(7).await;
     assert_eq!(first, second);
     assert_ne!(first, other);
+}
+
+/// A spawner that spawns the same child definition twice — the transcript
+/// keys must not collide.
+struct TwinSpawner;
+impl NativeBlock for TwinSpawner {
+    fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+        let def = structfs_serde_store::json_to_value(serde_json::json!({
+            "assembly": "twin",
+            "blocks": {"kv": "builtin:kv"},
+            "public": "kv"
+        }));
+        let first = ns.write(&path!("iso/proc"), Record::parsed(def.clone()))?;
+        let second = ns.write(&path!("iso/proc"), Record::parsed(def))?;
+        // Use both children so their blocks actually start and get keys.
+        ns.write(
+            &first.join(&path!("store/x")),
+            Record::parsed(Value::from("1")),
+        )?;
+        ns.write(
+            &second.join(&path!("store/x")),
+            Record::parsed(Value::from("2")),
+        )?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transcript_keys_scope_assemblies_and_disambiguate_spawns() {
+    let (transcripts, provider) = shared_transcripts();
+    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider.clone()));
+    register_builtins(&mut runtime);
+    runtime.register_builtin(
+        "boss",
+        Arc::new(|| Box::new(TwinSpawner) as Box<dyn NativeBlock>),
+    );
+    let cell = run_assembly(
+        &runtime,
+        r#"{"assembly": "spawning",
+            "blocks": {"boss": {"artifact": "builtin:boss", "spawn": true}},
+            "public": "boss"}"#,
+    )
+    .await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+
+    let keys: std::collections::BTreeSet<String> =
+        transcripts.lock().unwrap().keys().cloned().collect();
+    assert!(keys.contains("spawning/boss"), "{keys:?}");
+    assert!(keys.contains("twin/kv"), "{keys:?}");
+    assert!(keys.contains("twin/kv#2"), "{keys:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_assembly_blocks_get_scoped_transcript_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("child.yaml"),
+        "assembly: childdef\nblocks:\n  kv: builtin:kv\npublic: kv\n",
+    )
+    .unwrap();
+
+    // The probe forces the nested kv to start by writing through it.
+    struct Toucher;
+    impl NativeBlock for Toucher {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            ns.write(&path!("services/inner/x"), Record::parsed(Value::from("1")))?;
+            Ok(())
+        }
+    }
+    let (transcripts, provider) = shared_transcripts();
+    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider));
+    register_builtins(&mut runtime);
+    runtime.register_builtin(
+        "toucher",
+        Arc::new(|| Box::new(Toucher) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "parent",
+            "blocks": {"toucher": "builtin:toucher", "inner": "child.yaml"},
+            "public": "toucher",
+            "wiring": ["toucher:/services/inner -> inner"]}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+    assembly.wait_public_terminal().await;
+    assembly.shutdown(Duration::from_secs(2)).await;
+
+    let keys: std::collections::BTreeSet<String> =
+        transcripts.lock().unwrap().keys().cloned().collect();
+    // The nested block's key is its position in the tree, not its
+    // definition's name.
+    assert!(keys.contains("parent/toucher"), "{keys:?}");
+    assert!(keys.contains("parent/inner/kv"), "{keys:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_that_writes_different_data_diverges() {
+    let (_transcripts, provider) = shared_transcripts();
+
+    struct Honest;
+    impl NativeBlock for Honest {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            ns.write(&path!("iso/log/info"), Record::parsed(Value::from("hello")))?;
+            Ok(())
+        }
+    }
+    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider.clone()));
+    runtime.register_builtin(
+        "probe",
+        Arc::new(|| Box::new(Honest) as Box<dyn NativeBlock>),
+    );
+    run_assembly(&runtime, UNWIRED).await;
+
+    // Same path, different payload: an acknowledged lie, unless caught.
+    struct Liar;
+    impl NativeBlock for Liar {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            ns.write(
+                &path!("iso/log/info"),
+                Record::parsed(Value::from("goodbye")),
+            )?;
+            Ok(())
+        }
+    }
+    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Replay(provider));
+    runtime.register_builtin("probe", Arc::new(|| Box::new(Liar) as Box<dyn NativeBlock>));
+    let cell = run_assembly(&runtime, UNWIRED).await;
+    assert_eq!(cell.state(), BlockState::Failed);
+    let error = cell.last_error().unwrap_or_default();
+    assert!(error.contains("different data"), "{error}");
 }

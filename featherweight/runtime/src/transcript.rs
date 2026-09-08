@@ -39,10 +39,16 @@
 //!
 //! Transcription is a mode, not a mandate: with
 //! [`TranscriptMode::Off`] (the default) nothing here runs and no
-//! obligations apply. Known strawman limits: transcripts are keyed by block
-//! name (unique names per recording directory are the embedder's job),
-//! and blocks created dynamically through `iso/proc` spawn run live —
-//! the spawner's boundary is transcribed, the children's are not.
+//! obligations apply.
+//!
+//! Transcripts are keyed by an assembly-scoped path — `demo/shell`,
+//! `demo/sub/inner` for a nested assembly's block, with `#2`, `#3`
+//! appended when one key recurs (the same definition spawned twice).
+//! Blocks spawned dynamically through `iso/proc` go through the same
+//! start path as static ones and are transcribed like them; on replay a
+//! spawner's spawn write is answered from its transcript without
+//! re-executing, so children do not run — each child's own transcript
+//! replays it separately.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -77,6 +83,26 @@ pub struct TranscriptEntry {
     pub op: String,
     pub path: Path,
     pub answer: TranscriptAnswer,
+    /// For writes: a digest of the payload the block wrote. Replay
+    /// checks it, so a run that writes *different data* to the same
+    /// path is caught as divergence, not silently acknowledged — the
+    /// payload itself stays off the transcript (outputs can be bulky;
+    /// the digest is enough to catch the lie).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrote: Option<String>,
+}
+
+/// The write-payload digest: fnv1a-64 over the record's canonical JSON,
+/// hex. Not cryptographic — it detects divergence, it doesn't defend
+/// against an adversary who owns the transcript anyway.
+pub(crate) fn digest(data: &Record) -> Option<String> {
+    let rendered = serde_json::to_string(data).ok()?;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in rendered.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    Some(format!("{hash:016x}"))
 }
 
 /// What the world said. `Found`/`Absent` answer reads, `Wrote` answers
@@ -135,8 +161,14 @@ fn transcript_to_error(transcript: TranscriptError) -> Error {
 
 /// One block's transcript, held by its [`crate::Namespace`].
 pub(crate) enum BlockTranscript {
-    Recording { log: HostStore },
-    Replaying { entries: VecDeque<TranscriptEntry> },
+    Recording {
+        log: HostStore,
+    },
+    Replaying {
+        entries: VecDeque<TranscriptEntry>,
+        /// Entries consumed so far — the index divergence errors cite.
+        cursor: usize,
+    },
 }
 
 impl BlockTranscript {
@@ -177,16 +209,33 @@ impl BlockTranscript {
         for item in items {
             entries.push_back(from_value::<TranscriptEntry>(item)?);
         }
-        Ok(BlockTranscript::Replaying { entries })
+        Ok(BlockTranscript::Replaying { entries, cursor: 0 })
     }
 
     pub(crate) fn is_replaying(&self) -> bool {
         matches!(self, BlockTranscript::Replaying { .. })
     }
 
+    /// Entries the replay has not consumed. A replayed block that
+    /// finishes with entries remaining stopped short of the recorded
+    /// run — worth a warning, though not an error: a block may
+    /// legitimately exit early on a replayed shutdown request.
+    pub(crate) fn remaining(&self) -> usize {
+        match self {
+            BlockTranscript::Recording { .. } => 0,
+            BlockTranscript::Replaying { entries, .. } => entries.len(),
+        }
+    }
+
     /// Append one answered operation. Failing to record fails the
     /// operation: a transcript with a hole is worse than a failed run.
-    fn record(&mut self, op: &str, at: &Path, answer: TranscriptAnswer) -> Result<(), Error> {
+    fn record(
+        &mut self,
+        op: &str,
+        at: &Path,
+        answer: TranscriptAnswer,
+        wrote: Option<String>,
+    ) -> Result<(), Error> {
         let BlockTranscript::Recording { log } = self else {
             return Ok(());
         };
@@ -194,6 +243,7 @@ impl BlockTranscript {
             op: op.to_string(),
             path: at.clone(),
             answer,
+            wrote,
         };
         log.write(&path!("append"), Record::parsed(to_value(&entry)?))?;
         Ok(())
@@ -209,36 +259,39 @@ impl BlockTranscript {
             Ok(None) => TranscriptAnswer::Absent,
             Err(error) => TranscriptAnswer::Failed(error_to_transcript(error)),
         };
-        self.record("read", at, answer)
+        self.record("read", at, answer, None)
     }
 
     pub(crate) fn record_write(
         &mut self,
         at: &Path,
+        wrote: Option<String>,
         result: &Result<Path, Error>,
     ) -> Result<(), Error> {
         let answer = match result {
             Ok(path) => TranscriptAnswer::Wrote(path.clone()),
             Err(error) => TranscriptAnswer::Failed(error_to_transcript(error)),
         };
-        self.record("write", at, answer)
+        self.record("write", at, answer, wrote)
     }
 
     /// The next entry, checked against what the block actually asked.
     fn next(&mut self, op: &str, at: &Path) -> Result<TranscriptEntry, Error> {
-        let BlockTranscript::Replaying { entries } = self else {
+        let BlockTranscript::Replaying { entries, cursor } = self else {
             return Err(Error::store("transcript", "replay", "not replaying"));
         };
+        let index = *cursor;
         let Some(entry) = entries.pop_front() else {
             return Err(Error::conflict(format!(
-                "the transcript ran out at {op} {at} — the replayed run asked more \
-                 of the world than the recorded one did"
+                "the transcript ran out at entry {index}, {op} {at} — the replayed \
+                 run asked more of the world than the recorded one did"
             )));
         };
+        *cursor += 1;
         if entry.op != op || entry.path != *at {
             return Err(Error::conflict(format!(
-                "replay diverged: the transcript recorded {} {}, the run asked {op} {at} \
-                 — the block was not a function of its inputs",
+                "replay diverged at entry {index}: the transcript recorded {} {}, \
+                 the run asked {op} {at} — the block was not a function of its inputs",
                 entry.op, entry.path
             )));
         }
@@ -256,8 +309,20 @@ impl BlockTranscript {
         }
     }
 
-    pub(crate) fn replay_write(&mut self, at: &Path) -> Result<Path, Error> {
-        match self.next("write", at)?.answer {
+    pub(crate) fn replay_write(&mut self, at: &Path, wrote: Option<String>) -> Result<Path, Error> {
+        let entry = self.next("write", at)?;
+        // A write to the right path with the wrong payload is still a
+        // diverged run: the acknowledgement would be a lie about data
+        // the recorded world never saw.
+        if let (Some(recorded), Some(actual)) = (&entry.wrote, &wrote) {
+            if recorded != actual {
+                return Err(Error::conflict(format!(
+                    "replay diverged at write {at}: the run wrote different data \
+                     than the recorded run did (digest {actual}, recorded {recorded})"
+                )));
+            }
+        }
+        match entry.answer {
             TranscriptAnswer::Wrote(path) => Ok(path),
             TranscriptAnswer::Failed(error) => Err(transcript_to_error(error)),
             TranscriptAnswer::Found(_) | TranscriptAnswer::Absent => Err(Error::conflict(format!(
@@ -278,6 +343,7 @@ mod tests {
             op: "read".to_string(),
             path: path!("iso/time/now"),
             answer,
+            wrote: None,
         };
         let value = to_value(&entry).unwrap();
         let reread = from_value::<TranscriptEntry>(value.clone()).unwrap();
@@ -333,7 +399,11 @@ mod tests {
             )
             .unwrap();
         transcript
-            .record_write(&path!("services/kv/greeting"), &Ok(path!("greeting")))
+            .record_write(
+                &path!("services/kv/greeting"),
+                digest(&Record::parsed(Value::from("hello"))),
+                &Ok(path!("greeting")),
+            )
             .unwrap();
         transcript
             .record_read(
@@ -342,17 +412,35 @@ mod tests {
             )
             .unwrap();
 
-        let mut replay = BlockTranscript::replaying(log).unwrap();
+        let mut replay = BlockTranscript::replaying(log.clone()).unwrap();
         let answer = replay.replay_read(&path!("iso/random/uuid")).unwrap();
         assert_eq!(answer.unwrap().as_value(), Some(&Value::from("u-1")));
         assert_eq!(
-            replay.replay_write(&path!("services/kv/greeting")).unwrap(),
+            replay
+                .replay_write(
+                    &path!("services/kv/greeting"),
+                    digest(&Record::parsed(Value::from("hello"))),
+                )
+                .unwrap(),
             path!("greeting")
         );
         assert!(matches!(
             replay.replay_read(&path!("services/nothing")),
             Err(Error::PermissionDenied { .. })
         ));
+        assert_eq!(replay.remaining(), 0);
+
+        // The same path with different data is a diverged run, not an
+        // acknowledged write.
+        let mut replay = BlockTranscript::replaying(log).unwrap();
+        replay.replay_read(&path!("iso/random/uuid")).unwrap();
+        let lied = replay
+            .replay_write(
+                &path!("services/kv/greeting"),
+                digest(&Record::parsed(Value::from("goodbye"))),
+            )
+            .unwrap_err();
+        assert!(lied.to_string().contains("different data"), "{lied}");
     }
 
     #[test]

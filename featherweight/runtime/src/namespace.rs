@@ -249,14 +249,40 @@ impl Reader for Namespace {
 
 impl Writer for Namespace {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+        // The digest is computed before dispatch (write_live consumes the
+        // record) and only when a transcript will use it.
+        let wrote = self
+            .transcript
+            .as_ref()
+            .and_then(|_| crate::transcript::digest(&data));
         match &mut self.transcript {
-            Some(transcript) if transcript.is_replaying() => return transcript.replay_write(to),
+            Some(transcript) if transcript.is_replaying() => {
+                return transcript.replay_write(to, wrote)
+            }
             _ => {}
         }
         let result = self.write_live(to, data);
         if let Some(transcript) = &mut self.transcript {
-            transcript.record_write(to, &result)?;
+            transcript.record_write(to, wrote, &result)?;
         }
         result
+    }
+}
+
+impl Drop for Namespace {
+    /// A replayed block that exits with entries unconsumed stopped short
+    /// of the recorded run. Not an error — a block may legitimately exit
+    /// early on a replayed shutdown request — but worth a trace.
+    fn drop(&mut self) {
+        if let Some(transcript) = &self.transcript {
+            let remaining = transcript.remaining();
+            if remaining > 0 {
+                tracing::warn!(
+                    block = %self.cell.name,
+                    remaining,
+                    "replay ended with transcript entries unconsumed"
+                );
+            }
+        }
     }
 }

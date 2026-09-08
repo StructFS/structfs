@@ -247,6 +247,13 @@ asked against the operation and path the transcript recorded:
 - **A transcript that runs out** while the Block still asks is the same
   failure with the same reporting.
 
+A runtime may additionally record a **digest of each write's payload**
+and check it on replay. The payload itself is an output and stays off
+the transcript, but a run that writes *different data* to the recorded
+path has diverged just as surely as one that asks a different question —
+without the digest, the replay would acknowledge data the recorded world
+never saw.
+
 A replay needs no capabilities. A Block replayed from a transcript can be run
 with nothing mounted but the transcript and its observation paths — no network,
 no clock, no entropy — which is itself a statement of what a transcript is: the

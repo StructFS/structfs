@@ -61,9 +61,27 @@ Orthogonal features, mixable freely:
 /// Per-block transcripts as stores: one JSONL-backed append log per block in
 /// `dir`. The runtime sees only the store; the file is this provider's
 /// implementation detail.
+///
+/// Keys are assembly-scoped paths (`demo/shell`, `demo/sub/inner`,
+/// `child#2/kv`), laid out as directories under `dir`. Segments are
+/// sanitized so a hostile block name can't escape it.
 fn transcript_provider(dir: std::path::PathBuf, fresh: bool) -> Arc<TranscriptProvider> {
     Arc::new(move |block: &str| {
-        let file = dir.join(format!("{block}.transcript.jsonl"));
+        let mut file = dir.clone();
+        for segment in block.split('/') {
+            let safe: String = segment
+                .chars()
+                .map(|c| match c {
+                    'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '#' | '.' => c,
+                    _ => '_',
+                })
+                .collect();
+            file.push(if safe == ".." { "__".to_string() } else { safe });
+        }
+        file.set_file_name(format!(
+            "{}.transcript.jsonl",
+            file.file_name().unwrap_or_default().to_string_lossy()
+        ));
         if fresh {
             // A new recording replaces the old transcript; appending to a
             // previous run's entries would corrupt both.

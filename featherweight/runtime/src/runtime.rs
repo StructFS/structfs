@@ -117,6 +117,12 @@ pub(crate) struct BlockRuntime {
     stdio_kind: String,
     spawn: bool,
     base_dir: std::path::PathBuf,
+    /// Assembly-scoped transcript identity (spec 12): `root/block`,
+    /// `root/nested/block`, with `#n` appended when a key recurs across
+    /// instantiations (the same definition spawned twice). Unlike
+    /// `cell.id` it is stable across runs, which is what lets a
+    /// recording made today replay tomorrow.
+    transcript_key: String,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -137,6 +143,9 @@ pub(crate) struct RtCtx {
     metering: Mutex<Metering>,
     transcript_mode: Mutex<TranscriptMode>,
     determinism: Mutex<Determinism>,
+    /// How many times each transcript key base has been claimed, for the
+    /// `#n` suffix on reuse.
+    transcript_keys: Mutex<HashMap<String, u64>>,
     runtime: Weak<RuntimeInner>,
 }
 
@@ -242,22 +251,25 @@ impl RtCtx {
         let transcript = match &transcript_mode {
             TranscriptMode::Off => None,
             TranscriptMode::Record(provider) => Some(
-                provider(&cell.name)
+                provider(&block.transcript_key)
                     .map(BlockTranscript::recording)
                     .map_err(|e| {
                         cell.set_state(BlockState::Failed);
                         RuntimeError::assembly(format!(
                             "transcript store for block '{}': {e}",
-                            cell.name
+                            block.transcript_key
                         ))
                     })?,
             ),
             TranscriptMode::Replay(provider) => Some(
-                provider(&cell.name)
+                provider(&block.transcript_key)
                     .and_then(BlockTranscript::replaying)
                     .map_err(|e| {
                         cell.set_state(BlockState::Failed);
-                        RuntimeError::assembly(format!("transcript for block '{}': {e}", cell.name))
+                        RuntimeError::assembly(format!(
+                            "transcript for block '{}': {e}",
+                            block.transcript_key
+                        ))
                     })?,
             ),
         };
@@ -529,11 +541,25 @@ impl RuntimeInner {
     }
 
     /// Instantiate an assembly definition. See [`Runtime::instantiate`].
+    ///
+    /// The transcript scope for a root instantiation — whether by the
+    /// embedder or a spawner — is the definition's own name; nesting
+    /// appends block names below it.
     pub(crate) fn instantiate(
         self: &Arc<Self>,
         def: &AssemblyDef,
         imports: HashMap<String, HostStore>,
         base_dir: &std::path::Path,
+    ) -> Result<Arc<AssemblyInstance>> {
+        self.instantiate_scoped(def, imports, base_dir, &def.name)
+    }
+
+    fn instantiate_scoped(
+        self: &Arc<Self>,
+        def: &AssemblyDef,
+        imports: HashMap<String, HostStore>,
+        base_dir: &std::path::Path,
+        scope: &str,
     ) -> Result<Arc<AssemblyInstance>> {
         for import in def.imports.keys() {
             if !imports.contains_key(import) {
@@ -584,7 +610,12 @@ impl RuntimeInner {
                         child_def.name
                     )));
                 }
-                let child = self.instantiate(&child_def, HashMap::new(), base_dir)?;
+                // The child's scope is its position in the tree, not its
+                // definition's name: two nestings of one definition must
+                // not share transcript identities.
+                let child_scope = format!("{scope}/{name}");
+                let child =
+                    self.instantiate_scoped(&child_def, HashMap::new(), base_dir, &child_scope)?;
                 cells.insert(name.clone(), child.public_cell().clone());
                 children.push(child);
             } else {
@@ -623,6 +654,25 @@ impl RuntimeInner {
                 entries.push((wire.prefix.clone(), target));
             }
 
+            // Claim the block's transcript key: assembly-scoped, `#n` on
+            // reuse. The counter lives for the runtime, so the same
+            // definition spawned twice gets `…/kv` then `…/kv#2` — in
+            // spawn order, which a deterministic run makes stable.
+            let transcript_key = {
+                let base = format!("{scope}/{name}");
+                let mut keys = self
+                    .ctx
+                    .transcript_keys
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let uses = keys.entry(base.clone()).or_insert(0);
+                *uses += 1;
+                match *uses {
+                    1 => base,
+                    n => format!("{base}#{n}"),
+                }
+            };
+
             self.ctx.lock_blocks().insert(
                 cell.id.clone(),
                 Arc::new(BlockRuntime {
@@ -635,6 +685,7 @@ impl RuntimeInner {
                     stdio_kind: block_def.stdio.clone(),
                     spawn: block_def.spawn,
                     base_dir: base_dir.to_path_buf(),
+                    transcript_key,
                     task: Mutex::new(None),
                 }),
             );
@@ -683,6 +734,7 @@ impl Runtime {
                 metering: Mutex::new(Metering::default()),
                 transcript_mode: Mutex::new(TranscriptMode::Off),
                 determinism: Mutex::new(Determinism::Live),
+                transcript_keys: Mutex::new(HashMap::new()),
                 runtime: weak.clone(),
             }),
             builtins: Mutex::new(HashMap::new()),
