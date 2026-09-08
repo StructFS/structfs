@@ -15,7 +15,7 @@ permalink: /implementations/
   <a href="/abi/">Block ABI</a> in at least one binding.</p>
 
   <h2 id="featherweight">featherweight — the reference implementation</h2>
-  <p><a href="https://featherweight.structfs.com">Featherweight</a> is a
+  <p><a href="{{ sites.featherweight }}">Featherweight</a> is a
   single-node runtime in Rust over StructFS, developed alongside this
   spec and tracking it as it evolves. It implements assemblies with
   capability wiring, the full <code>/iso/</code> surface, the core-wasm
@@ -24,8 +24,8 @@ permalink: /implementations/
   Its focus is the single-node case: composing many small, isolated
   blocks in one process.</p>
   <p><a href="https://github.com/structfs/structfs/tree/main/featherweight">Source</a>
-  · <a href="https://featherweight.structfs.com/quickstart/">quickstart</a>
-  · <a href="https://featherweight.structfs.com/demo/">live demo</a></p>
+  · <a href="{{ sites.featherweight }}/quickstart/">quickstart</a>
+  · <a href="{{ sites.featherweight }}/demo/">live demo</a></p>
 
   <h2 id="browser-host">The browser host</h2>
   <p>A second, independent host of the
@@ -35,7 +35,7 @@ permalink: /implementations/
   binaries wasmtime runs — in a browser or in Node, with a parked
   mailbox via <code>Atomics.wait</code>. Two hosts with no shared code
   executing identical artifacts is the binding's host-neutrality claim,
-  demonstrated. <a href="https://featherweight.structfs.com/demo/">It
+  demonstrated. <a href="{{ sites.featherweight }}/demo/">It
   powers the live demo.</a></p>
 
   <h2 id="conformance">Conformance</h2>

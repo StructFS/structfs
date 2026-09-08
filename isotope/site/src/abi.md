@@ -123,7 +123,7 @@ The reference hosts of the core binding:
 - **the browser host** — ~120 lines of dependency-free JavaScript. The
   same `kv.wasm` runs resident in a Web Worker, its mailbox read parked
   in `Atomics.wait`. [It's running on the featherweight
-  site.](https://featherweight.structfs.com/demo/)
+  site.]({{ sites.featherweight }}/demo/)
 
 That the same guest binary runs under both is the host-neutrality the
 binding claims — demonstrated, not asserted.

@@ -9,7 +9,7 @@ permalink: /sdks/
 # SDKs
 
 A block's entire interface is the two-function [Block
-ABI](https://isotope.structfs.com/abi/), so an SDK is small by
+ABI]({{ sites.isotope }}/abi/), so an SDK is small by
 construction: wrap `read` and `write`, export `block_alloc`,
 `manifest`, and `run`. These exist today:
 

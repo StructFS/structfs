@@ -16,7 +16,7 @@ layout: base.njk
   <div class="feature-grid">
     <div class="feature-card">
       <h3>Blocks are pico-processes</h3>
-      <p>A block's entire world is <a href="https://structfs.com">StructFS</a> reads and writes. No syscalls, no sockets, no ambient authority — if it isn't a path in your namespace, it doesn't exist.</p>
+      <p>A block's entire world is <a href="{{ sites.structfs }}">StructFS</a> reads and writes. No syscalls, no sockets, no ambient authority — if it isn't a path in your namespace, it doesn't exist.</p>
     </div>
     <div class="feature-card">
       <h3>Namespaces are capabilities</h3>
@@ -49,8 +49,8 @@ layout: base.njk
   scheduler, or a wire format; those belong to
   <a href="/implementations/">implementations</a>. The reference
   implementation is
-  <a href="https://featherweight.structfs.com">featherweight</a>, a
+  <a href="{{ sites.featherweight }}">featherweight</a>, a
   single-node runtime in Rust — including
-  <a href="https://featherweight.structfs.com/demo/">a block you can run
+  <a href="{{ sites.featherweight }}/demo/">a block you can run
   in your browser</a>.</p>
 </section>

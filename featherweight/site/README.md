@@ -35,9 +35,10 @@ domains) must carry CORP/CORS headers or the browser will block it.
 
 ## Deploying
 
-**The domain is TBD** — `src/_data/site.json` currently says
-`https://featherweight.structfs.com` as a placeholder; update it (and
-the isotope site's links to it) when the real domain is chosen.
+**The domain is TBD** — all site domains are single-sourced from
+`/sites.json` at the repo root; edit the `featherweight` entry there
+when the real domain is chosen and every cross-link (on this site and
+its siblings) plus this site's canonical URL update together.
 
 `.github/workflows/deploy-featherweight-site.yml` is
 `workflow_dispatch`-only until the Cloudflare side exists. To go live:
@@ -47,6 +48,6 @@ the isotope site's links to it) when the real domain is chosen.
 2. Ensure the `structfs_com` environment secrets
    (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`) cover it, or give
    the workflow its own environment.
-3. Point the chosen domain at the Pages project and update
-   `src/_data/site.json`.
+3. Point the chosen domain at the Pages project and update the
+   `featherweight` entry in `/sites.json`.
 4. Add the push trigger to the workflow (see the comment in it).
