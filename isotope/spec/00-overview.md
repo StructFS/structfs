@@ -101,6 +101,7 @@ The Isotope specification defines:
 9. **POSIX Closure** — Stdio, env, timers, spawn/wait, the unified mailbox (see `09-posix-closure.md`)
 10. **The WASI Tower** — The Block ABI, and WASI as shims above it (see `10-wasi-tower.md`)
 11. **The Core-Wasm Binding** — The SDK binding: the Block ABI on plain wasm modules (see `11-core-wasm-binding.md`)
+12. **Determinism and Replay** — Determinism classes, transcripts (record/replay), virtual providers, checkpoints; two orthogonal optional features (see `12-determinism.md`)
 
 ## Non-Goals
 
