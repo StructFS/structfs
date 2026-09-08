@@ -37,5 +37,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 featherweight-wasi = { version = "0.2.0", path = "../wasi" }
 structfs-json-store = { workspace = true }
+# Assembles the cross-host fixture guest (tests/transcript.rs); already
+# in the graph via wasmtime's wat feature.
+wat = "1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

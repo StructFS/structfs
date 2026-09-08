@@ -40,7 +40,7 @@ in a worker, every interaction a server-protocol request (spec 07).</p>
 <div id="log"></div>
 
 <script type="module">
-import { WorkerHost } from "./worker-host.mjs";
+import { WorkerHost } from "./dist/worker-host.js";
 
 const log = (text, cls = "") => {
   const line = document.createElement("div");
@@ -51,12 +51,12 @@ const log = (text, cls = "") => {
 
 if (!crossOriginIsolated) {
   log("SharedArrayBuffer needs COOP/COEP headers — serve this page " +
-      "with `node serve.mjs`.", "err");
+      "with `npm run build && node serve.ts`.", "err");
 }
 
 const wasm = await (await fetch("./kv.wasm")).arrayBuffer();
 const host = await WorkerHost.start({
-  createWorker: () => new Worker(new URL("./worker.mjs", import.meta.url),
+  createWorker: () => new Worker(new URL("./dist/worker.js", import.meta.url),
                                  { type: "module" }),
   wasm,
   onStdio: (stream, text) => log(`[${stream}] ${text}`),

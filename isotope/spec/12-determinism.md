@@ -216,12 +216,53 @@ Because a Block is single-threaded, its boundary operations are totally
 ordered and the transcript is a simple sequence. No timestamps, no
 synchronization, no merge.
 
-The transcript's serialization is implementation-defined — the spec's non-goals
-(`00-overview.md`) exclude wire formats. One recommendation: a transcript
-presented *as a store* (an append log read through the same cursor
-conventions as any other log) composes with existing tooling — a transcript can
-then be mounted, paged, diffed, and cascaded over, with nothing built
-specially for it.
+A transcript should be presented *as a store* — an append log read
+through the same cursor conventions as any other log — so it composes
+with existing tooling: mounted, paged, diffed, and cascaded over, with
+nothing built specially for it. How the store persists it is the
+store's business.
+
+### The Interop Format
+
+A transcript that must travel between runtimes uses this format —
+runtimes that speak it can replay each other's recordings, which is
+the property that makes a Block's run portable evidence rather than
+one host's private state. One JSON object per entry, in order (JSON
+Lines when written as a file):
+
+```
+{"op": "read" | "write",
+ "path": "<the path asked, as a string>",
+ "answer": <answer>,
+ "wrote": "<payload digest, writes only, optional>"}
+```
+
+The answer is one of four shapes, mirroring the four things a boundary
+can say:
+
+| The world said | `answer` |
+|---|---|
+| a value | `{"found": {"parsed": <value>}}` |
+| nothing at that path | `"absent"` |
+| a write acknowledgement | `{"wrote": "<result path>"}` |
+| a refusal | `{"failed": {"kind": "<kind>", "message": "...", "path"?: "..."}}` |
+
+Error kinds are the closed set `not_found`, `no_route`,
+`permission_denied`, `conflict`, `overloaded`, `deadline_exceeded`,
+`resource_limit`, `cancelled`, and `other` — replayed code must branch
+on the same typed error the recorded run saw. Integer values are
+written at full precision; a replaying host whose numbers are narrower
+than the recording's must preserve the exact rendering (nanosecond
+timestamps exceed 2^53).
+
+The `wrote` digest is fnv1a-64, lowercase hex, over the UTF-8 of the
+answer envelope's value form (`{"parsed":<value>}` with the value's
+canonical rendering). It is optional per entry: a host records it only
+when it can render the payload unambiguously (strings, booleans, null,
+exact integers — canonical JSON of composites is a host's own affair
+until a canonicalization is pinned), and replay compares digests only
+when both sides have one. A missing digest weakens divergence
+detection for that entry; it never causes one.
 
 ## Replay
 

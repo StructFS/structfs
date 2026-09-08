@@ -1,22 +1,29 @@
 # The browser host
 
-A JavaScript host for the core-wasm binding
+A strict-TypeScript host for the core-wasm binding
 (`isotope/spec/11-core-wasm-binding.md`): the same guest binaries the
 native runtime executes with wasmtime run here, in a browser or in
-Node, against ~120 lines of dependency-free ES module. Two imports,
-`block_alloc` delivery, the typed error taxonomy as status codes — the
-binding's host side, demonstrated portable.
+Node, with no runtime dependencies. Two imports, `block_alloc`
+delivery, the typed error taxonomy as status codes — the binding's
+host side, demonstrated portable.
+
+Transcripts (`isotope/spec/12-determinism.md`) are supported in the
+same wire format the native runtime writes: a run recorded by `fw
+run --record` replays here, and a run recorded here replays there.
+The committed fixtures under `test/fixtures/` pin that contract in
+both directions, digests included.
 
 ## Pieces
 
 | File | What |
 |------|------|
-| `structfs-host.mjs` | The binding host: `instantiate(wasmBytes, store)` → `{manifest, run}` |
-| `iso-store.mjs` | A minimal `/iso` surface: mailbox, responses, stdio, env/args, time, shutdown; everything else denied like an unwired namespace |
-| `channel.mjs` | One-slot SharedArrayBuffer channel — a parked mailbox read via `Atomics.wait` |
-| `worker.mjs` / `worker-host.mjs` | Resident-server mode: the guest's synchronous `run()` lives in a worker, parked between requests |
-| `index.html` + `serve.mjs` | The demo: wasm-kv resident in a worker, driven by buttons |
-| `test/host.test.mjs` | Node smoke tests against the real kv guest |
+| `structfs-host.ts` | The binding host: `instantiate(wasmBytes, store)` → `{manifest, run}` |
+| `iso-store.ts` | A minimal `/iso` surface: mailbox, responses, stdio, env/args, time, randomness, shutdown; everything else denied like an unwired namespace |
+| `transcript.ts` | Spec 12 transcripts: `RecordingStore`/`ReplayingStore` wrapping any store, JSONL to/from the native runtime's format |
+| `channel.ts` | One-slot SharedArrayBuffer channel — a parked mailbox read via `Atomics.wait` |
+| `worker.ts` / `worker-host.ts` | Resident-server mode: the guest's synchronous `run()` lives in a worker, parked between requests; `record`/`replay` options wrap its store |
+| `index.html` + `serve.ts` | The demo: wasm-kv resident in a worker, driven by buttons |
+| `test/` | Node tests (`node --test`, TypeScript run natively) and the cross-host fixtures |
 
 ## Two drive modes
 
@@ -29,36 +36,45 @@ and exits.
 `Atomics.wait` while the main thread stays live. The block keeps its
 state between requests, exactly as under the native runtime; responses
 and stdio stream out via `postMessage`. Browsers require
-cross-origin-isolation for SharedArrayBuffer, hence `serve.mjs`'s
+cross-origin-isolation for SharedArrayBuffer, hence `serve.ts`'s
 COOP/COEP headers.
+
+## Transcripts
+
+Wrap any store to record; replay needs no store at all:
+
+```ts
+import { RecordingStore, ReplayingStore, fromJsonl } from "./transcript.ts";
+
+const recording = new RecordingStore(new IsoStore());
+(await instantiate(wasm, recording)).run();
+const jsonl = recording.jsonl();          // the native format
+
+const replay = new ReplayingStore(fromJsonl(jsonl));
+(await instantiate(wasm, replay)).run();  // the world never consulted
+```
+
+Resident mode takes `record: true` / `replay: jsonl` on
+`WorkerHost.start`; under replay nothing parks — the channel is never
+waited on. Divergence (a different question, or the same write with
+different data) fails loudly with the entry index; replay of a
+transcript recorded by the native runtime preserves nanosecond
+integers exactly (JSON.parse source access → `RawJson`).
 
 ## Run it
 
 ```bash
-# Tests (builds kv.wasm from featherweight-guest, then node --test):
-./scripts/browser_host_test.sh
+npm install          # dev-only: typescript
+npm run check        # tsc --noEmit, strict
+npm test             # node --test (Node ≥ 23.6 runs the .ts directly)
+npm run build        # emit dist/ for the browser demo
+node serve.ts        # then open http://localhost:8787
 
-# Demo:
-node featherweight/host/browser/serve.mjs   # then open localhost:8787
+# Or everything, after building the kv guest:
+../../../scripts/browser_host_test.sh
 ```
 
-Needs Node 20+ and the `wasm32-unknown-unknown` target. Not wired into
-`quality_gates.sh`, which stays hermetic to the Rust toolchain.
-
-## The store interface
-
-The host is generic over a JS store, mirroring `Reader`/`Writer`:
-
-```js
-store.read(path)         // -> value, or undefined when absent
-store.write(path, value) // -> result path (a string)
-// either may throw StoreError(status.X, message)
-```
-
-Paths cross as strings, payloads as JSON (the manifest's declared
-serialization). `RawJson` wraps pre-serialized text for values
-JavaScript numbers would mangle (nanosecond timestamps).
-
-This host speaks `application/json` only; guests declaring another
-transport (the native runtime also supports CBOR and FlexBuffers) are
-rejected at startup rather than silently mis-decoded.
+To regenerate the cross-host fixtures after changing the probe or the
+wire format: `node test/record-fixture.ts` here, and
+`cargo test -p featherweight-runtime --test transcript -- --ignored regenerate`
+on the native side.

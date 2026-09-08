@@ -397,3 +397,94 @@ async fn a_replay_that_writes_different_data_diverges() {
     let error = cell.last_error().unwrap_or_default();
     assert!(error.contains("different data"), "{error}");
 }
+
+// === Cross-host fixtures ===
+//
+// The TS browser host speaks the same transcript wire format; the
+// fixtures beside its tests pin that byte-for-byte in both directions.
+// A transcript recorded by this runtime replays there, and one recorded
+// there replays here — the tests below are the "here" half.
+
+fn fixtures_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/browser/test/fixtures")
+}
+
+/// A provider that serves one committed JSONL fixture, whatever the key.
+fn fixture_provider(file: std::path::PathBuf) -> Arc<TranscriptProvider> {
+    Arc::new(move |_| {
+        Ok(host_store(LogStore::open(
+            structfs_json_store::JsonlFileBacking::new(&file),
+        )?))
+    })
+}
+
+/// Instantiate the probe guest from the committed artifact and replay
+/// it against a fixture transcript.
+async fn replay_probe_against(fixture: &str) -> Arc<featherweight_runtime::BlockCell> {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures_dir().join("transcript-probe.wasm"),
+        dir.path().join("probe.wasm"),
+    )
+    .unwrap();
+    let runtime = Runtime::new().with_transcripts(TranscriptMode::Replay(fixture_provider(
+        fixtures_dir().join(fixture),
+    )));
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+    assembly.wait_public_terminal().await;
+    assembly.shutdown(Duration::from_secs(2)).await;
+    assembly.public_cell().clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_committed_rust_fixture_replays_here() {
+    let cell = replay_probe_against("rust-recorded.jsonl").await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_committed_js_fixture_replays_here() {
+    let cell = replay_probe_against("js-recorded.jsonl").await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+}
+
+/// Regenerates the committed cross-host fixtures: assembles the probe
+/// wat and records a live run of it. Run by hand when the probe or the
+/// wire format changes:
+///
+///   cargo test -p featherweight-runtime --test transcript -- --ignored regenerate
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "regenerates committed fixtures; run by hand"]
+async fn regenerate_rust_fixture() {
+    let fixtures = fixtures_dir();
+    let wasm = wat::parse_file(fixtures.join("transcript-probe.wat")).unwrap();
+    std::fs::write(fixtures.join("transcript-probe.wasm"), &wasm).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("probe.wasm"), &wasm).unwrap();
+    let recorded = fixtures.join("rust-recorded.jsonl");
+    let _ = std::fs::remove_file(&recorded);
+    let runtime =
+        Runtime::new().with_transcripts(TranscriptMode::Record(fixture_provider(recorded)));
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+    assembly.wait_public_terminal().await;
+    assembly.shutdown(Duration::from_secs(2)).await;
+    assert_eq!(
+        assembly.public_cell().state(),
+        BlockState::Stopped,
+        "{:?}",
+        assembly.public_cell().last_error()
+    );
+}

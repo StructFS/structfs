@@ -1,0 +1,16 @@
+{
+  "name": "featherweight-browser-host",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript host for the Isotope core-wasm binding: runs the same guest binaries wasmtime runs, in a browser or in Node",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "tsc",
+    "test": "node --test test/",
+    "serve": "node serve.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}

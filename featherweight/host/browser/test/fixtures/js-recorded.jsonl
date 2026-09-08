@@ -1,0 +1,5 @@
+{"op":"read","path":"iso/random/uuid","answer":{"found":{"parsed":"d5a171bb-b781-4a64-b754-9acb0dbada3e"}}}
+{"op":"read","path":"iso/time/now_unix_ns","answer":{"found":{"parsed":1788841867233000000}}}
+{"op":"read","path":"secrets","answer":{"failed":{"kind":"permission_denied","message":"not wired: secrets"}}}
+{"op":"write","path":"iso/stdio/stdout","answer":{"wrote":"iso/stdio/stdout"},"wrote":"a528605174a7fbcb"}
+{"op":"write","path":"iso/log/info","answer":{"wrote":"iso/log/info"},"wrote":"b91af0fe0713a16f"}
