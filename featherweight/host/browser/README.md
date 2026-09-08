@@ -20,6 +20,7 @@ both directions, digests included.
 | `structfs-host.ts` | The binding host: `instantiate(wasmBytes, store)` → `{manifest, run}` |
 | `iso-store.ts` | A minimal `/iso` surface: mailbox, responses, stdio, env/args, time, randomness, shutdown; everything else denied like an unwired namespace |
 | `transcript.ts` | Spec 12 transcripts: `RecordingStore`/`ReplayingStore` wrapping any store, JSONL to/from the native runtime's format |
+| `session.ts` | The session log (spec 12): an arrival-order forensic timeline across every block the page runs; `tap()` wraps any store transparently |
 | `channel.ts` | One-slot SharedArrayBuffer channel — a parked mailbox read via `Atomics.wait` |
 | `worker.ts` / `worker-host.ts` | Resident-server mode: the guest's synchronous `run()` lives in a worker, parked between requests; `record`/`replay` options wrap its store |
 | `index.html` + `serve.ts` | The demo: wasm-kv resident in a worker, driven by buttons |
@@ -55,8 +56,10 @@ const replay = new ReplayingStore(fromJsonl(jsonl));
 ```
 
 Resident mode takes `record: true` / `replay: jsonl` on
-`WorkerHost.start`; under replay nothing parks — the channel is never
-waited on. Divergence (a different question, or the same write with
+`WorkerHost.start`, plus `session: log, block: name` to witness every
+operation into a shared `SessionLog` — several workers sharing one log
+get a cross-block timeline, `seq` assigned in main-thread arrival
+order. Under replay nothing parks — the channel is never waited on. Divergence (a different question, or the same write with
 different data) fails loudly with the entry index; replay of a
 transcript recorded by the native runtime preserves nanosecond
 integers exactly (JSON.parse source access → `RawJson`).

@@ -50,13 +50,18 @@ failure:
 const USAGE: &str = "usage:
   fw shell                     run the demo assembly (interactive shell)
   fw run <assembly.json|yaml> [--record DIR | --replay DIR] [--seed N]
+                              [--session FILE]
                                run an assembly definition
 Orthogonal features, mixable freely:
-  --record DIR   write each block's boundary answers as a transcript in DIR
-  --replay DIR   answer every boundary operation from the transcripts in DIR;
-                 the live world is never consulted
-  --seed N       deterministic mode: seeded entropy and a virtual clock, so
-                 two runs with one seed are the same run";
+  --record DIR    write each block's boundary answers as a transcript in DIR
+                  (and a session log to DIR/session.jsonl)
+  --replay DIR    answer every boundary operation from the transcripts in DIR;
+                  the live world is never consulted
+  --seed N        deterministic mode: seeded entropy and a virtual clock, so
+                  two runs with one seed are the same run
+  --session FILE  forensics: an assembly-wide, arrival-order log of every
+                  block's boundary operations — works live, recording, or
+                  replaying";
 
 /// Per-block transcripts as stores: one JSONL-backed append log per block in
 /// `dir`. The runtime sees only the store; the file is this provider's
@@ -103,6 +108,7 @@ fn main() {
     // --record DIR | --replay DIR (mutually exclusive) and --seed N
     // (orthogonal to both), position-free.
     let mut transcript_mode = TranscriptMode::Off;
+    let mut record_dir: Option<std::path::PathBuf> = None;
     for flag in ["--record", "--replay"] {
         if let Some(at) = args.iter().position(|a| a == flag) {
             if at + 1 >= args.len() {
@@ -116,11 +122,31 @@ fn main() {
             let dir = std::path::PathBuf::from(args.remove(at + 1));
             args.remove(at);
             transcript_mode = match flag {
-                "--record" => TranscriptMode::Record(transcript_provider(dir, true)),
+                "--record" => {
+                    record_dir = Some(dir.clone());
+                    TranscriptMode::Record(transcript_provider(dir, true))
+                }
                 _ => TranscriptMode::Replay(transcript_provider(dir, false)),
             };
         }
     }
+    // --session FILE: explicit wins; --record DIR implies DIR/session.jsonl.
+    let mut session_file: Option<std::path::PathBuf> = None;
+    if let Some(at) = args.iter().position(|a| a == "--session") {
+        let Some(file) = args.get(at + 1) else {
+            eprintln!("fw: --session needs a file\n{USAGE}");
+            std::process::exit(2);
+        };
+        session_file = Some(std::path::PathBuf::from(file));
+        args.remove(at + 1);
+        args.remove(at);
+    }
+    if session_file.is_none() {
+        if let Some(dir) = &record_dir {
+            session_file = Some(dir.join("session.jsonl"));
+        }
+    }
+
     let mut determinism = Determinism::Live;
     if let Some(at) = args.iter().position(|a| a == "--seed") {
         let Some(seed) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
@@ -174,6 +200,17 @@ fn main() {
     let mut runtime = Runtime::with_handle(rt.handle().clone())
         .with_transcripts(transcript_mode)
         .with_determinism(determinism);
+    if let Some(file) = session_file {
+        // A fresh log per run: a session is one run's timeline.
+        let _ = std::fs::remove_file(&file);
+        match LogStore::open(JsonlFileBacking::new(&file)) {
+            Ok(log) => runtime = runtime.with_session_log(host_store(log)),
+            Err(e) => {
+                eprintln!("fw: cannot open session log {}: {e}", file.display());
+                std::process::exit(1);
+            }
+        }
+    }
     register_builtins(&mut runtime);
     // The WIT component binding is an adapter, not a core concern: the
     // CLI opts in so component artifacts run alongside core modules.

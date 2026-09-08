@@ -15,9 +15,10 @@ use crate::determinism::Determinism;
 use crate::error::{Result, RuntimeError};
 use crate::iso::{IsoConfig, IsoSurface, LogSink, StderrLog};
 use crate::metering::Metering;
-use crate::namespace::{host_store, HostStore, Namespace, Target, WiringTable};
+use crate::namespace::{host_store, HostStore, Namespace, SessionWitness, Target, WiringTable};
 use crate::native::NativeBlockFactory;
 use crate::protocol::{decode_read_response, decode_write_response};
+use crate::session::SessionLog;
 use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
 use crate::transcript::{BlockTranscript, TranscriptMode};
@@ -146,6 +147,9 @@ pub(crate) struct RtCtx {
     /// How many times each transcript key base has been claimed, for the
     /// `#n` suffix on reuse.
     transcript_keys: Mutex<HashMap<String, u64>>,
+    /// The session log (spec 12): the assembly-wide forensic witness,
+    /// when one is attached.
+    session: Mutex<Option<Arc<SessionLog>>>,
     runtime: Weak<RuntimeInner>,
 }
 
@@ -282,6 +286,18 @@ impl RtCtx {
                 Some(block.wiring.clone()),
             )
         });
+        // The session log (spec 12) witnesses every mode — live,
+        // recording, and replay — under the block's stable key.
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .map(|log| SessionWitness {
+                log,
+                block: block.transcript_key.clone(),
+            });
+
         // Determinism (spec 12) is the orthogonal feature: it decides how
         // the iso surface sources time and entropy, whether or not a
         // transcript is being kept.
@@ -309,6 +325,7 @@ impl RtCtx {
                 block.wiring.clone(),
                 block.cell.clone(),
                 transcript,
+                session,
             );
 
             // Spec 05 ties Running to "begins reading requests", but an
@@ -735,6 +752,7 @@ impl Runtime {
                 transcript_mode: Mutex::new(TranscriptMode::Off),
                 determinism: Mutex::new(Determinism::Live),
                 transcript_keys: Mutex::new(HashMap::new()),
+                session: Mutex::new(None),
                 runtime: weak.clone(),
             }),
             builtins: Mutex::new(HashMap::new()),
@@ -795,6 +813,23 @@ impl Runtime {
             .determinism
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = determinism;
+        self
+    }
+
+    /// Attach a session log (spec 12): an assembly-wide, arrival-order
+    /// forensic witness of every block's boundary operations, written to
+    /// `store` with the append-log convention. Observation-class — it
+    /// answers nothing, replay never reads it, and it works in every
+    /// mode: live (a flight recorder with no transcripts), recording
+    /// (entries link into the transcripts), and replay (the re-run's own
+    /// timeline). Orthogonal to transcripts and determinism — mix freely.
+    pub fn with_session_log(self, store: HostStore) -> Self {
+        *self
+            .inner
+            .ctx
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(SessionLog::new(store));
         self
     }
 

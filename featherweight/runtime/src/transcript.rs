@@ -163,6 +163,8 @@ fn transcript_to_error(transcript: TranscriptError) -> Error {
 pub(crate) enum BlockTranscript {
     Recording {
         log: HostStore,
+        /// Entries appended so far — the next entry's index.
+        appended: u64,
     },
     Replaying {
         entries: VecDeque<TranscriptEntry>,
@@ -173,7 +175,16 @@ pub(crate) enum BlockTranscript {
 
 impl BlockTranscript {
     pub(crate) fn recording(log: HostStore) -> Self {
-        BlockTranscript::Recording { log }
+        BlockTranscript::Recording { log, appended: 0 }
+    }
+
+    /// The index the next operation will occupy (recording) or consume
+    /// (replaying) — what a session-log entry links to.
+    pub(crate) fn position(&self) -> u64 {
+        match self {
+            BlockTranscript::Recording { appended, .. } => *appended,
+            BlockTranscript::Replaying { cursor, .. } => *cursor as u64,
+        }
     }
 
     /// Load a transcript for replay through the append-log tail convention.
@@ -236,7 +247,7 @@ impl BlockTranscript {
         answer: TranscriptAnswer,
         wrote: Option<String>,
     ) -> Result<(), Error> {
-        let BlockTranscript::Recording { log } = self else {
+        let BlockTranscript::Recording { log, appended } = self else {
             return Ok(());
         };
         let entry = TranscriptEntry {
@@ -246,6 +257,7 @@ impl BlockTranscript {
             wrote,
         };
         log.write(&path!("append"), Record::parsed(to_value(&entry)?))?;
+        *appended += 1;
         Ok(())
     }
 

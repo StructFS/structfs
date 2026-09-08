@@ -404,13 +404,56 @@ cannot tell whether it is being recorded, and must not be able to tell it
 is being replayed except by the absence of capabilities it never checks
 for by another channel.
 
+## The Session Log
+
+Per-block transcripts deliberately record no cross-block order, and
+replay must never depend on one. But the interleaving is real, and it
+is what a timeline debugger, a post-incident investigation, and the
+question "what actually happened across this Assembly?" all want. The
+**session log** is that view: an optional, runtime-wide,
+arrival-order witness of every boundary operation across every Block.
+
+One entry per operation, in the order the runtime's witness observed
+them:
+
+```
+{"seq": <dense from 0>,
+ "block": "<the Block's transcript key>",
+ "op": "read" | "write",
+ "path": "...",
+ "outcome": "found" | "absent" | "wrote" | "failed:<kind>",
+ "entry": <index into the Block's transcript, when one is kept>}
+```
+
+Properties that make it sound:
+
+- **Observation-class, by construction.** The log is written after
+  each operation completes and answers nothing. Replay never reads
+  it; a recording is complete without it; appending must never fail
+  the operation observed. It works in every mode — live (a flight
+  recorder with no transcripts at all), recording (`entry` links each
+  witnessed operation to its full answer in the Block's transcript),
+  and replay (the re-run writes its own timeline, comparable to the
+  original's).
+- **A witness, not a contract.** `seq` is the order operations
+  reached the log — an honest record of one observed interleaving,
+  never an ordering the Blocks agreed to or that a replay must
+  reproduce. Per-block transcripts remain the only replay authority.
+  In a distributed Assembly each runtime keeps its own session log;
+  no global clock is implied or required.
+- **The summary is legible alone.** `outcome` is enough to read a
+  timeline without joining; the `entry` link recovers full answers
+  when depth is needed.
+
 ## Open Questions
 
 1. **Shared stateful stores.** Two Blocks wired to one stateful store
    interleave their operations on it. Each Block's transcript replays that
    Block correctly, but re-running the *store* from both transcripts needs a
-   merge order the transcripts do not carry. Is the store's own log the third
-   transcript?
+   merge order the transcripts do not carry. The session log witnesses
+   that interleaving from the runtime's side; is the store's own log
+   the authoritative third transcript, with the session log as its
+   cross-check?
 
 2. **Effects the Block reads back.** A Block that writes an effect and
    later reads its consequence through an input mount (writes a file
@@ -425,7 +468,8 @@ for by another channel.
    into a blob store) as a portable transcript optimization?
 
 4. **Divergence localization.** A path mismatch locates divergence at
-   the boundary, but the cause is earlier, inside the Block. Should
+   the boundary — and the session log places it on the Assembly's
+   timeline — but the cause is earlier, inside the Block. Should
    transcripts carry optional progress markers (instruction counts, logical
    clocks) to bisect against?
 

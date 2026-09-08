@@ -14,7 +14,15 @@ use structfs_core_store::{Error, Path, Reader, Record, Shared, Store, Value, Wri
 use crate::block::BlockCell;
 use crate::iso::IsoSurface;
 use crate::runtime::RtCtx;
+use crate::session::SessionLog;
 use crate::transcript::BlockTranscript;
+
+/// One block's line into the session log: the log plus the identity
+/// entries are witnessed under.
+pub(crate) struct SessionWitness {
+    pub(crate) log: Arc<SessionLog>,
+    pub(crate) block: String,
+}
 
 /// A shared host-side store (config, imports).
 pub type HostStore = Shared<Box<dyn Store>>;
@@ -136,6 +144,10 @@ pub struct Namespace {
     /// Transcripts (spec 12): every operation through this namespace is
     /// recorded to, or answered from, the block's transcript.
     transcript: Option<BlockTranscript>,
+    /// The session log (spec 12): a forensic witness of every
+    /// operation's arrival order across the assembly. Observation-class:
+    /// it answers nothing and never fails an operation.
+    session: Option<SessionWitness>,
 }
 
 impl Namespace {
@@ -145,6 +157,7 @@ impl Namespace {
         wiring: Arc<WiringTable>,
         cell: Arc<BlockCell>,
         transcript: Option<BlockTranscript>,
+        session: Option<SessionWitness>,
     ) -> Self {
         Self {
             ctx,
@@ -152,6 +165,7 @@ impl Namespace {
             wiring,
             cell,
             transcript,
+            session,
         }
     }
 
@@ -233,16 +247,33 @@ impl Namespace {
 // makes — iso, wired services, even the root listing — crosses it
 // uniformly (spec 12). Under replay the live world is never consulted:
 // no iso surface, no wiring targets, no effects.
+impl Namespace {
+    /// Witness one completed operation in the session log, if one is
+    /// attached. `entry` is the transcript index the operation occupied
+    /// or consumed; forensics never fails the operation it observes.
+    fn witness(&self, op: &str, at: &Path, outcome: String, entry: Option<u64>) {
+        if let Some(session) = &self.session {
+            session.log.witness(&session.block, op, at, outcome, entry);
+        }
+    }
+}
+
 impl Reader for Namespace {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        let entry = self.transcript.as_ref().map(BlockTranscript::position);
         match &mut self.transcript {
-            Some(transcript) if transcript.is_replaying() => return transcript.replay_read(from),
+            Some(transcript) if transcript.is_replaying() => {
+                let result = transcript.replay_read(from);
+                self.witness("read", from, crate::session::read_outcome(&result), entry);
+                return result;
+            }
             _ => {}
         }
         let result = self.read_live(from);
         if let Some(transcript) = &mut self.transcript {
             transcript.record_read(from, &result)?;
         }
+        self.witness("read", from, crate::session::read_outcome(&result), entry);
         result
     }
 }
@@ -255,9 +286,12 @@ impl Writer for Namespace {
             .transcript
             .as_ref()
             .and_then(|_| crate::transcript::digest(&data));
+        let entry = self.transcript.as_ref().map(BlockTranscript::position);
         match &mut self.transcript {
             Some(transcript) if transcript.is_replaying() => {
-                return transcript.replay_write(to, wrote)
+                let result = transcript.replay_write(to, wrote);
+                self.witness("write", to, crate::session::write_outcome(&result), entry);
+                return result;
             }
             _ => {}
         }
@@ -265,6 +299,7 @@ impl Writer for Namespace {
         if let Some(transcript) = &mut self.transcript {
             transcript.record_write(to, wrote, &result)?;
         }
+        self.witness("write", to, crate::session::write_outcome(&result), entry);
         result
     }
 }

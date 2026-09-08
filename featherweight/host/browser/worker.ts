@@ -17,6 +17,7 @@
 
 import { ChannelReceiver } from "./channel.ts";
 import { IsoStore } from "./iso-store.ts";
+import { tapStore, type SessionEvent } from "./session.ts";
 import { instantiate, type HostStore } from "./structfs-host.ts";
 import { fromJsonl, RecordingStore, ReplayingStore } from "./transcript.ts";
 
@@ -29,6 +30,10 @@ export interface WorkerInit {
   record?: boolean;
   /// Replay from this JSONL instead of running live.
   replay?: string;
+  /// Witness every boundary operation to the session log under this
+  /// block name; events stream to the main thread, which assigns
+  /// arrival order.
+  session?: string;
 }
 
 export type WorkerMessage =
@@ -36,6 +41,7 @@ export type WorkerMessage =
   | { type: "taken" }
   | { type: "response"; id: number; value: unknown }
   | { type: "stdio"; stream: string; text: string }
+  | { type: "session"; event: SessionEvent }
   | { type: "log"; level: string; value: unknown }
   | {
       type: "exit";
@@ -62,7 +68,7 @@ const onMessage = (handler: (init: WorkerInit) => void): void => {
   } else nodePort?.on("message", handler);
 };
 
-onMessage(async ({ wasm, sab, args, env, record, replay }) => {
+onMessage(async ({ wasm, sab, args, env, record, replay, session }) => {
   try {
     const channel = new ChannelReceiver(sab);
     const iso = new IsoStore({
@@ -89,6 +95,16 @@ onMessage(async ({ wasm, sab, args, env, record, replay }) => {
     } else if (record === true) {
       recording = new RecordingStore(iso);
       store = recording;
+    }
+    if (session !== undefined) {
+      // The session tap observes the boundary as the guest sees it —
+      // outside the transcript wrapper, linked into it when one exists.
+      store = tapStore(
+        store,
+        session,
+        (event) => post({ type: "session", event }),
+        recording ?? replaying,
+      );
     }
 
     const guest = await instantiate(wasm, store);

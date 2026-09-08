@@ -3,6 +3,7 @@
 // their respond_to ids.
 
 import { ChannelSender, createChannel } from "./channel.ts";
+import type { SessionLog } from "./session.ts";
 import type { WorkerInit, WorkerMessage } from "./worker.ts";
 
 /// The subset of Worker both a browser Worker and a Node worker_thread
@@ -34,6 +35,13 @@ export interface WorkerHostOptions {
   /// the live world never consulted.
   record?: boolean;
   replay?: string;
+  /// Session forensics (spec 12): every boundary operation the guest
+  /// makes is witnessed into this log under `block`. Share one log
+  /// across several hosts and the main thread's arrival order is the
+  /// cross-worker timeline.
+  session?: SessionLog;
+  /// The block name session entries are witnessed under.
+  block?: string;
 }
 
 export type ResponseEnvelope =
@@ -104,6 +112,9 @@ export class WorkerHost {
         case "stdio":
           options.onStdio?.(message.stream, message.text);
           break;
+        case "session":
+          options.session?.witness(message.event);
+          break;
         case "log":
           options.onLog?.(message.level, message.value);
           break;
@@ -134,6 +145,7 @@ export class WorkerHost {
     };
     if (options.record !== undefined) init.record = options.record;
     if (options.replay !== undefined) init.replay = options.replay;
+    if (options.session !== undefined) init.session = options.block ?? "block";
     host.worker.postMessage(init);
     return ready;
   }

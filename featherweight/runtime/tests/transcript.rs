@@ -488,3 +488,116 @@ async fn regenerate_rust_fixture() {
         assembly.public_cell().last_error()
     );
 }
+
+// === The session log ===
+
+use featherweight_runtime::SessionEntry;
+
+fn session_store() -> HostStore {
+    host_store(LogStore::open(MemoryAppendBacking::new()).unwrap())
+}
+
+fn session_entries(store: &HostStore) -> Vec<SessionEntry> {
+    let mut store = store.clone();
+    let all = store
+        .read(&structfs_core_store::path!(""))
+        .unwrap()
+        .unwrap();
+    let Some(Value::Array(items)) = all.as_value() else {
+        panic!("expected the session log's array");
+    };
+    items
+        .iter()
+        .map(|item| structfs_serde_store::from_value(item.clone()).unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_log_witnesses_the_whole_assembly() {
+    let (transcripts, provider) = shared_transcripts();
+    let session = session_store();
+
+    let seen: Seen = Arc::default();
+    let mut runtime = probe_runtime(&seen, TranscriptMode::Record(provider));
+    runtime = runtime.with_session_log(session.clone());
+    let cell = run_assembly(&runtime, WIRED).await;
+    assert_eq!(cell.state(), BlockState::Stopped);
+
+    let entries = session_entries(&session);
+    // Arrival order is dense from zero — one witness, one clock.
+    assert_eq!(
+        entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        (0..entries.len() as u64).collect::<Vec<_>>()
+    );
+    // Both blocks appear under their transcript keys: the probe's calls
+    // and the kv service's own mailbox reads interleave in one timeline.
+    assert!(entries.iter().any(|e| e.block == "probed/probe"));
+    assert!(entries.iter().any(|e| e.block == "probed/kv"));
+    // Recording links every entry into its block's transcript; the
+    // join holds: the linked transcript entry is the same operation.
+    let sample = entries
+        .iter()
+        .find(|e| e.block == "probed/probe" && e.outcome == "failed:permission_denied")
+        .expect("the probe's refusal is witnessed");
+    let index = sample.entry.expect("recording links entries");
+    let mut probe_log = transcripts.lock().unwrap()["probed/probe"].clone();
+    let linked = probe_log
+        .read(
+            &structfs_core_store::path!("entries")
+                .join(&structfs_core_store::Path::parse(&index.to_string()).unwrap()),
+        )
+        .unwrap()
+        .expect("linked transcript entry exists");
+    let Some(Value::Map(map)) = linked.as_value() else {
+        panic!("transcript entry is a map");
+    };
+    assert_eq!(map.get("path"), Some(&Value::from(sample.path.to_string())));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_run_flight_records_without_transcripts() {
+    let session = session_store();
+    let seen: Seen = Arc::default();
+    let runtime = probe_runtime(&seen, TranscriptMode::Off).with_session_log(session.clone());
+    run_assembly(&runtime, WIRED).await;
+
+    let entries = session_entries(&session);
+    assert!(!entries.is_empty());
+    // No transcript, no links — the flight recorder stands alone.
+    assert!(entries.iter().all(|e| e.entry.is_none()));
+    assert!(entries.iter().any(|e| e.outcome == "found"));
+    assert!(entries.iter().any(|e| e.outcome == "wrote"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_writes_its_own_session_timeline() {
+    let (_transcripts, provider) = shared_transcripts();
+
+    let recorded_session = session_store();
+    let seen: Seen = Arc::default();
+    let runtime = probe_runtime(&seen, TranscriptMode::Record(provider.clone()))
+        .with_session_log(recorded_session.clone());
+    run_assembly(&runtime, WIRED).await;
+
+    let replayed_session = session_store();
+    let seen: Seen = Arc::default();
+    let runtime = probe_runtime(&seen, TranscriptMode::Replay(provider))
+        .with_session_log(replayed_session.clone());
+    let cell = run_assembly(&runtime, UNWIRED).await;
+    assert_eq!(cell.state(), BlockState::Stopped);
+
+    // The replayed probe's timeline matches the recorded probe's, op
+    // for op, outcome for outcome — the forensic view of the claim the
+    // transcript already enforces.
+    let probe_line = |entries: &[SessionEntry]| -> Vec<(String, String, String)> {
+        entries
+            .iter()
+            .filter(|e| e.block == "probed/probe")
+            .map(|e| (e.op.clone(), e.path.to_string(), e.outcome.clone()))
+            .collect()
+    };
+    assert_eq!(
+        probe_line(&session_entries(&recorded_session)),
+        probe_line(&session_entries(&replayed_session))
+    );
+}

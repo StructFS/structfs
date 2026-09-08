@@ -202,6 +202,12 @@ export class RecordingStore implements HostStore {
     this.inner = inner;
   }
 
+  /// The index the next operation will occupy — what a session-log
+  /// entry links to.
+  position(): number {
+    return this.entries.length;
+  }
+
   jsonl(): string {
     return this.entries.length === 0 ? "" : `${toJsonl(this.entries)}\n`;
   }
@@ -269,6 +275,12 @@ export class ReplayingStore implements HostStore {
   /// with entries remaining stopped short of the recorded one.
   remaining(): number {
     return this.entries.length - this.cursor;
+  }
+
+  /// The index the next operation will consume — what a session-log
+  /// entry links to.
+  position(): number {
+    return this.cursor;
   }
 
   private next(op: "read" | "write", path: string): TranscriptEntry {
