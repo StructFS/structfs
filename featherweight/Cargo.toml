@@ -19,4 +19,6 @@ path = "src/main.rs"
 [dependencies]
 featherweight-runtime = { version = "0.2.0", path = "runtime" }
 featherweight-component = { version = "0.2.0", path = "component" }
+structfs-core-store = { workspace = true }
+structfs-json-store = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

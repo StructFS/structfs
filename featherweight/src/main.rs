@@ -6,9 +6,14 @@
 //!   and waits for its public block to finish.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use featherweight_runtime::{register_builtins, AssemblyDef, Runtime};
+use featherweight_runtime::{
+    host_store, register_builtins, AssemblyDef, Determinism, Runtime, TranscriptMode,
+    TranscriptProvider,
+};
+use structfs_json_store::{JsonlFileBacking, LogStore};
 
 /// The demo: a shell as the public block, with services wired in.
 const DEMO_ASSEMBLY: &str = r#"
@@ -44,10 +49,71 @@ failure:
 
 const USAGE: &str = "usage:
   fw shell                     run the demo assembly (interactive shell)
-  fw run <assembly.json|yaml>  run an assembly definition";
+  fw run <assembly.json|yaml> [--record DIR | --replay DIR] [--seed N]
+                               run an assembly definition
+Orthogonal features, mixable freely:
+  --record DIR   write each block's boundary answers as a transcript in DIR
+  --replay DIR   answer every boundary operation from the transcripts in DIR;
+                 the live world is never consulted
+  --seed N       deterministic mode: seeded entropy and a virtual clock, so
+                 two runs with one seed are the same run";
+
+/// Per-block transcripts as stores: one JSONL-backed append log per block in
+/// `dir`. The runtime sees only the store; the file is this provider's
+/// implementation detail.
+fn transcript_provider(dir: std::path::PathBuf, fresh: bool) -> Arc<TranscriptProvider> {
+    Arc::new(move |block: &str| {
+        let file = dir.join(format!("{block}.transcript.jsonl"));
+        if fresh {
+            // A new recording replaces the old transcript; appending to a
+            // previous run's entries would corrupt both.
+            let _ = std::fs::remove_file(&file);
+        } else if !file.exists() {
+            return Err(structfs_core_store::Error::store(
+                "transcript",
+                "replay",
+                format!("no transcript for block '{block}' at {}", file.display()),
+            ));
+        }
+        Ok(host_store(LogStore::open(JsonlFileBacking::new(&file))?))
+    })
+}
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // --record DIR | --replay DIR (mutually exclusive) and --seed N
+    // (orthogonal to both), position-free.
+    let mut transcript_mode = TranscriptMode::Off;
+    for flag in ["--record", "--replay"] {
+        if let Some(at) = args.iter().position(|a| a == flag) {
+            if at + 1 >= args.len() {
+                eprintln!("fw: {flag} needs a directory\n{USAGE}");
+                std::process::exit(2);
+            }
+            if !matches!(transcript_mode, TranscriptMode::Off) {
+                eprintln!("fw: --record and --replay are mutually exclusive");
+                std::process::exit(2);
+            }
+            let dir = std::path::PathBuf::from(args.remove(at + 1));
+            args.remove(at);
+            transcript_mode = match flag {
+                "--record" => TranscriptMode::Record(transcript_provider(dir, true)),
+                _ => TranscriptMode::Replay(transcript_provider(dir, false)),
+            };
+        }
+    }
+    let mut determinism = Determinism::Live;
+    if let Some(at) = args.iter().position(|a| a == "--seed") {
+        let Some(seed) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
+            eprintln!("fw: --seed needs an integer\n{USAGE}");
+            std::process::exit(2);
+        };
+        args.remove(at + 1);
+        args.remove(at);
+        determinism = Determinism::Seeded { seed };
+    }
+
     let (source, base_dir) = match args.first().map(String::as_str) {
         Some("shell") => (DEMO_ASSEMBLY.to_string(), std::path::PathBuf::from(".")),
         Some("run") => {
@@ -87,7 +153,9 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let mut runtime = Runtime::with_handle(rt.handle().clone());
+    let mut runtime = Runtime::with_handle(rt.handle().clone())
+        .with_transcripts(transcript_mode)
+        .with_determinism(determinism);
     register_builtins(&mut runtime);
     // The WIT component binding is an adapter, not a core concern: the
     // CLI opts in so component artifacts run alongside core modules.

@@ -54,6 +54,7 @@
 pub mod assembly;
 pub mod block;
 pub mod core_wasm;
+pub mod determinism;
 mod error;
 pub mod iso;
 pub mod metering;
@@ -63,12 +64,14 @@ pub mod protocol;
 mod runtime;
 pub mod spawn;
 pub mod stdio;
+pub mod transcript;
 
 pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
 pub use block::{
     BlockCell, BlockEvent, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode,
 };
 pub use core_wasm::{CoreWasmBlock, NoOpStore};
+pub use determinism::Determinism;
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use metering::Metering;
@@ -77,3 +80,4 @@ pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock}
 pub use runtime::{ArtifactLoader, AssemblyInstance, Runtime, StdioProvider, WasmBlockDriver};
 pub use spawn::{ProcStore, SpawnProtocol};
 pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
+pub use transcript::{TranscriptAnswer, TranscriptEntry, TranscriptMode, TranscriptProvider};

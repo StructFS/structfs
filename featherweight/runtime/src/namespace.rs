@@ -14,6 +14,7 @@ use structfs_core_store::{Error, Path, Reader, Record, Shared, Store, Value, Wri
 use crate::block::BlockCell;
 use crate::iso::IsoSurface;
 use crate::runtime::RtCtx;
+use crate::transcript::BlockTranscript;
 
 /// A shared host-side store (config, imports).
 pub type HostStore = Shared<Box<dyn Store>>;
@@ -132,6 +133,9 @@ pub struct Namespace {
     iso: Arc<IsoSurface>,
     wiring: Arc<WiringTable>,
     cell: Arc<BlockCell>,
+    /// Transcripts (spec 12): every operation through this namespace is
+    /// recorded to, or answered from, the block's transcript.
+    transcript: Option<BlockTranscript>,
 }
 
 impl Namespace {
@@ -140,12 +144,14 @@ impl Namespace {
         iso: Arc<IsoSurface>,
         wiring: Arc<WiringTable>,
         cell: Arc<BlockCell>,
+        transcript: Option<BlockTranscript>,
     ) -> Self {
         Self {
             ctx,
             iso,
             wiring,
             cell,
+            transcript,
         }
     }
 
@@ -166,8 +172,8 @@ impl Namespace {
     }
 }
 
-impl Reader for Namespace {
-    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+impl Namespace {
+    fn read_live(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         if from.is_empty() {
             return Ok(Some(Record::parsed(self.root_listing())));
         }
@@ -191,10 +197,8 @@ impl Reader for Namespace {
             ))),
         }
     }
-}
 
-impl Writer for Namespace {
-    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+    fn write_live(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         if to.is_empty() {
             return Err(Error::permission_denied("namespace root is not writable"));
         }
@@ -222,5 +226,37 @@ impl Writer for Namespace {
                 to
             ))),
         }
+    }
+}
+
+// The transcript interposes at the trait impls so that every operation a block
+// makes — iso, wired services, even the root listing — crosses it
+// uniformly (spec 12). Under replay the live world is never consulted:
+// no iso surface, no wiring targets, no effects.
+impl Reader for Namespace {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        match &mut self.transcript {
+            Some(transcript) if transcript.is_replaying() => return transcript.replay_read(from),
+            _ => {}
+        }
+        let result = self.read_live(from);
+        if let Some(transcript) = &mut self.transcript {
+            transcript.record_read(from, &result)?;
+        }
+        result
+    }
+}
+
+impl Writer for Namespace {
+    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+        match &mut self.transcript {
+            Some(transcript) if transcript.is_replaying() => return transcript.replay_write(to),
+            _ => {}
+        }
+        let result = self.write_live(to, data);
+        if let Some(transcript) = &mut self.transcript {
+            transcript.record_write(to, &result)?;
+        }
+        result
     }
 }

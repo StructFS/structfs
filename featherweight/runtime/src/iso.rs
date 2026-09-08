@@ -51,6 +51,9 @@ pub(crate) struct IsoConfig {
     /// Present only when the block's definition grants `spawn`.
     pub proc: Option<ProcStore>,
     pub handle: tokio::runtime::Handle,
+    /// Time and entropy providers (spec 12): virtual under
+    /// `Determinism::Seeded`, the world under `Determinism::Live`.
+    pub sources: crate::determinism::IsoSources,
 }
 
 /// The per-block `/iso/` surface. Paths are relative to the `iso` mount.
@@ -64,6 +67,7 @@ pub struct IsoSurface {
     handle: tokio::runtime::Handle,
     timers: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_timer: AtomicU64,
+    sources: crate::determinism::IsoSources,
 }
 
 const SECTIONS: [(&str, &str); 10] = [
@@ -103,6 +107,7 @@ impl IsoSurface {
             handle: config.handle,
             timers: Mutex::new(HashMap::new()),
             next_timer: AtomicU64::new(0),
+            sources: config.sources,
         }
     }
 
@@ -263,12 +268,23 @@ impl IsoSurface {
                 .shutdown_mode()
                 .map(|mode| Value::from(mode.as_str())),
             // === time ===
-            (2, "time") if path[1] == "now" => Some(Value::String(chrono::Utc::now().to_rfc3339())),
-            (2, "time") if path[1] == "now_unix_ns" => Some(Value::Integer(
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX),
-            )),
+            (2, "time") if path[1] == "now" => {
+                Some(Value::String(match self.sources.now_unix_ns() {
+                    Some(ns) => chrono::DateTime::from_timestamp_nanos(ns).to_rfc3339(),
+                    None => chrono::Utc::now().to_rfc3339(),
+                }))
+            }
+            (2, "time") if path[1] == "now_unix_ns" => {
+                Some(Value::Integer(match self.sources.now_unix_ns() {
+                    Some(ns) => ns,
+                    None => chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX),
+                }))
+            }
             (2, "time") if path[1] == "monotonic" => {
-                Some(Value::Integer(self.cell.monotonic_nanos()))
+                Some(Value::Integer(match self.sources.monotonic_ns() {
+                    Some(ns) => ns,
+                    None => self.cell.monotonic_nanos(),
+                }))
             }
             (2, "time") if path[1] == "zone" => Some(Value::from("UTC")),
             (3, "time") if path[1] == "after" => {
@@ -286,10 +302,20 @@ impl IsoSurface {
             }
             // === random ===
             (2, "random") if path[1] == "uuid" => {
-                Some(Value::String(uuid::Uuid::new_v4().to_string()))
+                let id = match self.sources.entropy_bytes(16) {
+                    Some(bytes) => {
+                        uuid::Builder::from_random_bytes(bytes.try_into().expect("16 bytes"))
+                            .into_uuid()
+                    }
+                    None => uuid::Uuid::new_v4(),
+                };
+                Some(Value::String(id.to_string()))
             }
             (2, "random") if path[1] == "int" => {
-                let bytes = *uuid::Uuid::new_v4().as_bytes();
+                let bytes = match self.sources.entropy_bytes(8) {
+                    Some(bytes) => bytes,
+                    None => uuid::Uuid::new_v4().as_bytes()[..8].to_vec(),
+                };
                 Some(Value::Integer(i64::from_le_bytes(
                     bytes[..8].try_into().unwrap(),
                 )))
@@ -301,11 +327,17 @@ impl IsoSurface {
                 if n > 1 << 20 {
                     return Err(Error::resource_limit("random/bytes limited to 1MiB"));
                 }
-                let mut bytes = Vec::with_capacity(n);
-                while bytes.len() < n {
-                    bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-                }
-                bytes.truncate(n);
+                let bytes = match self.sources.entropy_bytes(n) {
+                    Some(bytes) => bytes,
+                    None => {
+                        let mut bytes = Vec::with_capacity(n);
+                        while bytes.len() < n {
+                            bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+                        }
+                        bytes.truncate(n);
+                        bytes
+                    }
+                };
                 Some(Value::Bytes(bytes))
             }
             _ => None,
@@ -436,6 +468,7 @@ mod tests {
             args: Arc::new(args),
             proc: None,
             handle: tokio::runtime::Handle::current(),
+            sources: crate::determinism::Determinism::Live.sources_for("test"),
         });
         (cell, iso)
     }

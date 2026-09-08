@@ -11,6 +11,7 @@ use structfs_serde_store::MultiCodec;
 use crate::assembly::{AssemblyDef, WireTarget};
 use crate::block::{BlockCell, BlockId, BlockState, ShutdownMode};
 use crate::core_wasm::{is_component, CoreWasmBlock};
+use crate::determinism::Determinism;
 use crate::error::{Result, RuntimeError};
 use crate::iso::{IsoConfig, IsoSurface, LogSink, StderrLog};
 use crate::metering::Metering;
@@ -19,6 +20,7 @@ use crate::native::NativeBlockFactory;
 use crate::protocol::{decode_read_response, decode_write_response};
 use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
+use crate::transcript::{BlockTranscript, TranscriptMode};
 use structfs_handles::CancelToken;
 
 /// A loaded wasm artifact in some binding of the Block ABI: it serves
@@ -133,6 +135,8 @@ pub(crate) struct RtCtx {
     log: Mutex<Arc<dyn LogSink>>,
     stdio_provider: Mutex<Arc<StdioProvider>>,
     metering: Mutex<Metering>,
+    transcript_mode: Mutex<TranscriptMode>,
+    determinism: Mutex<Determinism>,
     runtime: Weak<RuntimeInner>,
 }
 
@@ -227,6 +231,37 @@ impl RtCtx {
             )));
         };
 
+        // Transcripts (spec 12): open the block's transcript before its
+        // code runs, and fail the start loudly if the transcript store can't be
+        // had — a partial transcript is worse than no run.
+        let transcript_mode = self
+            .transcript_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let transcript = match &transcript_mode {
+            TranscriptMode::Off => None,
+            TranscriptMode::Record(provider) => Some(
+                provider(&cell.name)
+                    .map(BlockTranscript::recording)
+                    .map_err(|e| {
+                        cell.set_state(BlockState::Failed);
+                        RuntimeError::assembly(format!(
+                            "transcript store for block '{}': {e}",
+                            cell.name
+                        ))
+                    })?,
+            ),
+            TranscriptMode::Replay(provider) => Some(
+                provider(&cell.name)
+                    .and_then(BlockTranscript::replaying)
+                    .map_err(|e| {
+                        cell.set_state(BlockState::Failed);
+                        RuntimeError::assembly(format!("transcript for block '{}': {e}", cell.name))
+                    })?,
+            ),
+        };
+
         let proc = block.spawn.then(|| {
             SpawnProtocol::store(
                 self.runtime.clone(),
@@ -235,6 +270,14 @@ impl RtCtx {
                 Some(block.wiring.clone()),
             )
         });
+        // Determinism (spec 12) is the orthogonal feature: it decides how
+        // the iso surface sources time and entropy, whether or not a
+        // transcript is being kept.
+        let sources = self
+            .determinism
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sources_for(&cell.name);
         let iso = Arc::new(IsoSurface::new(IsoConfig {
             cell: block.cell.clone(),
             log: self.log_sink(),
@@ -243,12 +286,18 @@ impl RtCtx {
             args: block.args.clone(),
             proc,
             handle: self.handle.clone(),
+            sources,
         }));
 
         let ctx = self.clone();
         let task = self.handle.spawn_blocking(move || {
-            let mut namespace =
-                Namespace::new(ctx.clone(), iso, block.wiring.clone(), block.cell.clone());
+            let mut namespace = Namespace::new(
+                ctx.clone(),
+                iso,
+                block.wiring.clone(),
+                block.cell.clone(),
+                transcript,
+            );
 
             // Spec 05 ties Running to "begins reading requests", but an
             // interactive or client-only block may never read them; the
@@ -632,6 +681,8 @@ impl Runtime {
                 log: Mutex::new(Arc::new(StderrLog)),
                 stdio_provider: Mutex::new(Arc::new(|_| None)),
                 metering: Mutex::new(Metering::default()),
+                transcript_mode: Mutex::new(TranscriptMode::Off),
+                determinism: Mutex::new(Determinism::Live),
                 runtime: weak.clone(),
             }),
             builtins: Mutex::new(HashMap::new()),
@@ -657,6 +708,41 @@ impl Runtime {
     /// Replace the log sink (default: stderr).
     pub fn with_log_sink(self, log: Arc<dyn LogSink>) -> Self {
         *self.inner.ctx.log.lock().unwrap_or_else(|e| e.into_inner()) = log;
+        self
+    }
+
+    /// Set the transcript mode (spec 12; default: [`TranscriptMode::Off`]).
+    ///
+    /// `Record` executes live and appends every boundary answer to each
+    /// block's transcript store; `Replay` answers every boundary operation
+    /// from the transcript and never consults the live world. Transcripts are
+    /// per-block, keyed by block name through the mode's provider.
+    /// Orthogonal to [`Runtime::with_determinism`] — mix and match.
+    pub fn with_transcripts(self, transcript_mode: TranscriptMode) -> Self {
+        *self
+            .inner
+            .ctx
+            .transcript_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = transcript_mode;
+        self
+    }
+
+    /// Set the determinism mode (spec 12; default: [`Determinism::Live`]).
+    ///
+    /// `Seeded` gives every block a virtual clock and seeded entropy, so
+    /// two runs with one seed see the same answers from `/iso/time` and
+    /// `/iso/random` — reproducibility with no transcript involved.
+    /// Orthogonal to [`Runtime::with_transcripts`] — mix and match: a
+    /// seeded run can be recorded, and recording a live run is a record
+    /// of what happened, not a promise it can be reproduced.
+    pub fn with_determinism(self, determinism: Determinism) -> Self {
+        *self
+            .inner
+            .ctx
+            .determinism
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = determinism;
         self
     }
 
