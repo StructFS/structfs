@@ -43,7 +43,10 @@ isotope/              # The Isotope virtual-OS specification
   redaction) in `core-store`
 - **Append logs**: `LogStore` + `AppendBacking`/`JsonlFileBacking` in
   `json_store` — write to `append`, page with the `entries/from/{n}`
-  cursor tail; the HTTP async broker is a `HandleStore` instantiation
+  cursor tail; the HTTP async broker is a `HandleStore` instantiation.
+  The REPL mounts them (`{"type": "log", "path": ...}`), and mounts a
+  whole `fw --record` directory read-only (`{"type": "recording"}`):
+  session timeline at `session`, block transcripts at their keys
 - **PathPattern**: Component-wise Exact/Prefix/PrefixSuffix matching
 - **Typed access**: `read_typed`/`write_typed` on any store (codec-free, in
   `serde-store`); `Path`/`Value`/`Record`/`Format` all implement serde

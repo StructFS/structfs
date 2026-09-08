@@ -2580,6 +2580,7 @@ dependencies = [
  "structfs-json-store",
  "structfs-serde-store",
  "structfs-sys",
+ "tempfile",
  "thiserror 2.0.17",
 ]
 

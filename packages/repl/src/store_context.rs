@@ -16,9 +16,10 @@ use structfs_serde_store::{json_to_value, value_to_json};
 
 // Import store implementations
 use crate::help_store::{HelpStore, HelpStoreHandle, HelpStoreState};
+use crate::recording_store::RecordingStore;
 use crate::repl_docs_store::ReplDocsStore;
 use structfs_http::{AsyncHttpBrokerStore, HttpBrokerStore};
-use structfs_json_store::InMemoryStore;
+use structfs_json_store::{InMemoryStore, JsonlFileBacking, LogStore};
 use structfs_sys::SysStore;
 
 #[derive(thiserror::Error, Debug)]
@@ -88,6 +89,8 @@ impl StoreFactory for CoreReplStoreFactory {
             MountConfig::Sys => Ok(Box::new(SysStore::new())),
             MountConfig::Repl => Ok(Box::new(ReplDocsStore::new())),
             MountConfig::Registers => Ok(Box::new(RegisterStore::new())),
+            MountConfig::Log { path } => Ok(Box::new(LogStore::open(JsonlFileBacking::new(path))?)),
+            MountConfig::Recording { path } => Ok(Box::new(RecordingStore::open(path)?)),
             // MountConfig is #[non_exhaustive]; report unknown variants so the
             // factory can be extended in lockstep with new variant additions.
             _ => Err(CoreError::store(
@@ -1285,5 +1288,79 @@ mod tests {
         let mut ctx = StoreContext::new();
         let list = ctx.list_registers();
         assert!(list.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod recording_mount_tests {
+    use super::*;
+    use structfs_core_store::path;
+
+    /// The whole user journey, minus the terminal: mount a recording
+    /// through the mount protocol, browse it, page the timeline, and
+    /// find it read-only.
+    #[test]
+    fn a_recording_mounts_and_pages_through_the_mount_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.jsonl"),
+            "{\"seq\":0,\"block\":\"demo/kv\",\"op\":\"read\",\"path\":\"iso/server/requests\",\"outcome\":\"found\",\"entry\":0}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("demo")).unwrap();
+        std::fs::write(
+            dir.path().join("demo/kv.transcript.jsonl"),
+            "{\"op\":\"read\",\"path\":\"iso/server/requests\",\"answer\":\"absent\"}\n",
+        )
+        .unwrap();
+
+        let mut ctx = StoreContext::new();
+        // `write /ctx/mounts/rec {"type": "recording", "path": DIR}`
+        let config = Value::Map(collection_literals::btree! {
+            "type".to_string() => Value::from("recording"),
+            "path".to_string() => Value::from(dir.path().to_string_lossy().into_owned()),
+        });
+        ctx.write(&path!("ctx/mounts/rec"), config).unwrap();
+
+        // `read /rec` lists the recording; the timeline pages.
+        let root = ctx.read(&path!("rec")).unwrap().unwrap();
+        let Value::Map(map) = root else {
+            panic!("expected a listing, got {root:?}");
+        };
+        assert!(map.contains_key("session"), "{map:?}");
+        let page = ctx
+            .read(&path!("rec/session/entries/from/0"))
+            .unwrap()
+            .unwrap();
+        let Value::Map(envelope) = page else {
+            panic!("expected a tail envelope");
+        };
+        assert!(matches!(
+            envelope.get("items"),
+            Some(Value::Array(items)) if items.len() == 1
+        ));
+        // The transcript serves at its key; the recording refuses writes.
+        assert!(ctx.read(&path!("rec/demo/kv/entries/0")).unwrap().is_some());
+        assert!(ctx
+            .write(&path!("rec/session/append"), Value::Null)
+            .is_err());
+
+        // A single log mounts standalone with `{"type": "log"}` — and,
+        // being a ledger, takes appends.
+        let log_config = Value::Map(collection_literals::btree! {
+            "type".to_string() => Value::from("log"),
+            "path".to_string() => Value::from(
+                dir.path().join("notes.jsonl").to_string_lossy().into_owned(),
+            ),
+        });
+        ctx.write(&path!("ctx/mounts/notes"), log_config).unwrap();
+        let at = ctx
+            .write(&path!("notes/append"), Value::from("first"))
+            .unwrap();
+        assert_eq!(at, path!("notes/entries/0"));
+        assert_eq!(
+            ctx.read(&path!("notes/len")).unwrap(),
+            Some(Value::Integer(1))
+        );
     }
 }

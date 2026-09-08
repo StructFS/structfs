@@ -46,6 +46,16 @@ pub enum MountConfig {
     Repl,
     /// Register storage (session-local named values)
     Registers,
+    /// A JSONL append log served as a store (ledgers, transcripts,
+    /// session logs): read `/` for every entry, `len` for the count,
+    /// `entries/{n}` for one, and page with the `entries/from/{n}`
+    /// cursor tail. Writing `append` adds an entry.
+    Log { path: String },
+    /// A recording directory (as `fw run --record DIR` writes it) as one
+    /// read-only tree: the session log at `session`, each block's
+    /// transcript at its assembly-scoped key. Forensics — writes are
+    /// denied so the evidence stays evidence.
+    Recording { path: String },
 }
 
 /// Information about a mount point
@@ -256,6 +266,14 @@ fn config_to_value(config: &MountConfig) -> Value {
         MountConfig::Registers => btree! {
             "type".to_string() => Value::String("registers".to_string()),
         },
+        MountConfig::Log { path } => btree! {
+            "type".to_string() => Value::String("log".to_string()),
+            "path".to_string() => Value::String(path.clone()),
+        },
+        MountConfig::Recording { path } => btree! {
+            "type".to_string() => Value::String("recording".to_string()),
+            "path".to_string() => Value::String(path.clone()),
+        },
     })
 }
 
@@ -326,6 +344,24 @@ fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
                 "sys" => Ok(MountConfig::Sys),
                 "repl" => Ok(MountConfig::Repl),
                 "registers" => Ok(MountConfig::Registers),
+                "log" | "recording" => {
+                    let path = map
+                        .get("path")
+                        .and_then(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            Error::decode(
+                                crate::Format::VALUE,
+                                format!("Missing 'path' field for {type_str} mount"),
+                            )
+                        })?;
+                    Ok(match type_str {
+                        "log" => MountConfig::Log { path },
+                        _ => MountConfig::Recording { path },
+                    })
+                }
                 other => Err(Error::decode(
                     crate::Format::VALUE,
                     format!("Unknown mount type: {}", other),

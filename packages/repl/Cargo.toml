@@ -29,3 +29,6 @@ reedline = { workspace = true }
 nu-ansi-term = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

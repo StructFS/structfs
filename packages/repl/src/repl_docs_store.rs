@@ -161,6 +161,16 @@ impl ReplDocsStore {
             ("http", "HTTP client to base URL"),
             ("httpbroker", "Sync HTTP request broker"),
             ("asynchttpbroker", "Async HTTP request broker"),
+            (
+                "log",
+                "A JSONL append log (ledger, transcript, session log); \
+                 page with entries/from/{n}",
+            ),
+            (
+                "recording",
+                "A recorded run's directory, read-only: session timeline \
+                 plus per-block transcripts",
+            ),
         ];
 
         let type_list: Vec<Value> = mount_types
