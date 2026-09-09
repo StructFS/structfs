@@ -1216,3 +1216,143 @@ async fn simulation_pins_two_nested_assemblies_bridged_by_couriers() {
     let (timeline_c, _, _) = run(7).await;
     assert_ne!(timeline_a, timeline_c, "a different seed, another schedule");
 }
+
+// === Seed sweep × wasm: the Antithesis rig on real guests ===
+
+/// A racy core-binding (spec 11) guest in wat: append the id `mark`
+/// (one char) to whatever is wired at `out`, four times. Every write
+/// crosses the boundary through the block's namespace, so under
+/// simulation each is a seeded interleaving point; two of these racing
+/// on one shared log produce a schedule-dependent order.
+fn racer_wat(mark: char) -> String {
+    // Memory: 1024 ret scratch, 1040 "out/append" (10), 1056 the
+    // quoted id (3: " mark "), 1088 the manifest (36).
+    format!(
+        r#"(module
+          (import "structfs" "write"
+            (func $write (param i32 i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (global $bump (mut i32) (i32.const 4096))
+          (func (export "block_alloc") (param $len i32) (result i32)
+            (local $ptr i32)
+            (local.set $ptr (global.get $bump))
+            (global.set $bump (i32.add (global.get $bump) (local.get $len)))
+            (local.get $ptr))
+          (data (i32.const 1040) "out/append")
+          (data (i32.const 1056) "\22{mark}\22")
+          (data (i32.const 1088) "{{\22serialization\22:\22application/json\22}}")
+          (func (export "manifest") (param $ret i32) (result i32)
+            (i32.store (local.get $ret) (i32.const 1088))
+            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 36))
+            (i32.const 0))
+          (func (export "run") (result i32)
+            (local $i i32)
+            (block $done
+              (loop $go
+                (br_if $done (i32.ge_u (local.get $i) (i32.const 4)))
+                (drop (call $write (i32.const 1040) (i32.const 10)
+                       (i32.const 1056) (i32.const 3) (i32.const 1024)))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $go)))
+            (i32.const 0)))"#
+    )
+}
+
+/// One simulated run of two racing wasm racers on a shared log; returns
+/// the final append order (e.g. "AABBABAB...") and the session timeline.
+async fn wasm_race(seed: u64) -> (String, Timeline) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.wasm"), racer_wat('A')).unwrap();
+    std::fs::write(dir.path().join("b.wasm"), racer_wat('B')).unwrap();
+
+    let session = session_store();
+    let runtime = Runtime::new()
+        .with_determinism(Determinism::Simulation { seed })
+        .with_session_log(session.clone());
+    let shared = host_store(LogStore::open(MemoryAppendBacking::new()).unwrap());
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "race",
+            "blocks": {"a": "a.wasm", "b": "b.wasm"},
+            "public": "a",
+            "imports": {"log": "the contended append log"},
+            "wiring": ["a:/out -> $log", "b:/out -> $log"]}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(
+            &def,
+            HashMap::from([(String::from("log"), shared.clone())]),
+            dir.path(),
+        )
+        .unwrap();
+    for name in ["a", "b"] {
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            assembly.cell(name).unwrap().wait_terminal(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("racer {name} did not finish under seed {seed}"));
+    }
+    let timeline = timeline_of(&session);
+    let mut shared = shared;
+    let order = match shared
+        .read(&path!(""))
+        .unwrap()
+        .and_then(|r| r.as_value().cloned())
+    {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => s.chars().next(),
+                _ => None,
+            })
+            .collect::<String>(),
+        other => panic!("expected the log's array, got {other:?}"),
+    };
+    assembly.shutdown(Duration::from_secs(2)).await;
+    (order, timeline)
+}
+
+/// The Antithesis rig on real wasm guests: across a sweep of seeds,
+/// every seed is individually reproducible (same order, same timeline
+/// on a re-run), and the sweep as a whole explores more than one
+/// schedule — the two properties that make seed iteration a race hunt.
+#[tokio::test(flavor = "multi_thread")]
+async fn seed_sweep_over_wasm_racers_is_reproducible_and_diverse() {
+    let mut orders = std::collections::BTreeSet::new();
+    for seed in 0..16u64 {
+        let (order, timeline) = wasm_race(seed).await;
+        // Every append landed: eight writes, four per racer.
+        assert_eq!(order.len(), 8, "seed {seed}: {order}");
+        assert_eq!(order.chars().filter(|&c| c == 'A').count(), 4, "{order}");
+
+        // Reproducible: the same seed replays the same run, order and
+        // whole-assembly timeline alike.
+        let (order2, timeline2) = wasm_race(seed).await;
+        assert_eq!(order, order2, "seed {seed} not reproducible");
+        assert_eq!(timeline, timeline2, "seed {seed} timeline not reproducible");
+
+        orders.insert(order);
+    }
+    // The sweep explored the schedule space: a scheduler that ignored
+    // the seed, or ran blocks to completion in turn, would yield one
+    // order for all sixteen. Several distinct orders proves otherwise.
+    assert!(
+        orders.len() > 3,
+        "the seed sweep explored only {} distinct interleavings: {orders:?}",
+        orders.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "diagnostic: prints the sweep's interleaving diversity"]
+async fn seed_sweep_diversity_report() {
+    let mut orders = std::collections::BTreeSet::new();
+    for seed in 0..16u64 {
+        orders.insert(wasm_race(seed).await.0);
+    }
+    eprintln!("distinct interleavings across 16 seeds: {}", orders.len());
+    for o in &orders {
+        eprintln!("  {o}");
+    }
+}
