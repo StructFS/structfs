@@ -328,7 +328,7 @@ impl BlockCell {
         // sender only if the schedule runs them again.
         if let Some((_, turnstile)) = &self.sim {
             for caller in orphaned.into_values() {
-                turnstile.make_runnable(&caller);
+                turnstile.wake_response(&caller);
             }
         }
     }
@@ -387,11 +387,11 @@ impl BlockCell {
             }));
         }
         self.gate.notify();
-        // An event landed: under simulation the mailbox owner is now
-        // runnable (delivered during the caller's turn, so the runnable
-        // set stays a function of the run).
+        // A mailbox event landed: under simulation the owner, if idle,
+        // is now runnable (delivered during the caller's turn, so the
+        // runnable set stays a function of the run).
         if let Some((key, turnstile)) = &self.sim {
-            turnstile.make_runnable(key);
+            turnstile.wake_mailbox(key);
         }
         rx
     }
@@ -404,7 +404,7 @@ impl BlockCell {
         });
         self.gate.notify();
         if let Some((key, turnstile)) = &self.sim {
-            turnstile.make_runnable(key);
+            turnstile.wake_mailbox(key);
         }
     }
 
@@ -413,7 +413,7 @@ impl BlockCell {
         self.lock().queue.push_back(BlockEvent::Timer { tag });
         self.gate.notify();
         if let Some((key, turnstile)) = &self.sim {
-            turnstile.make_runnable(key);
+            turnstile.wake_mailbox(key);
         }
     }
 
@@ -450,7 +450,8 @@ impl BlockCell {
                         return Ok(None);
                     }
                 }
-                turnstile.park(key);
+                // Idle on the mailbox: quiescence, not a dependency.
+                turnstile.park(key, crate::turnstile::ParkKind::Mailbox);
                 turnstile.wait_turn(key).await;
             }
         }
@@ -488,7 +489,24 @@ impl BlockCell {
         // The parked caller's answer exists: runnable, during this
         // (the responder's) turn.
         if let (Some((_, turnstile)), Some(caller)) = (&self.sim, caller) {
-            turnstile.make_runnable(&caller);
+            turnstile.wake_response(&caller);
+        }
+    }
+
+    /// Drop every in-flight response sender, failing callers awaiting
+    /// this block, and wake them so their calls return an error. Used
+    /// when the schedule wedges: a caller stuck in a call `.await` is
+    /// freed by its response never coming, and this makes "never" now.
+    pub(crate) fn fail_in_flight(&self) {
+        let callers = {
+            let mut cell = self.lock();
+            cell.responses.clear();
+            std::mem::take(&mut cell.callers)
+        };
+        if let Some((_, turnstile)) = &self.sim {
+            for caller in callers.into_values() {
+                turnstile.wake_response(&caller);
+            }
         }
     }
 
@@ -508,10 +526,12 @@ impl BlockCell {
             }
         }
         self.gate.notify();
-        // A shutdown request is a wake: a simulated block parked on its
-        // mailbox must run to observe the null-unblock.
+        // A shutdown request is a mailbox wake: a simulated block idle
+        // on its mailbox must run to observe the null-unblock. A
+        // call-parked block is freed instead by its response failing
+        // (see `fail_in_flight`).
         if let Some((key, turnstile)) = &self.sim {
-            turnstile.make_runnable(key);
+            turnstile.wake_mailbox(key);
         }
         if mode == ShutdownMode::Immediate {
             self.cancel.cancel();

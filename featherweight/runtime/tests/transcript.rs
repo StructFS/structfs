@@ -975,44 +975,50 @@ async fn simulation_makes_racy_assemblies_a_function_of_the_seed() {
     );
 }
 
-/// A wedged schedule is a detected deadlock, not a hang: a block parked
-/// on a mailbox nothing will ever write is shut down loudly once the
-/// rest of the assembly exits.
+/// A real deadlock — a dependency cycle — is detected and shut down
+/// loudly rather than hanging. Two blocks each call the other on their
+/// first turn: whoever the seed runs first calls its peer and parks;
+/// the peer, still mid-call, never reads its own mailbox, so it too
+/// parks on its call. Nothing is runnable and both are call-parked —
+/// the cycle — so the turnstile shuts the assembly down.
+///
+/// (An idle server parked on its mailbox with no clients left is *not*
+/// this: that is quiescence, revived by a host poke or reaped by
+/// shutdown — exercised by the nested tests below, whose depots outlive
+/// their clients and are still read by the host.)
 #[tokio::test(flavor = "multi_thread")]
-async fn simulation_detects_deadlock_and_shuts_down() {
-    struct Hermit;
-    impl NativeBlock for Hermit {
-        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
-            // Parks forever: nothing is wired to this block.
-            let _ = ns.read(&path!("iso/server/requests"))?;
-            Ok(())
-        }
+async fn simulation_detects_a_dependency_cycle() {
+    struct Caller {
+        peer: &'static str,
     }
-    struct Sprinter;
-    impl NativeBlock for Sprinter {
-        fn run(&mut self, _: &mut Namespace) -> Result<(), Error> {
+    impl NativeBlock for Caller {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            // Call the peer before ever serving: a mutual call cycle.
+            let target = structfs_core_store::Path::parse(&format!("peer/{}", self.peer)).unwrap();
+            let _ = ns.read(&target);
             Ok(())
         }
     }
     let mut runtime = Runtime::new().with_determinism(Determinism::Simulation { seed: 3 });
     runtime.register_builtin(
-        "hermit",
-        Arc::new(|| Box::new(Hermit) as Box<dyn NativeBlock>),
+        "ping",
+        Arc::new(|| Box::new(Caller { peer: "who" }) as Box<dyn NativeBlock>),
     );
     runtime.register_builtin(
-        "sprinter",
-        Arc::new(|| Box::new(Sprinter) as Box<dyn NativeBlock>),
+        "pong",
+        Arc::new(|| Box::new(Caller { peer: "who" }) as Box<dyn NativeBlock>),
     );
     let def = AssemblyDef::from_str(
-        r#"{"assembly": "wedged",
-            "blocks": {"driver": "builtin:sprinter", "hermit": "builtin:hermit"},
-            "public": "driver"}"#,
+        r#"{"assembly": "cycle",
+            "blocks": {"ping": "builtin:ping", "pong": "builtin:pong"},
+            "public": "ping",
+            "wiring": ["ping:/peer -> pong", "pong:/peer -> ping"]}"#,
     )
     .unwrap();
     let assembly = runtime
         .instantiate(&def, HashMap::new(), &std::env::temp_dir())
         .unwrap();
-    for name in ["driver", "hermit"] {
+    for name in ["ping", "pong"] {
         tokio::time::timeout(
             Duration::from_secs(10),
             assembly.cell(name).unwrap().wait_terminal(),
@@ -1020,4 +1026,193 @@ async fn simulation_detects_deadlock_and_shuts_down() {
         .await
         .unwrap_or_else(|_| panic!("{name} still running: the deadlock was not detected"));
     }
+}
+
+// === Simulation across nested assemblies ===
+
+/// Read-modify-write a counter at `prefix` five times through whatever
+/// is wired there — here, a nested assembly's public store, so every
+/// step is a cross-assembly server-protocol call.
+fn rmw(ns: &mut Namespace, counter: &structfs_core_store::Path) -> Result<i64, Error> {
+    let seen = match ns.read(counter)? {
+        Some(record) => match record.as_value() {
+            Some(Value::Integer(n)) => *n,
+            _ => 0,
+        },
+        None => 0,
+    };
+    ns.write(counter, Record::parsed(Value::Integer(seen + 1)))?;
+    Ok(seen)
+}
+
+/// Write the nested `depot.yaml` definition used by these tests.
+fn depot_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("depot.yaml"),
+        "assembly: depot\nblocks:\n  kv: builtin:kv\npublic: kv\n",
+    )
+    .unwrap();
+    dir
+}
+
+type Timeline = Vec<(String, String, String)>;
+
+fn timeline_of(session: &HostStore) -> Timeline {
+    session_entries(session)
+        .into_iter()
+        .map(|e| (e.block, e.op, e.path.to_string()))
+        .collect()
+}
+
+/// Two parent blocks race read-modify-writes into one *nested*
+/// assembly's store: every contended step crosses the nesting boundary
+/// through the server protocol, and the whole tree is one seeded run.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_pins_races_through_a_nested_assembly() {
+    struct Chatter;
+    impl NativeBlock for Chatter {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            for _ in 0..5 {
+                rmw(ns, &path!("services/depot/counter"))?;
+            }
+            Ok(())
+        }
+    }
+
+    async fn run(seed: u64) -> (Timeline, Option<Value>) {
+        let dir = depot_dir();
+        let session = session_store();
+        let mut runtime = Runtime::new()
+            .with_determinism(Determinism::Simulation { seed })
+            .with_session_log(session.clone());
+        register_builtins(&mut runtime);
+        runtime.register_builtin(
+            "chatter",
+            Arc::new(|| Box::new(Chatter) as Box<dyn NativeBlock>),
+        );
+        let def = AssemblyDef::from_str(
+            r#"{"assembly": "plaza",
+                "blocks": {"c1": "builtin:chatter", "c2": "builtin:chatter",
+                           "depot": "depot.yaml"},
+                "public": "c1",
+                "wiring": ["c1:/services/depot -> depot",
+                           "c2:/services/depot -> depot"]}"#,
+        )
+        .unwrap();
+        let assembly = runtime
+            .instantiate(&def, HashMap::new(), dir.path())
+            .unwrap();
+        for name in ["c1", "c2"] {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                assembly.cell(name).unwrap().wait_terminal(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name} did not finish"));
+        }
+        // Snapshot the timeline before any host-driven read muddies it.
+        let timeline = timeline_of(&session);
+        let counter = assembly
+            .read_block("depot", path!("counter"))
+            .await
+            .unwrap();
+        assembly.shutdown(Duration::from_secs(2)).await;
+        (timeline, counter)
+    }
+
+    let (timeline_a, counter_a) = run(42).await;
+    let (timeline_b, counter_b) = run(42).await;
+    assert_eq!(timeline_a, timeline_b, "same seed, same tree-wide run");
+    assert_eq!(counter_a, counter_b, "same seed, same lost updates");
+    // The nested block's own turns are on the one timeline, under its
+    // tree-scoped key.
+    assert!(
+        timeline_a
+            .iter()
+            .any(|(block, _, _)| block == "plaza/depot/kv"),
+        "{timeline_a:?}"
+    );
+    let (timeline_c, _) = run(7).await;
+    assert_ne!(timeline_a, timeline_c, "a different seed, another schedule");
+}
+
+/// Two nested assemblies talking through racing parent couriers: each
+/// courier read-modify-writes depot A and records what it saw into
+/// depot B. Interleaving decides both the lost updates in A and the
+/// values ferried into B — and all of it is a function of the seed.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_pins_two_nested_assemblies_bridged_by_couriers() {
+    struct Courier {
+        tag: &'static str,
+    }
+    impl NativeBlock for Courier {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            for i in 0..4 {
+                let seen = rmw(ns, &path!("a/counter"))?;
+                let record =
+                    structfs_core_store::Path::parse(&format!("b/from_{}_{i}", self.tag)).unwrap();
+                ns.write(&record, Record::parsed(Value::Integer(seen)))?;
+            }
+            Ok(())
+        }
+    }
+
+    async fn run(seed: u64) -> (Timeline, Option<Value>, Option<Value>) {
+        let dir = depot_dir();
+        let session = session_store();
+        let mut runtime = Runtime::new()
+            .with_determinism(Determinism::Simulation { seed })
+            .with_session_log(session.clone());
+        register_builtins(&mut runtime);
+        runtime.register_builtin(
+            "courier1",
+            Arc::new(|| Box::new(Courier { tag: "k1" }) as Box<dyn NativeBlock>),
+        );
+        runtime.register_builtin(
+            "courier2",
+            Arc::new(|| Box::new(Courier { tag: "k2" }) as Box<dyn NativeBlock>),
+        );
+        let def = AssemblyDef::from_str(
+            r#"{"assembly": "bridge",
+                "blocks": {"k1": "builtin:courier1", "k2": "builtin:courier2",
+                           "a": "depot.yaml", "b": "depot.yaml"},
+                "public": "k1",
+                "wiring": ["k1:/a -> a", "k1:/b -> b",
+                           "k2:/a -> a", "k2:/b -> b"]}"#,
+        )
+        .unwrap();
+        let assembly = runtime
+            .instantiate(&def, HashMap::new(), dir.path())
+            .unwrap();
+        for name in ["k1", "k2"] {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                assembly.cell(name).unwrap().wait_terminal(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name} did not finish"));
+        }
+        let timeline = timeline_of(&session);
+        let ledger = assembly.read_block("b", path!("")).await.unwrap();
+        let counter = assembly.read_block("a", path!("counter")).await.unwrap();
+        assembly.shutdown(Duration::from_secs(2)).await;
+        (timeline, ledger, counter)
+    }
+
+    let (timeline_a, ledger_a, counter_a) = run(42).await;
+    let (timeline_b, ledger_b, counter_b) = run(42).await;
+    assert_eq!(timeline_a, timeline_b, "same seed, same tree-wide run");
+    assert_eq!(ledger_a, ledger_b, "same seed, same ferried values");
+    assert_eq!(counter_a, counter_b);
+    // Both nested assemblies' blocks share the one seeded timeline,
+    // each under its own tree-scoped identity.
+    for key in ["bridge/a/kv", "bridge/b/kv", "bridge/k1", "bridge/k2"] {
+        assert!(
+            timeline_a.iter().any(|(block, _, _)| block == key),
+            "missing {key} in {timeline_a:?}"
+        );
+    }
+    let (timeline_c, _, _) = run(7).await;
+    assert_ne!(timeline_a, timeline_c, "a different seed, another schedule");
 }

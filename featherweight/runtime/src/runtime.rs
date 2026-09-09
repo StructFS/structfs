@@ -209,7 +209,8 @@ impl RtCtx {
         // deadlock, not a timing accident.
         if let (Some(turnstile), Some(me)) = (self.turnstile(), crate::turnstile::current_block()) {
             let rx = cell.enqueue(op, path, data);
-            turnstile.park(&me);
+            // A dependency on the callee: this park arms deadlock.
+            turnstile.park(&me, crate::turnstile::ParkKind::Call);
             let response = rx.await;
             turnstile.wait_turn(&me).await;
             return match response {
@@ -653,7 +654,16 @@ impl RuntimeInner {
         imports: HashMap<String, HostStore>,
         base_dir: &std::path::Path,
     ) -> Result<Arc<AssemblyInstance>> {
-        self.instantiate_scoped(def, imports, base_dir, &def.name)
+        let instance = self.instantiate_scoped(def, imports, base_dir, &def.name)?;
+        // Simulation: the first scheduling decision waits until the
+        // WHOLE tree — nested assemblies included — is enrolled, so the
+        // schedule never races the host thread's remaining enrollment.
+        // (A spawner instantiating mid-run holds the turn, so this is a
+        // no-op there and the children start at its next yield.)
+        if let Some(turnstile) = self.ctx.turnstile() {
+            turnstile.launch();
+        }
+        Ok(instance)
     }
 
     fn instantiate_scoped(
@@ -818,12 +828,13 @@ impl RuntimeInner {
         // autonomous blocks are what concurrency means, and the seeded
         // schedule needs them all in the runnable set from the top.
         self.ctx.ensure_started(&public)?;
-        if let Some(turnstile) = self.ctx.turnstile() {
+        if self.ctx.turnstile().is_some() {
+            // Under simulation every block starts (and enrolls) here,
+            // in deterministic iteration order; the launch happens once,
+            // at the top of the tree, after all enrollment.
             for cell in instance.cells.values() {
                 self.ctx.ensure_started(cell)?;
             }
-            // Every initial block is enrolled: make the first decision.
-            turnstile.launch();
         }
         Ok(instance)
     }
@@ -938,6 +949,9 @@ impl Runtime {
                         block
                             .cell
                             .request_shutdown(crate::block::ShutdownMode::Immediate);
+                        // Free any caller stuck awaiting this block: the
+                        // cycle means its response is never coming.
+                        block.cell.fail_in_flight();
                     }
                 }
             });

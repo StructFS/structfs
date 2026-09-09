@@ -12,10 +12,15 @@
 //! interleaving; a different seed *explores* a different one, which is
 //! what makes race-hunting a matter of iterating seeds.
 //!
-//! Deadlock becomes detectable instead of silent: when no block is
-//! runnable, none holds the turn, and some are parked, no future wake
-//! can ever come (all wakes happen on turns), so the turnstile reports
-//! it and the runtime shuts the assembly down loudly.
+//! Deadlock becomes detectable instead of silent — but a deadlock is a
+//! *dependency cycle*, not idleness. A block parked on its own mailbox
+//! is waiting for work that may legitimately never come (a server whose
+//! clients have all exited, or one awaiting external input); the
+//! schedule simply goes quiet, and a host poke or shutdown revives it.
+//! A block parked on a *call to a peer* has a dependency, and when no
+//! block is runnable while some block is call-parked, no wake can ever
+//! come (all wakes happen on turns) — that is the cycle, and the
+//! runtime shuts the assembly down loudly.
 //!
 //! What simulation does not cover, by construction: host-driven
 //! operations (an embedder calling into the assembly is external
@@ -24,6 +29,15 @@
 //! should be self-driving.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Why a block released its turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParkKind {
+    /// Idle on its own mailbox — no dependency; quiescence, not deadlock.
+    Mailbox,
+    /// Awaiting a peer's response to a call — a dependency.
+    Call,
+}
 use std::sync::{Arc, Mutex};
 
 // The block key the current OS thread is executing, when it is a
@@ -47,8 +61,10 @@ struct TurnState {
     holder: Option<String>,
     /// Ready to run, awaiting a grant.
     runnable: BTreeSet<String>,
-    /// Waiting for an event only a turn-holder can deliver.
-    parked: BTreeSet<String>,
+    /// Parked, with whether the park is a dependency on a peer (a
+    /// call) rather than idleness (a mailbox wait). Only dependency
+    /// parks arm deadlock detection.
+    parked: BTreeMap<String, ParkKind>,
     /// Exited for good: wakes for these are ignored — granting a turn
     /// to a thread that no longer exists would wedge the schedule.
     gone: BTreeSet<String>,
@@ -77,7 +93,7 @@ impl Turnstile {
                 rng: seed ^ 0x7375_6c61_7469_6f6e, // "sulation"
                 holder: None,
                 runnable: BTreeSet::new(),
-                parked: BTreeSet::new(),
+                parked: BTreeMap::new(),
                 gone: BTreeSet::new(),
                 grants: BTreeMap::new(),
             }),
@@ -102,7 +118,10 @@ impl Turnstile {
             return false;
         }
         if state.runnable.is_empty() {
-            return !state.parked.is_empty();
+            // Quiescent (only mailbox idleness) is not a wedge: a host
+            // poke or shutdown will revive it. A pending call with
+            // nothing runnable is a dependency cycle.
+            return state.parked.values().any(|kind| *kind == ParkKind::Call);
         }
         let pick = (splitmix64(&mut state.rng) as usize) % state.runnable.len();
         let key = state
@@ -180,23 +199,42 @@ impl Turnstile {
 
     /// Park: the caller is waiting for an event only a turn-holder can
     /// deliver. Releases the turn and schedules the next block.
-    pub(crate) fn park(&self, key: &str) {
+    /// `kind` says whether this park is a dependency (a call) or mere
+    /// idleness (a mailbox wait) — only the former arms deadlock.
+    pub(crate) fn park(&self, key: &str, kind: ParkKind) {
         let mut state = self.lock();
         if state.holder.as_deref() == Some(key) {
             state.holder = None;
         }
         state.runnable.remove(key);
-        state.parked.insert(key.to_string());
+        state.parked.insert(key.to_string(), kind);
         let wedged = Self::schedule(&mut state);
         drop(state);
         self.after(wedged);
     }
 
-    /// An event for `key` arrived (delivered during the caller's turn,
-    /// or from a host thread): parked becomes runnable.
-    pub(crate) fn make_runnable(&self, key: &str) {
+    /// A response to `key`'s pending call arrived: the dependency is
+    /// satisfied, so it becomes runnable whatever it was parked on.
+    pub(crate) fn wake_response(&self, key: &str) {
+        self.wake(key, true);
+    }
+
+    /// A mailbox event for `key` arrived (a request, a signal, a
+    /// shutdown). It wakes an *idle* block — one parked on its mailbox,
+    /// or not parked — but never a block parked on a call: that block
+    /// is mid-call and will drain its mailbox when the call returns.
+    /// Waking it would grant a turn it cannot use, and, worse, hide the
+    /// dependency cycle this is exactly meant to leave wedged.
+    pub(crate) fn wake_mailbox(&self, key: &str) {
+        self.wake(key, false);
+    }
+
+    fn wake(&self, key: &str, response: bool) {
         let mut state = self.lock();
         if state.holder.as_deref() == Some(key) || state.gone.contains(key) {
+            return;
+        }
+        if !response && matches!(state.parked.get(key), Some(ParkKind::Call)) {
             return;
         }
         state.parked.remove(key);
@@ -298,11 +336,36 @@ mod tests {
             state.runnable.insert("a/hermit".to_string());
             Turnstile::schedule(&mut state);
         }
-        // The only block parks with nothing to wake it: wedged.
-        turnstile.park("a/hermit");
+        // A lone call-park with nothing to answer it is a wedge; a
+        // mailbox park would be mere idleness and not fire.
+        turnstile.park("a/hermit", ParkKind::Call);
         assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
-        // A wake (a host poke, a shutdown) recovers the schedule.
-        turnstile.make_runnable("a/hermit");
+        // A response wake recovers the schedule.
+        turnstile.wake_response("a/hermit");
         assert_eq!(turnstile.lock().holder.as_deref(), Some("a/hermit"));
+    }
+
+    #[test]
+    fn a_lone_mailbox_park_is_idle_not_a_deadlock() {
+        let turnstile = Turnstile::new(7);
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = fired.clone();
+        turnstile.set_deadlock_handler(move || {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        {
+            let mut state = turnstile.lock();
+            state
+                .grants
+                .insert("a/server".to_string(), Arc::new(tokio::sync::Notify::new()));
+            state.runnable.insert("a/server".to_string());
+            Turnstile::schedule(&mut state);
+        }
+        // An idle server parked on its mailbox: quiescence, not a wedge.
+        turnstile.park("a/server", ParkKind::Mailbox);
+        assert!(!fired.load(std::sync::atomic::Ordering::SeqCst));
+        // A host poke (a mailbox wake) revives it.
+        turnstile.wake_mailbox("a/server");
+        assert_eq!(turnstile.lock().holder.as_deref(), Some("a/server"));
     }
 }
