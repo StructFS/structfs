@@ -23,6 +23,7 @@ import {
   ReplayingStore,
   toJsonl,
 } from "../transcript.ts";
+import { IsoStore } from "../iso-store.ts";
 import { WorkerHost } from "../worker-host.ts";
 
 /// A world of canned answers, for exercising the wrappers without a
@@ -162,4 +163,53 @@ test("worker mode records and replays a resident run", async () => {
   });
   assert.equal(await replayed.shutdown(), 0);
   assert.equal(replayed.transcriptRemaining(), 0);
+});
+
+test("a seek replays a prefix and the guest serves live from that state", async () => {
+  const wasm = await readFile(new URL("../kv.wasm", import.meta.url));
+
+  // Record a session: one write served, one read served, shutdown.
+  const iso = new IsoStore();
+  iso.enqueue("write", "a", 1);
+  iso.enqueue("read", "a");
+  const recorded = new RecordingStore(iso);
+  assert.equal((await instantiate(wasm, recorded)).run(), 0);
+
+  // Seek to the guest's second mailbox read: the served write is in the
+  // prefix, everything after runs live.
+  const mailboxReads = recorded.entries
+    .map((entry, index) => ({ entry, index }))
+    .filter(
+      ({ entry }) =>
+        entry.op === "read" && entry.path === "iso/server/requests",
+    );
+  const second = mailboxReads[1];
+  assert.ok(second !== undefined, "the recording serves two requests");
+
+  const live = new IsoStore();
+  const readBack = live.enqueue("read", "a");
+  const replay = new ReplayingStore(recorded.entries, {
+    until: second.index,
+    live,
+  });
+  assert.equal((await instantiate(wasm, replay)).run(), 0);
+
+  // The handed-off guest answered a live request from replayed state:
+  // the write it "performed" during the prefix is really in its memory.
+  assert.ok(replay.handedOff());
+  assert.deepEqual(live.responses.get(readBack), { result: "ok", value: 1 });
+});
+
+test("a seek past effects into non-iso targets is refused", () => {
+  const entries = fromJsonl(
+    '{"op":"write","path":"services/kv/x","answer":{"wrote":"services/kv/x"}}\n',
+  );
+  assert.throws(
+    () => new ReplayingStore(entries, { live: new IsoStore() }),
+    (error: unknown) =>
+      error instanceof StoreError &&
+      error.message.includes("cannot seek past entry 0"),
+  );
+  // The same prefix without a handoff is a legitimate strict replay.
+  new ReplayingStore(entries);
 });

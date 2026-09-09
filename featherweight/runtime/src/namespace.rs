@@ -258,9 +258,25 @@ impl Namespace {
     }
 }
 
+impl Namespace {
+    /// A seek whose replay reached its horizon hands off here: the
+    /// transcript goes inert and every subsequent operation runs live.
+    fn hand_off_if_ready(&mut self) {
+        if self
+            .transcript
+            .as_ref()
+            .is_some_and(BlockTranscript::handoff_ready)
+        {
+            self.transcript = Some(BlockTranscript::HandedOff);
+            tracing::info!(block = %self.cell.name, "seek reached its horizon; continuing live");
+        }
+    }
+}
+
 impl Reader for Namespace {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let entry = self.transcript.as_ref().map(BlockTranscript::position);
+        self.hand_off_if_ready();
+        let entry = self.transcript.as_ref().and_then(BlockTranscript::position);
         match &mut self.transcript {
             Some(transcript) if transcript.is_replaying() => {
                 let result = transcript.replay_read(from);
@@ -286,7 +302,8 @@ impl Writer for Namespace {
             .transcript
             .as_ref()
             .and_then(|_| crate::transcript::digest(&data));
-        let entry = self.transcript.as_ref().map(BlockTranscript::position);
+        self.hand_off_if_ready();
+        let entry = self.transcript.as_ref().and_then(BlockTranscript::position);
         match &mut self.transcript {
             Some(transcript) if transcript.is_replaying() => {
                 let result = transcript.replay_write(to, wrote);

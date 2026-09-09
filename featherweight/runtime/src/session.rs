@@ -53,6 +53,25 @@ pub struct SessionEntry {
     pub entry: Option<u64>,
 }
 
+impl SessionEntry {
+    /// Per-block seek horizons for "the state just after session `seq`":
+    /// for each block, how many transcript entries its replay should
+    /// consume before handing off (spec 12 seek). Every witnessed
+    /// operation occupied exactly one transcript slot, so the horizon is
+    /// a count of the block's entries up to and including `seq`. Blocks
+    /// absent from the timeline by then simply start live from the top.
+    pub fn cursors_at(
+        entries: &[SessionEntry],
+        seq: u64,
+    ) -> std::collections::HashMap<String, u64> {
+        let mut cursors = std::collections::HashMap::new();
+        for entry in entries.iter().filter(|e| e.seq <= seq) {
+            *cursors.entry(entry.block.clone()).or_insert(0) += 1;
+        }
+        cursors
+    }
+}
+
 struct SessionInner {
     seq: u64,
     log: HostStore,
@@ -180,6 +199,28 @@ mod tests {
         assert_eq!(entries[2].outcome, "failed:permission_denied");
         assert_eq!(entries[2].entry, Some(1));
         assert_eq!(entries[1].entry, None);
+    }
+
+    #[test]
+    fn cursors_at_counts_each_block_up_to_the_seq() {
+        let entry = |seq: u64, block: &str| SessionEntry {
+            seq,
+            block: block.to_string(),
+            op: "read".to_string(),
+            path: path!("iso/random/uuid"),
+            outcome: "found".to_string(),
+            entry: None,
+        };
+        let timeline = [
+            entry(0, "demo/a"),
+            entry(1, "demo/b"),
+            entry(2, "demo/a"),
+            entry(3, "demo/a"),
+        ];
+        let cursors = SessionEntry::cursors_at(&timeline, 2);
+        assert_eq!(cursors.get("demo/a"), Some(&2));
+        assert_eq!(cursors.get("demo/b"), Some(&1));
+        assert_eq!(cursors.get("demo/c"), None);
     }
 
     #[test]

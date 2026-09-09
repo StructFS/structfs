@@ -82,4 +82,6 @@ pub use runtime::{ArtifactLoader, AssemblyInstance, Runtime, StdioProvider, Wasm
 pub use session::{SessionEntry, SessionLog};
 pub use spawn::{ProcStore, SpawnProtocol};
 pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
-pub use transcript::{TranscriptAnswer, TranscriptEntry, TranscriptMode, TranscriptProvider};
+pub use transcript::{
+    SeekPoint, TranscriptAnswer, TranscriptEntry, TranscriptMode, TranscriptProvider,
+};

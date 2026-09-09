@@ -75,7 +75,30 @@ pub enum TranscriptMode {
     /// Answer every boundary operation from each block's transcript store;
     /// the live world is never consulted and effects are not re-executed.
     Replay(Arc<TranscriptProvider>),
+    /// Replay each block's transcript *prefix*, then hand off to live
+    /// execution: the block wakes at an arbitrary recorded state and
+    /// keeps running against the real world. `to(key)` gives the number
+    /// of entries to replay for a block (`None` = its whole transcript).
+    ///
+    /// Sound only for a prefix whose effects stay inside `/iso`: an
+    /// effect into a wired peer was suppressed during replay, so the
+    /// live world would be missing state the block believes in — such
+    /// a seek is refused at start, naming the offending entry. Seeded
+    /// determinism sources are fast-forwarded past the prefix, so a
+    /// seeded seek continues exactly where a straight run would be.
+    /// Payload-carrying `/iso` metadata (a declared interface, armed
+    /// timers) is not reconstructed — payloads are deliberately not on
+    /// the transcript.
+    Seek {
+        provider: Arc<TranscriptProvider>,
+        to: Arc<SeekPoint>,
+    },
 }
+
+/// Per-block seek horizon: how many transcript entries to replay before
+/// handing off (`None` = the whole transcript). Blocks that had not run
+/// by the sought point get `Some(0)` — they start live from the top.
+pub type SeekPoint = dyn Fn(&str) -> Option<u64> + Send + Sync;
 
 /// One boundary operation and its complete answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +193,26 @@ pub(crate) enum BlockTranscript {
         entries: VecDeque<TranscriptEntry>,
         /// Entries consumed so far — the index divergence errors cite.
         cursor: usize,
+        /// Seek mode: hand off to live execution when the entries run
+        /// out, instead of failing the run.
+        then_live: bool,
     },
+    /// A seek that reached its horizon: the block runs live, the
+    /// transcript inert.
+    HandedOff,
+}
+
+/// What a seek's replayed prefix consumed and touched — computed before
+/// the block runs, to fast-forward seeded sources and to refuse unsound
+/// handoffs.
+pub(crate) struct PreambleProfile {
+    /// splitmix64 words the prefix drew from `/iso/random`.
+    pub(crate) entropy_words: u64,
+    /// Virtual-clock ticks the prefix consumed from `/iso/time`.
+    pub(crate) clock_ticks: u64,
+    /// The first effect into a wired (non-iso) target, with its entry
+    /// index — present means the handoff is unsound and must be refused.
+    pub(crate) peer_write: Option<(u64, Path)>,
 }
 
 impl BlockTranscript {
@@ -179,12 +221,77 @@ impl BlockTranscript {
     }
 
     /// The index the next operation will occupy (recording) or consume
-    /// (replaying) — what a session-log entry links to.
-    pub(crate) fn position(&self) -> u64 {
+    /// (replaying) — what a session-log entry links to. `None` once a
+    /// seek has handed off: live operations have no transcript entry.
+    pub(crate) fn position(&self) -> Option<u64> {
         match self {
-            BlockTranscript::Recording { appended, .. } => *appended,
-            BlockTranscript::Replaying { cursor, .. } => *cursor as u64,
+            BlockTranscript::Recording { appended, .. } => Some(*appended),
+            BlockTranscript::Replaying { cursor, .. } => Some(*cursor as u64),
+            BlockTranscript::HandedOff => None,
         }
+    }
+
+    /// Whether a seek's replay has reached its horizon and the next
+    /// operation should run live. The caller flips the transcript to
+    /// [`BlockTranscript::HandedOff`] when this answers true.
+    pub(crate) fn handoff_ready(&self) -> bool {
+        matches!(
+            self,
+            BlockTranscript::Replaying {
+                entries,
+                then_live: true,
+                ..
+            } if entries.is_empty()
+        )
+    }
+
+    /// Load a transcript prefix for seek-then-live: replay `to` entries
+    /// (`None` = all of them), then hand off instead of failing.
+    pub(crate) fn seeking(log: HostStore, to: Option<u64>) -> Result<Self, Error> {
+        let mut loaded = Self::replaying(log)?;
+        let BlockTranscript::Replaying {
+            entries, then_live, ..
+        } = &mut loaded
+        else {
+            unreachable!("replaying() builds Replaying");
+        };
+        if let Some(horizon) = to {
+            entries.truncate(horizon as usize);
+        }
+        *then_live = true;
+        Ok(loaded)
+    }
+
+    /// What the (possibly truncated) prefix consumed and touched.
+    pub(crate) fn preamble_profile(&self) -> PreambleProfile {
+        let mut profile = PreambleProfile {
+            entropy_words: 0,
+            clock_ticks: 0,
+            peer_write: None,
+        };
+        let BlockTranscript::Replaying { entries, .. } = self else {
+            return profile;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            let components: Vec<&str> = entry.path.iter().map(String::as_str).collect();
+            let found = matches!(entry.answer, TranscriptAnswer::Found(_));
+            match (entry.op.as_str(), components.as_slice()) {
+                ("read", ["iso", "random", "uuid"]) if found => profile.entropy_words += 2,
+                ("read", ["iso", "random", "int"]) if found => profile.entropy_words += 1,
+                ("read", ["iso", "random", "bytes", n]) if found => {
+                    let n: u64 = n.parse().unwrap_or(0);
+                    profile.entropy_words += n.div_ceil(8);
+                }
+                ("read", ["iso", "time", "now" | "now_unix_ns" | "monotonic"]) if found => {
+                    profile.clock_ticks += 1;
+                }
+                ("write", [first, ..]) if *first != "iso" && profile.peer_write.is_none() => {
+                    profile.peer_write = Some((index as u64, entry.path.clone()));
+                }
+                _ => {}
+            }
+        }
+        profile
     }
 
     /// Load a transcript for replay through the append-log tail convention.
@@ -220,7 +327,11 @@ impl BlockTranscript {
         for item in items {
             entries.push_back(from_value::<TranscriptEntry>(item)?);
         }
-        Ok(BlockTranscript::Replaying { entries, cursor: 0 })
+        Ok(BlockTranscript::Replaying {
+            entries,
+            cursor: 0,
+            then_live: false,
+        })
     }
 
     pub(crate) fn is_replaying(&self) -> bool {
@@ -233,7 +344,7 @@ impl BlockTranscript {
     /// legitimately exit early on a replayed shutdown request.
     pub(crate) fn remaining(&self) -> usize {
         match self {
-            BlockTranscript::Recording { .. } => 0,
+            BlockTranscript::Recording { .. } | BlockTranscript::HandedOff => 0,
             BlockTranscript::Replaying { entries, .. } => entries.len(),
         }
     }
@@ -289,7 +400,10 @@ impl BlockTranscript {
 
     /// The next entry, checked against what the block actually asked.
     fn next(&mut self, op: &str, at: &Path) -> Result<TranscriptEntry, Error> {
-        let BlockTranscript::Replaying { entries, cursor } = self else {
+        let BlockTranscript::Replaying {
+            entries, cursor, ..
+        } = self
+        else {
             return Err(Error::store("transcript", "replay", "not replaying"));
         };
         let index = *cursor;

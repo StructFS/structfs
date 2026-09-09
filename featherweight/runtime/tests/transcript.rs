@@ -601,3 +601,144 @@ async fn a_replay_writes_its_own_session_timeline() {
         probe_line(&session_entries(&replayed_session))
     );
 }
+
+// === Seek: replay a prefix, then hand off to live execution ===
+
+/// A probe that reads entropy `n` times, capturing what it saw.
+struct EntropyProbe {
+    n: usize,
+    seen: Seen,
+}
+impl NativeBlock for EntropyProbe {
+    fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+        for _ in 0..self.n {
+            let uuid = ns.read(&path!("iso/random/uuid"))?;
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{:?}", uuid.and_then(|r| r.as_value().cloned())));
+        }
+        Ok(())
+    }
+}
+
+fn entropy_runtime(
+    n: usize,
+    seen: &Seen,
+    mode: TranscriptMode,
+    determinism: Determinism,
+) -> Runtime {
+    let mut runtime = Runtime::new()
+        .with_transcripts(mode)
+        .with_determinism(determinism);
+    let seen = seen.clone();
+    runtime.register_builtin(
+        "probe",
+        Arc::new(move || {
+            Box::new(EntropyProbe {
+                n,
+                seen: seen.clone(),
+            }) as Box<dyn NativeBlock>
+        }),
+    );
+    runtime
+}
+
+/// The flagship: replay two of three seeded entropy reads, hand off,
+/// and the third — served live by fast-forwarded sources — is exactly
+/// what the recorded straight run saw. The seek continues the same run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seek_continues_the_same_seeded_run() {
+    let (_transcripts, provider) = shared_transcripts();
+    let seeded = Determinism::Seeded { seed: 42 };
+
+    let recorded: Seen = Arc::default();
+    let runtime = entropy_runtime(
+        3,
+        &recorded,
+        TranscriptMode::Record(provider.clone()),
+        seeded.clone(),
+    );
+    let cell = run_assembly(&runtime, UNWIRED).await;
+    assert_eq!(cell.state(), BlockState::Stopped);
+
+    let sought: Seen = Arc::default();
+    let runtime = entropy_runtime(
+        3,
+        &sought,
+        TranscriptMode::Seek {
+            provider,
+            to: Arc::new(|_| Some(2)),
+        },
+        seeded,
+    );
+    let cell = run_assembly(&runtime, UNWIRED).await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+
+    let recorded = recorded.lock().unwrap().clone();
+    let sought = sought.lock().unwrap().clone();
+    // Reads 0 and 1 came from the transcript; read 2 ran live off the
+    // fast-forwarded seeded source — and all three match the straight run.
+    assert_eq!(recorded, sought);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_seek_hands_off_where_the_transcript_ends() {
+    let (_transcripts, provider) = shared_transcripts();
+
+    let recorded: Seen = Arc::default();
+    let runtime = entropy_runtime(
+        1,
+        &recorded,
+        TranscriptMode::Record(provider.clone()),
+        Determinism::Live,
+    );
+    run_assembly(&runtime, UNWIRED).await;
+
+    // The continuation asks for more than the recorded run did: a plain
+    // replay would fail with "ran out"; a seek goes live instead.
+    let sought: Seen = Arc::default();
+    let runtime = entropy_runtime(
+        2,
+        &sought,
+        TranscriptMode::Seek {
+            provider,
+            to: Arc::new(|_| None),
+        },
+        Determinism::Live,
+    );
+    let cell = run_assembly(&runtime, UNWIRED).await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+
+    let recorded = recorded.lock().unwrap().clone();
+    let sought = sought.lock().unwrap().clone();
+    assert_eq!(sought[0], recorded[0], "the prefix replays faithfully");
+    assert_ne!(sought[1], recorded[0], "the continuation is live");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seek_past_peer_effects_is_refused() {
+    let (_transcripts, provider) = shared_transcripts();
+
+    // The standard probe writes into its wired kv service.
+    let seen: Seen = Arc::default();
+    let runtime = probe_runtime(&seen, TranscriptMode::Record(provider.clone()));
+    run_assembly(&runtime, WIRED).await;
+
+    let seen: Seen = Arc::default();
+    let runtime = probe_runtime(
+        &seen,
+        TranscriptMode::Seek {
+            provider,
+            to: Arc::new(|_| None),
+        },
+    );
+    let def = AssemblyDef::from_str(UNWIRED).unwrap();
+    let refused = runtime
+        .instantiate(&def, HashMap::new(), &std::env::temp_dir())
+        .map(|_| ())
+        .expect_err("a prefix with peer effects must not hand off");
+    let message = refused.to_string();
+    assert!(message.contains("cannot seek"), "{message}");
+    assert!(message.contains("services/kv"), "{message}");
+}

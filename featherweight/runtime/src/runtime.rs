@@ -21,7 +21,7 @@ use crate::protocol::{decode_read_response, decode_write_response};
 use crate::session::SessionLog;
 use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
-use crate::transcript::{BlockTranscript, TranscriptMode};
+use crate::transcript::{BlockTranscript, PreambleProfile, TranscriptMode};
 use structfs_handles::CancelToken;
 
 /// A loaded wasm artifact in some binding of the Block ABI: it serves
@@ -276,6 +276,42 @@ impl RtCtx {
                         ))
                     })?,
             ),
+            TranscriptMode::Seek { provider, to } => Some(
+                provider(&block.transcript_key)
+                    .and_then(|store| BlockTranscript::seeking(store, to(&block.transcript_key)))
+                    .map_err(|e| {
+                        cell.set_state(BlockState::Failed);
+                        RuntimeError::assembly(format!(
+                            "seek transcript for block '{}': {e}",
+                            block.transcript_key
+                        ))
+                    })?,
+            ),
+        };
+
+        // A seek's prefix must be reconstructible for the handoff to be
+        // sound: effects into wired peers were suppressed during replay,
+        // and a live world missing the block's own effects is refused
+        // loudly rather than handed a confused block. The profile also
+        // says how far to fast-forward seeded sources.
+        let profile: Option<PreambleProfile> = if matches!(
+            &transcript_mode,
+            TranscriptMode::Seek { .. }
+        ) {
+            let profile = transcript
+                .as_ref()
+                .expect("seek builds a transcript")
+                .preamble_profile();
+            if let Some((index, at)) = &profile.peer_write {
+                cell.set_state(BlockState::Failed);
+                return Err(RuntimeError::assembly(format!(
+                        "cannot seek block '{}' past entry {index}: the prefix writes                          to '{at}', an effect the live world will not hold — seek                          before it, or replay the whole run",
+                        block.transcript_key
+                    )));
+            }
+            Some(profile)
+        } else {
+            None
         };
 
         let proc = block.spawn.then(|| {
@@ -306,6 +342,9 @@ impl RtCtx {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .sources_for(&cell.name);
+        if let Some(profile) = &profile {
+            sources.fast_forward(profile.entropy_words, profile.clock_ticks);
+        }
         let iso = Arc::new(IsoSurface::new(IsoConfig {
             cell: block.cell.clone(),
             log: self.log_sink(),

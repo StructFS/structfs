@@ -54,6 +54,8 @@ const kindOf = (error: unknown): string => {
 /// ReplayingStore satisfy it.
 export interface Positioned {
   position(): number;
+  /// A seek that reached its horizon: live operations link to nothing.
+  handedOff?(): boolean;
 }
 
 export class SessionLog {
@@ -98,7 +100,9 @@ export function tapStore(
     }
   };
   const at = (): { entry?: number } =>
-    positioned === undefined ? {} : { entry: positioned.position() };
+    positioned === undefined || positioned.handedOff?.() === true
+      ? {}
+      : { entry: positioned.position() };
   return {
     read(path: string): StoreValue | undefined {
       const link = at();

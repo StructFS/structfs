@@ -300,6 +300,32 @@ with nothing mounted but the transcript and its observation paths — no network
 no clock, no entropy — which is itself a statement of what a transcript is: the
 world, as one run experienced it.
 
+### Seek: Replay to a Point, Then Run
+
+A runtime may replay a *prefix* of a transcript and then **hand off to
+live execution**: the Block wakes at an arbitrary recorded state — its
+memory reconstructed by the replayed answers — and keeps running
+against the real world. On an Assembly, a point on the session log's
+timeline names a coherent state: each Block's horizon is the count of
+its own operations witnessed up to that `seq`.
+
+The handoff is sound only when the world's half of the state needs no
+reconstruction. Replay suppresses effects, so a prefix that wrote into
+a wired peer describes state the live world does not hold — a Block
+handed off past such a write wakes believing in a world that never
+happened. A runtime must refuse that seek up front, naming the entry,
+rather than deliver a confused Block. A prefix whose effects stay
+inside `/iso` is safe; virtual providers (seeded entropy, the virtual
+clock) must be fast-forwarded past the prefix so a seeded continuation
+is the same run a straight execution would have been; and inputs that
+legitimately move on (the wall clock, a peer's answers to *later*
+reads) simply move on, exactly as a clock is allowed to jump.
+
+What a seek does not reconstruct: payload-carrying `/iso` metadata (a
+declared interface, armed timers), because payloads are deliberately
+not on the transcript; and suppressed effects into peers — lifting
+that limit is the coordinated restore below.
+
 ## Checkpoints
 
 The Lifecycle chapter (`05-lifecycle.md`) leaves checkpointing open. The
@@ -318,7 +344,11 @@ Restoring a checkpoint and replaying the transcript from its cursor reproduces
 every subsequent state of the recorded run. Seeking *backward* is
 restoring the nearest earlier checkpoint and replaying forward — which is
 how a time-travel debugger is a corollary of this chapter rather than a
-feature of its own.
+feature of its own. A **coordinated restore** — every Block of an
+Assembly sought to one session-log point, with in-Assembly effects
+re-executed into the peers being reconstructed rather than suppressed,
+then all handed off together — would lift the seek's peer-effect
+refusal; it remains future work.
 
 What a checkpoint must capture beyond memory — and what it may safely
 drop, such as caches whose contents the Block cannot distinguish from

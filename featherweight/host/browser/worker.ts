@@ -30,6 +30,9 @@ export interface WorkerInit {
   record?: boolean;
   /// Replay from this JSONL instead of running live.
   replay?: string;
+  /// With `replay`: a seek — replay `seek` entries (or, when `true`,
+  /// the whole transcript) and then hand off to live execution.
+  seek?: number | true;
   /// Witness every boundary operation to the session log under this
   /// block name; events stream to the main thread, which assigns
   /// arrival order.
@@ -68,7 +71,7 @@ const onMessage = (handler: (init: WorkerInit) => void): void => {
   } else nodePort?.on("message", handler);
 };
 
-onMessage(async ({ wasm, sab, args, env, record, replay, session }) => {
+onMessage(async ({ wasm, sab, args, env, record, replay, seek, session }) => {
   try {
     const channel = new ChannelReceiver(sab);
     const iso = new IsoStore({
@@ -90,7 +93,13 @@ onMessage(async ({ wasm, sab, args, env, record, replay, session }) => {
     let recording: RecordingStore | undefined;
     let replaying: ReplayingStore | undefined;
     if (replay !== undefined) {
-      replaying = new ReplayingStore(fromJsonl(replay));
+      const options =
+        seek === undefined
+          ? {}
+          : seek === true
+            ? { live: iso as HostStore }
+            : { until: seek, live: iso as HostStore };
+      replaying = new ReplayingStore(fromJsonl(replay), options);
       store = replaying;
     } else if (record === true) {
       recording = new RecordingStore(iso);

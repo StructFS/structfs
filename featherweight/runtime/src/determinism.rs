@@ -80,6 +80,22 @@ impl IsoSources {
         self.now_unix_ns()
             .map(|ns| ns - self.clock.as_ref().expect("checked").epoch_ns)
     }
+
+    /// Fast-forward past a replayed prefix (spec 12 seek): advance the
+    /// entropy stream by `words` draws and the virtual clock by `ticks`
+    /// reads, so a seeded run that hands off continues exactly where a
+    /// straight run would be. A no-op for live sources.
+    pub(crate) fn fast_forward(&self, words: u64, ticks: u64) {
+        if let Some(state) = &self.entropy {
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            for _ in 0..words {
+                splitmix64(&mut state);
+            }
+        }
+        if let Some(clock) = &self.clock {
+            clock.ticks.fetch_add(ticks as i64, Ordering::SeqCst);
+        }
+    }
 }
 
 /// A clock whose only obligation is to be a function of how often it is

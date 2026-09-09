@@ -259,16 +259,51 @@ export class RecordingStore implements HostStore {
   }
 }
 
+/// Options for [`ReplayingStore`]: a seek replays only `until` entries
+/// (default: all of them) and then hands off to the `live` store
+/// instead of failing — the block wakes at an arbitrary recorded state
+/// and keeps running (spec 12 seek).
+export interface ReplayOptions {
+  until?: number;
+  live?: HostStore;
+}
+
 /// Answer every operation from the transcript. The inner store does
 /// not exist: the transcript is the world, and a question the recorded
 /// run never asked — or a write with different data — is divergence,
-/// reported loudly with the entry index.
+/// reported loudly with the entry index. With `live` set, exhausting
+/// the (possibly truncated) transcript hands off to live execution
+/// instead.
 export class ReplayingStore implements HostStore {
   private cursor = 0;
   private readonly entries: readonly TranscriptEntry[];
+  private readonly live: HostStore | undefined;
 
-  constructor(entries: readonly TranscriptEntry[]) {
-    this.entries = entries;
+  constructor(entries: readonly TranscriptEntry[], options: ReplayOptions = {}) {
+    this.entries =
+      options.until === undefined ? entries : entries.slice(0, options.until);
+    this.live = options.live;
+    if (this.live !== undefined) {
+      // A seek's prefix must be reconstructible: an effect into a
+      // non-iso target was suppressed during replay, and a live world
+      // missing the block's own effects is refused up front.
+      const peerWrite = this.entries.findIndex(
+        (entry) => entry.op === "write" && !entry.path.startsWith("iso/"),
+      );
+      if (peerWrite >= 0) {
+        throw new StoreError(
+          status.CONFLICT,
+          `cannot seek past entry ${peerWrite}: the prefix writes to ` +
+            `'${this.entries[peerWrite]?.path}', an effect the live world ` +
+            `will not hold — seek before it, or replay the whole run`,
+        );
+      }
+    }
+  }
+
+  /// Whether the seek reached its horizon and operations now run live.
+  handedOff(): boolean {
+    return this.live !== undefined && this.cursor >= this.entries.length;
   }
 
   /// Entries the replay has not consumed — a replayed run that exits
@@ -306,6 +341,7 @@ export class ReplayingStore implements HostStore {
   }
 
   read(path: string): StoreValue | undefined {
+    if (this.handedOff()) return (this.live as HostStore).read(path);
     const { answer } = this.next("read", path);
     if (answer === "absent") return undefined;
     if ("found" in answer) {
@@ -328,6 +364,7 @@ export class ReplayingStore implements HostStore {
   }
 
   write(path: string, value: StoreValue): string {
+    if (this.handedOff()) return (this.live as HostStore).write(path, value);
     const entry = this.next("write", path);
     const actual = digestOf(value);
     if (entry.wrote !== undefined && actual !== undefined && entry.wrote !== actual) {

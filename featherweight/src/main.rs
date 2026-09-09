@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use featherweight_runtime::{
-    host_store, register_builtins, AssemblyDef, Determinism, Runtime, TranscriptMode,
+    host_store, register_builtins, AssemblyDef, Determinism, Runtime, SessionEntry, TranscriptMode,
     TranscriptProvider,
 };
 use structfs_json_store::{JsonlFileBacking, LogStore};
@@ -49,14 +49,20 @@ failure:
 
 const USAGE: &str = "usage:
   fw shell                     run the demo assembly (interactive shell)
-  fw run <assembly.json|yaml> [--record DIR | --replay DIR] [--seed N]
-                              [--session FILE]
+  fw run <assembly.json|yaml> [--record DIR | --replay DIR | --seek DIR [--at SEQ]]
+                              [--seed N] [--session FILE]
                                run an assembly definition
 Orthogonal features, mixable freely:
   --record DIR    write each block's boundary answers as a transcript in DIR
                   (and a session log to DIR/session.jsonl)
   --replay DIR    answer every boundary operation from the transcripts in DIR;
                   the live world is never consulted
+  --seek DIR      replay the transcripts in DIR, then hand off to live
+                  execution; --at SEQ stops the replay at that point on
+                  DIR/session.jsonl's timeline. Refused if the replayed
+                  prefix wrote to a wired peer (that state would be missing
+                  live); with --seed, sources fast-forward so the run
+                  continues exactly where a straight seeded run would be
   --seed N        deterministic mode: seeded entropy and a virtual clock, so
                   two runs with one seed are the same run
   --session FILE  forensics: an assembly-wide, arrival-order log of every
@@ -109,6 +115,7 @@ fn main() {
     // (orthogonal to both), position-free.
     let mut transcript_mode = TranscriptMode::Off;
     let mut record_dir: Option<std::path::PathBuf> = None;
+    let mut seek_dir: Option<std::path::PathBuf> = None;
     for flag in ["--record", "--replay"] {
         if let Some(at) = args.iter().position(|a| a == flag) {
             if at + 1 >= args.len() {
@@ -130,6 +137,61 @@ fn main() {
             };
         }
     }
+    // --seek DIR [--at SEQ]: replay a prefix, then continue live.
+    if let Some(at) = args.iter().position(|a| a == "--seek") {
+        let Some(dir) = args.get(at + 1) else {
+            eprintln!("fw: --seek needs a directory\n{USAGE}");
+            std::process::exit(2);
+        };
+        if !matches!(transcript_mode, TranscriptMode::Off) {
+            eprintln!("fw: --seek is mutually exclusive with --record/--replay");
+            std::process::exit(2);
+        }
+        seek_dir = Some(std::path::PathBuf::from(dir));
+        args.remove(at + 1);
+        args.remove(at);
+    }
+    if let Some(dir) = seek_dir {
+        let mut horizon: Option<u64> = None;
+        if let Some(at) = args.iter().position(|a| a == "--at") {
+            let Some(seq) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
+                eprintln!("fw: --at needs a session seq\n{USAGE}");
+                std::process::exit(2);
+            };
+            horizon = Some(seq);
+            args.remove(at + 1);
+            args.remove(at);
+        }
+        // A horizon needs the timeline: map session seq to per-block
+        // transcript cursors. Without --at, every block replays its
+        // whole transcript before going live.
+        let to: std::sync::Arc<featherweight_runtime::transcript::SeekPoint> = match horizon {
+            None => std::sync::Arc::new(|_: &str| None),
+            Some(seq) => {
+                let session = dir.join("session.jsonl");
+                let text = std::fs::read_to_string(&session).unwrap_or_else(|e| {
+                    eprintln!("fw: --at needs {}: {e}", session.display());
+                    std::process::exit(2);
+                });
+                let entries: Vec<SessionEntry> = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(serde_json::from_str)
+                    .collect::<Result<_, _>>()
+                    .unwrap_or_else(|e| {
+                        eprintln!("fw: {} is not a session log: {e}", session.display());
+                        std::process::exit(2);
+                    });
+                let cursors = SessionEntry::cursors_at(&entries, seq);
+                std::sync::Arc::new(move |key: &str| Some(cursors.get(key).copied().unwrap_or(0)))
+            }
+        };
+        transcript_mode = TranscriptMode::Seek {
+            provider: transcript_provider(dir, false),
+            to,
+        };
+    }
+
     // --session FILE: explicit wins; --record DIR implies DIR/session.jsonl.
     let mut session_file: Option<std::path::PathBuf> = None;
     if let Some(at) = args.iter().position(|a| a == "--session") {

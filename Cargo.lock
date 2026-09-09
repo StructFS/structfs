@@ -777,6 +777,7 @@ version = "0.2.0"
 dependencies = [
  "featherweight-component",
  "featherweight-runtime",
+ "serde_json",
  "structfs-core-store",
  "structfs-json-store",
  "tokio",
