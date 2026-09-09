@@ -175,7 +175,7 @@ impl HandleProtocol for HttpBrokerProtocol {
 
     fn read(&self, handle: Arc<Self::Handle>, sub: Path) -> DetachedFuture<Option<Record>> {
         Box::pin(async move {
-            let components: Vec<String> = sub.iter().cloned().collect();
+            let components: Vec<String> = sub.iter().map(str::to_string).collect();
 
             // outstanding/{id} — status snapshot
             if components.is_empty() {

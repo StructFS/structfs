@@ -16,7 +16,7 @@ pub fn get_path<'a>(tree: &'a Value, path: &Path) -> Result<Option<&'a Value>, E
     for (i, component) in path.iter().enumerate() {
         match cursor {
             Value::Map(map) => {
-                if let Some(next) = map.get(component.as_str()) {
+                if let Some(next) = map.get(component) {
                     cursor = next;
                 } else {
                     return Ok(None);
@@ -25,7 +25,7 @@ pub fn get_path<'a>(tree: &'a Value, path: &Path) -> Result<Option<&'a Value>, E
             Value::Array(arr) => {
                 let index = component.parse::<usize>().map_err(|e| {
                     Error::Path(PathError::InvalidComponent {
-                        component: component.clone(),
+                        component: component.to_string(),
                         position: i,
                         message: format!("Expected array index, got: {}", e),
                     })
@@ -56,15 +56,15 @@ pub fn get_path_mut<'a>(tree: &'a mut Value, path: &Path) -> Result<Option<&'a m
     for (i, component) in path.iter().enumerate() {
         match cursor {
             Value::Map(map) => {
-                if !map.contains_key(component.as_str()) {
+                if !map.contains_key(component) {
                     return Ok(None);
                 }
-                cursor = map.get_mut(component.as_str()).unwrap();
+                cursor = map.get_mut(component).unwrap();
             }
             Value::Array(arr) => {
                 let index = component.parse::<usize>().map_err(|e| {
                     Error::Path(PathError::InvalidComponent {
-                        component: component.clone(),
+                        component: component.to_string(),
                         position: i,
                         message: format!("Expected array index, got: {}", e),
                     })

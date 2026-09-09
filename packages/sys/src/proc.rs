@@ -31,7 +31,7 @@ impl ProcStore {
         }
 
         // Must start with "self"
-        if path[0].as_str() != "self" {
+        if &path[0] != "self" {
             return Ok(None);
         }
 
@@ -43,7 +43,7 @@ impl ProcStore {
             return Ok(None);
         }
 
-        match path[1].as_str() {
+        match &path[1] {
             "pid" => Ok(Some(Value::Integer(std::process::id() as i64))),
             "cwd" => match std::env::current_dir() {
                 Ok(cwd) => Ok(Some(Value::String(cwd.to_string_lossy().to_string()))),
@@ -83,11 +83,11 @@ impl Reader for ProcStore {
 impl Writer for ProcStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         // Must be proc/self/...
-        if to.len() != 2 || to[0].as_str() != "self" {
+        if to.len() != 2 || &to[0] != "self" {
             return Err(Error::store("proc", "write", "Invalid proc path"));
         }
 
-        match to[1].as_str() {
+        match &to[1] {
             "cwd" => {
                 let value = data.into_value(&NoCodec)?;
 
@@ -105,7 +105,7 @@ impl Writer for ProcStore {
             _ => Err(Error::store(
                 "proc",
                 "write",
-                format!("Cannot write to proc/self/{}", to[1]),
+                format!("Cannot write to proc/self/{}", &to[1]),
             )),
         }
     }

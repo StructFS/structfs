@@ -193,17 +193,12 @@ impl<F: StoreFactory> MountStore<F> {
     }
 
     fn is_mounts_path(path: &Path) -> bool {
-        path.components.len() >= 2
-            && path.components[0] == MOUNTS_PREFIX[0]
-            && path.components[1] == MOUNTS_PREFIX[1]
+        path.len() >= 2 && &path[0] == MOUNTS_PREFIX[0] && &path[1] == MOUNTS_PREFIX[1]
     }
 
     fn get_mount_name(path: &Path) -> Option<String> {
-        if path.components.len() >= 3
-            && path.components[0] == MOUNTS_PREFIX[0]
-            && path.components[1] == MOUNTS_PREFIX[1]
-        {
-            Some(path.components[2..].join("/"))
+        if path.len() >= 3 && &path[0] == MOUNTS_PREFIX[0] && &path[1] == MOUNTS_PREFIX[1] {
+            Some(path.slice(2, path.len()).to_string())
         } else {
             None
         }
@@ -379,7 +374,7 @@ impl<F: StoreFactory> Reader for MountStore<F> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         if Self::is_mounts_path(from) {
             // Handle reads to /ctx/mounts/*
-            if from.components.len() == 2 {
+            if from.len() == 2 {
                 // Reading /ctx/mounts - return list of mounts
                 let value = self.mounts_to_value();
                 return Ok(Some(Record::parsed(value)));

@@ -155,7 +155,7 @@ impl<B: AppendBacking> Reader for LogStore<B> {
         if from.is_empty() {
             return Ok(Some(Record::parsed(Value::Array(self.entries.clone()))));
         }
-        let components: Vec<&str> = from.iter().map(String::as_str).collect();
+        let components: Vec<&str> = from.iter().collect();
         let value = match components.as_slice() {
             ["len"] => Some(Value::Integer(self.entries.len() as i64)),
             ["entries", "from", cursor] => {
@@ -178,7 +178,7 @@ impl<B: AppendBacking> Reader for LogStore<B> {
 
 impl<B: AppendBacking> Writer for LogStore<B> {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        if to.len() == 1 && to[0] == "append" {
+        if to.len() == 1 && &to[0] == "append" {
             let entry = data.into_value(&structfs_core_store::NoCodec)?;
             // Durable before visible: the backing accepts the entry
             // before it appears in reads.

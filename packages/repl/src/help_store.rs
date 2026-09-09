@@ -360,7 +360,7 @@ impl Reader for HelpStore {
             return Ok(Some(Record::parsed(state.index.list_topics())));
         }
 
-        match from[0].as_str() {
+        match &from[0] {
             "meta" => self.read_meta(&from.slice(1, from.len())),
             "search" => self.read_search(&from.slice(1, from.len())),
             _ => Ok(None), // Everything else handled by redirects

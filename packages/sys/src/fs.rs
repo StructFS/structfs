@@ -65,7 +65,7 @@ enum HandleOperation {
 /// Parse a handle path into an operation.
 /// Returns (handle_id, operation) or None if invalid.
 fn parse_handle_operation(path: &Path) -> Option<(u64, HandleOperation)> {
-    if path.len() < 2 || path[0] != "handles" {
+    if path.len() < 2 || &path[0] != "handles" {
         return None;
     }
 
@@ -73,17 +73,17 @@ fn parse_handle_operation(path: &Path) -> Option<(u64, HandleOperation)> {
 
     let op = match path.len() {
         2 => HandleOperation::ReadToEnd,
-        3 => match path[2].as_str() {
+        3 => match &path[2] {
             "position" => HandleOperation::Position,
             "meta" => HandleOperation::Meta,
             "close" => HandleOperation::Close,
             _ => return None,
         },
-        4 if path[2] == "at" => {
+        4 if &path[2] == "at" => {
             let offset: u64 = path[3].parse().ok()?;
             HandleOperation::AtOffset { offset }
         }
-        6 if path[2] == "at" && path[4] == "len" => {
+        6 if &path[2] == "at" && &path[4] == "len" => {
             let offset: u64 = path[3].parse().ok()?;
             let length: u64 = path[5].parse().ok()?;
             HandleOperation::ReadAtLen { offset, length }
@@ -383,7 +383,7 @@ impl FsStore {
             return Ok(Some(Record::parsed(self.meta_root())));
         }
 
-        match path[0].as_str() {
+        match &path[0] {
             "open" => Ok(Some(Record::parsed(Self::meta_open()))),
             "handles" => self.read_meta_handles(&path.slice(1, path.len())),
             "stat" => Ok(Some(Record::parsed(Self::meta_stat()))),
@@ -569,7 +569,7 @@ impl FsStore {
         }
 
         // Sub-path meta
-        match path[1].as_str() {
+        match &path[1] {
             "position" => Ok(Some(Record::parsed(Self::meta_position(handle)))),
             "meta" => Ok(Some(Record::parsed(Self::meta_handle_meta()))),
             "at" => Ok(Some(Record::parsed(Self::meta_at()))),
@@ -631,7 +631,7 @@ impl FsStore {
 
     fn write_meta(&mut self, path: &Path, data: Record) -> Result<Path, Error> {
         // Only handles/*/position is writable via meta
-        if path.len() < 3 || path[0] != "handles" {
+        if path.len() < 3 || &path[0] != "handles" {
             return Err(Error::store(
                 "fs",
                 "meta",
@@ -643,7 +643,7 @@ impl FsStore {
             .parse()
             .map_err(|_| Error::store("fs", "meta", "Invalid handle ID"))?;
 
-        match path[2].as_str() {
+        match &path[2] {
             "position" => {
                 let value = data.into_value(&NoCodec)?;
                 let pos = match value {
@@ -666,7 +666,7 @@ impl FsStore {
             _ => Err(Error::store(
                 "fs",
                 "meta",
-                format!("Cannot write to meta/handles/{}/{}", id, path[2]),
+                format!("Cannot write to meta/handles/{}/{}", id, &path[2]),
             )),
         }
     }
@@ -681,18 +681,18 @@ impl Default for FsStore {
 impl Reader for FsStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         // Check for meta prefix
-        if !from.is_empty() && from[0] == "meta" {
+        if !from.is_empty() && &from[0] == "meta" {
             let rest = from.slice(1, from.len());
             return self.read_meta(&rest);
         }
 
         // Handle /handles listing
-        if from.len() == 1 && from[0] == "handles" {
+        if from.len() == 1 && &from[0] == "handles" {
             return Ok(Some(Record::parsed(self.read_handles_listing())));
         }
 
         // Handle operations on specific handles
-        if from.len() >= 2 && from[0] == "handles" {
+        if from.len() >= 2 && &from[0] == "handles" {
             let (handle_id, op) = parse_handle_operation(from).ok_or_else(|| {
                 Error::store("fs", "read", format!("Invalid handle path: {}", from))
             })?;
@@ -738,7 +738,7 @@ impl Writer for FsStore {
         }
 
         // Check for meta prefix
-        if to[0] == "meta" {
+        if &to[0] == "meta" {
             let rest = to.slice(1, to.len());
             return self.write_meta(&rest, data);
         }
@@ -746,7 +746,7 @@ impl Writer for FsStore {
         let value = data.into_value(&NoCodec)?;
 
         // Handle writes to handles
-        if to[0] == "handles" {
+        if &to[0] == "handles" {
             return self.write_handle(to, &value);
         }
 
@@ -758,7 +758,7 @@ impl Writer for FsStore {
             ));
         }
 
-        match to[0].as_str() {
+        match &to[0] {
             "open" => {
                 let file_path = Self::get_path_from_value(&value)
                     .ok_or_else(|| Error::store("fs", "open", "open requires 'path' field"))?;
@@ -883,7 +883,7 @@ impl Writer for FsStore {
             _ => Err(Error::store(
                 "fs",
                 "write",
-                format!("Unknown fs operation: {}", to[0]),
+                format!("Unknown fs operation: {}", &to[0]),
             )),
         }
     }

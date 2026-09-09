@@ -127,7 +127,7 @@ impl Value {
                 // Set the value at the last component
                 match current {
                     Value::Map(map) => {
-                        map.insert(component.clone(), value);
+                        map.insert(component.to_string(), value);
                         return Ok(());
                     }
                     Value::Array(arr) => {
@@ -161,7 +161,7 @@ impl Value {
                 match current {
                     Value::Map(map) => {
                         current = map
-                            .entry(component.clone())
+                            .entry(component.to_string())
                             .or_insert_with(|| Value::Map(BTreeMap::new()));
                     }
                     Value::Array(arr) => {
@@ -199,10 +199,8 @@ impl Value {
         }
 
         // Navigate to parent
-        let parent_path = Path {
-            components: path.components[..path.len() - 1].to_vec(),
-        };
-        let last_component = &path.components[path.len() - 1];
+        let parent_path = path.slice(0, path.len() - 1);
+        let last_component = &path[path.len() - 1];
 
         let parent = match self.get_mut(&parent_path) {
             Some(p) => p,

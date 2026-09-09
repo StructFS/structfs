@@ -28,7 +28,7 @@ impl RandomStore {
             return Ok(None);
         }
 
-        match path[0].as_str() {
+        match &path[0] {
             "u64" => {
                 let value: u64 = rand::thread_rng().gen();
                 // u64 can exceed i64 max, so we store as string for safety
@@ -61,7 +61,7 @@ impl Writer for RandomStore {
             return Err(Error::store("random", "write", "Invalid random path"));
         }
 
-        match to[0].as_str() {
+        match &to[0] {
             "bytes" => {
                 let value = data.into_value(&NoCodec)?;
 
@@ -112,7 +112,7 @@ impl Writer for RandomStore {
             _ => Err(Error::store(
                 "random",
                 "write",
-                format!("Cannot write to random/{}", to[0]),
+                format!("Cannot write to random/{}", &to[0]),
             )),
         }
     }

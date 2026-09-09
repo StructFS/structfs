@@ -208,7 +208,7 @@ impl<P: HandleProtocol> HandleStore<P> {
 
     /// Parse `outstanding/{id}[/sub...]`; `None` if the path has another shape.
     fn parse_handle(path: &Path) -> Option<(u64, Path)> {
-        if path.len() < 2 || path[0] != OUTSTANDING {
+        if path.len() < 2 || &path[0] != OUTSTANDING {
             return None;
         }
         let id: u64 = path[1].parse().ok()?;
@@ -219,11 +219,11 @@ impl<P: HandleProtocol> HandleStore<P> {
 impl<P: HandleProtocol> DetachedReader for HandleStore<P> {
     fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
         // Root and bare `outstanding` list live handles.
-        if from.is_empty() || (from.len() == 1 && from[0] == OUTSTANDING) {
+        if from.is_empty() || (from.len() == 1 && &from[0] == OUTSTANDING) {
             let listing = self.listing();
             return Box::pin(async move { Ok(Some(Record::parsed(listing))) });
         }
-        if from.len() == 1 && from[0] == "docs" {
+        if from.len() == 1 && &from[0] == "docs" {
             let docs = self.inner.protocol.docs();
             return Box::pin(async move { Ok(docs.map(Record::parsed)) });
         }
@@ -314,7 +314,7 @@ mod tests {
 
         fn read(&self, handle: Arc<Self::Handle>, sub: Path) -> DetachedFuture<Option<Record>> {
             Box::pin(async move {
-                if sub.len() == 3 && sub[0] == "events" && sub[1] == "from" {
+                if sub.len() == 3 && &sub[0] == "events" && &sub[1] == "from" {
                     let seq: u64 = sub[2]
                         .parse()
                         .map_err(|_| Error::store("stream", "read", "bad cursor"))?;
@@ -325,7 +325,7 @@ mod tests {
                         .map_err(|c| c.into_error("stream handle released"))?;
                     return Ok(Some(Record::parsed(page.into_value())));
                 }
-                if sub.len() == 1 && sub[0] == "status" {
+                if sub.len() == 1 && &sub[0] == "status" {
                     let status = if handle.log.is_done() { "done" } else { "open" };
                     return Ok(Some(Record::parsed(Value::from(status))));
                 }
@@ -340,12 +340,12 @@ mod tests {
             data: Record,
         ) -> DetachedFuture<Path> {
             Box::pin(async move {
-                if sub.len() == 1 && sub[0] == "push" {
+                if sub.len() == 1 && &sub[0] == "push" {
                     let value = data.into_value(&NoCodec)?;
                     handle.log.push(value);
                     return Ok(sub);
                 }
-                if sub.len() == 1 && sub[0] == "done" {
+                if sub.len() == 1 && &sub[0] == "done" {
                     handle.log.finish();
                     return Ok(sub);
                 }

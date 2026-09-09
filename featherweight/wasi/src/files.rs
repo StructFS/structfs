@@ -30,7 +30,7 @@ enum Resolved {
 }
 
 fn components(path: &Path) -> Vec<String> {
-    path.iter().cloned().collect()
+    path.iter().map(str::to_string).collect()
 }
 
 /// Parse the operation suffix off a file path.

@@ -17,7 +17,7 @@ impl DocsStore {
             return Some(self.root_docs());
         }
 
-        match path[0].as_str() {
+        match &path[0] {
             "env" => Some(Self::env_docs()),
             "time" => Some(Self::time_docs()),
             "random" => Some(Self::random_docs()),

@@ -63,7 +63,7 @@ impl RecordingStore {
             if rel.is_empty() {
                 continue;
             }
-            let name = rel[0].clone();
+            let name = rel[0].to_string();
             let label = if rel.len() == 1 {
                 format!("append log ({} entries)", log.len())
             } else {
@@ -132,7 +132,7 @@ fn collect_jsonl(
 
 impl Reader for RecordingStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        if from.len() == 1 && from[0] == "docs" {
+        if from.len() == 1 && &from[0] == "docs" {
             return Ok(Some(Record::parsed(Self::docs())));
         }
         for (prefix, log) in &mut self.logs {

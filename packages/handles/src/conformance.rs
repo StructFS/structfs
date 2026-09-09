@@ -28,7 +28,7 @@ pub async fn check_mint_returns_handle_path<S: DetachedStore>(store: &mut S, req
         .await
         .expect("mint write failed");
     assert!(
-        path.len() == 2 && path[0] == "outstanding" && path[1].parse::<u64>().is_ok(),
+        path.len() == 2 && &path[0] == "outstanding" && path[1].parse::<u64>().is_ok(),
         "mint must return outstanding/{{id}}, got: {}",
         path
     );

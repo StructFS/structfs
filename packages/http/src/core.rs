@@ -263,7 +263,7 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
     /// - "outstanding/123/request" -> Some((123, Some("request")))
     /// - "outstanding/123/response/status" -> Some((123, Some("response/status")))
     fn parse_handle_path(path: &Path) -> Option<(RequestId, Option<String>)> {
-        if path.is_empty() || path[0] != OUTSTANDING_PREFIX {
+        if path.is_empty() || &path[0] != OUTSTANDING_PREFIX {
             return None;
         }
         if path.len() == 1 {
@@ -302,12 +302,12 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
         }
 
         // meta/queue - action descriptor for queuing requests
-        if path.len() == 2 && path[1] == "queue" {
+        if path.len() == 2 && &path[1] == "queue" {
             return Ok(Some(Record::parsed(queue_action_descriptor())));
         }
 
         // meta/outstanding - list handles with meta references
-        if path.len() == 2 && path[1] == OUTSTANDING_PREFIX {
+        if path.len() == 2 && &path[1] == OUTSTANDING_PREFIX {
             let items: Vec<Value> = self
                 .handles
                 .keys()
@@ -322,12 +322,12 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
         }
 
         // meta/outstanding/{id} - handle state and navigation
-        if path.len() >= 3 && path[1] == OUTSTANDING_PREFIX {
+        if path.len() >= 3 && &path[1] == OUTSTANDING_PREFIX {
             let id: RequestId = path[2].parse().map_err(|_| {
                 Error::store(
                     "http_broker",
                     "read",
-                    format!("Invalid handle ID: {}", path[2]),
+                    format!("Invalid handle ID: {}", &path[2]),
                 )
             })?;
 
@@ -340,7 +340,7 @@ impl<E: HttpExecutor> HttpBrokerStore<E> {
             })?;
 
             // meta/outstanding/{id}/delete - delete action descriptor
-            if path.len() == 4 && path[3] == "delete" {
+            if path.len() == 4 && &path[3] == "delete" {
                 return Ok(Some(Record::parsed(delete_action_descriptor(id))));
             }
 
@@ -388,17 +388,17 @@ impl<E: HttpExecutor> Reader for HttpBrokerStore<E> {
         }
 
         // Handle docs: read /docs or /docs/... -> documentation
-        if from[0] == DOCS_PATH {
+        if &from[0] == DOCS_PATH {
             return Ok(Some(Record::parsed(sync_broker_docs())));
         }
 
         // Handle meta paths
-        if from[0] == META_PATH {
+        if &from[0] == META_PATH {
             return self.read_meta(from);
         }
 
         // Handle listing: read /outstanding -> {items: [refs...]}
-        if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
+        if from.len() == 1 && &from[0] == OUTSTANDING_PREFIX {
             let items: Vec<Value> = self
                 .handles
                 .keys()
@@ -642,7 +642,7 @@ impl<E: HttpExecutor> HttpClientStore<E> {
 impl<E: HttpExecutor> Reader for HttpClientStore<E> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         // Handle docs: read /docs or /docs/... -> documentation
-        if !from.is_empty() && from[0] == DOCS_PATH {
+        if !from.is_empty() && &from[0] == DOCS_PATH {
             return Ok(Some(Record::parsed(http_client_docs())));
         }
 
@@ -867,12 +867,12 @@ impl AsyncHttpBrokerStore {
         }
 
         // meta/queue - action descriptor for queuing requests
-        if path.len() == 2 && path[1] == "queue" {
+        if path.len() == 2 && &path[1] == "queue" {
             return Ok(Some(Record::parsed(queue_action_descriptor())));
         }
 
         // meta/outstanding - list handles with meta references
-        if path.len() == 2 && path[1] == OUTSTANDING_PREFIX {
+        if path.len() == 2 && &path[1] == OUTSTANDING_PREFIX {
             let items: Vec<Value> = self
                 .store
                 .handle_ids()
@@ -888,12 +888,12 @@ impl AsyncHttpBrokerStore {
         }
 
         // meta/outstanding/{id} - handle state and navigation
-        if path.len() >= 3 && path[1] == OUTSTANDING_PREFIX {
+        if path.len() >= 3 && &path[1] == OUTSTANDING_PREFIX {
             let id: RequestId = path[2].parse().map_err(|_| {
                 Error::store(
                     "async_http_broker",
                     "read",
-                    format!("Invalid handle ID: {}", path[2]),
+                    format!("Invalid handle ID: {}", &path[2]),
                 )
             })?;
 
@@ -906,7 +906,7 @@ impl AsyncHttpBrokerStore {
             })?;
 
             // meta/outstanding/{id}/delete - delete action descriptor
-            if path.len() == 4 && path[3] == "delete" {
+            if path.len() == 4 && &path[3] == "delete" {
                 return Ok(Some(Record::parsed(delete_action_descriptor(id))));
             }
 
@@ -954,17 +954,17 @@ impl Reader for AsyncHttpBrokerStore {
         }
 
         // Handle docs: read /docs or /docs/... -> documentation
-        if from[0] == DOCS_PATH {
+        if &from[0] == DOCS_PATH {
             return Ok(Some(Record::parsed(async_broker_docs())));
         }
 
         // Handle meta paths
-        if from[0] == META_PATH {
+        if &from[0] == META_PATH {
             return self.read_meta(from);
         }
 
         // Handle listing: read /outstanding -> {items: [refs...]}
-        if from.len() == 1 && from[0] == OUTSTANDING_PREFIX {
+        if from.len() == 1 && &from[0] == OUTSTANDING_PREFIX {
             let items: Vec<Value> = self
                 .store
                 .handle_ids()
@@ -981,7 +981,7 @@ impl Reader for AsyncHttpBrokerStore {
         // Handle paths delegate to the handle store. Released or unknown
         // handles read as absent (the handle-protocol rule), and
         // response/wait parks on a gate instead of sleep-polling.
-        if from[0] == OUTSTANDING_PREFIX && from.len() >= 2 && from[1].parse::<RequestId>().is_ok()
+        if &from[0] == OUTSTANDING_PREFIX && from.len() >= 2 && from[1].parse::<RequestId>().is_ok()
         {
             let mut store = self.store.clone();
             return self.block_on(store.read_detached(from));
@@ -1003,7 +1003,7 @@ impl Writer for AsyncHttpBrokerStore {
         // Queue (root write), delete (Null to outstanding/{id}), and the
         // no-overwrite conflict rule are all handle-store scaffolding.
         if to.is_empty()
-            || (to[0] == OUTSTANDING_PREFIX && to.len() >= 2 && to[1].parse::<RequestId>().is_ok())
+            || (&to[0] == OUTSTANDING_PREFIX && to.len() >= 2 && to[1].parse::<RequestId>().is_ok())
         {
             let mut store = self.store.clone();
             return self.block_on(store.write_detached(to, data));

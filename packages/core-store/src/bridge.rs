@@ -81,8 +81,8 @@ impl<T, C> LLToCore<T, C> {
 
 impl<T: LLReader, C: Send + Sync> Reader for LLToCore<T, C> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        // Convert Path to &[&[u8]]
-        let components: Vec<&[u8]> = from.components.iter().map(|s| s.as_bytes()).collect();
+        // Borrow the validated byte components (free widening, no copy).
+        let components: Vec<&[u8]> = from.as_ll().as_byte_refs();
 
         // Read via LL
         let bytes = match self.inner.ll_read(&components) {
@@ -101,8 +101,8 @@ impl<T: LLWriter, C: Codec + Send + Sync> Writer for LLToCore<T, C> {
         // Get bytes from Record (serialize if Parsed)
         let bytes = data.into_bytes(&self.codec, &self.write_format)?;
 
-        // Convert Path to &[&[u8]]
-        let components: Vec<&[u8]> = to.components.iter().map(|s| s.as_bytes()).collect();
+        // Borrow the validated byte components (free widening, no copy).
+        let components: Vec<&[u8]> = to.as_ll().as_byte_refs();
 
         // Write via LL
         let result_path = self.inner.ll_write(&components, bytes).map_err(Error::Ll)?;
@@ -203,8 +203,8 @@ impl<T: Writer, C: Send + Sync> LLWriter for CoreToLL<T, C> {
                 detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
             })?;
 
-        // Convert result to LL path
-        Ok(result_path.to_ll_path())
+        // Widen the validated result path to LL (free — no component copy).
+        Ok(result_path.into_ll())
     }
 }
 

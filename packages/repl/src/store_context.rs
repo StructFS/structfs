@@ -160,7 +160,7 @@ impl RegisterStore {
         let mut current = value;
         for component in path.iter() {
             current = match current {
-                Value::Map(map) => map.get(component.as_str())?,
+                Value::Map(map) => map.get(component)?,
                 Value::Array(arr) => {
                     let index: usize = component.parse().ok()?;
                     arr.get(index)?
@@ -191,14 +191,14 @@ impl Reader for RegisterStore {
         }
 
         // Handle docs path
-        if from[0] == "docs" {
+        if &from[0] == "docs" {
             return Ok(Some(Record::parsed(Self::docs())));
         }
 
         let register_name = &from[0];
         let sub_path = from.slice(1, from.len());
 
-        let register_value = match self.registers.get(register_name.as_str()) {
+        let register_value = match self.registers.get(register_name) {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -549,11 +549,13 @@ impl<F: StoreFactory> StoreContext<F> {
         if let Some(stripped) = path_str.strip_prefix('/') {
             Path::parse(stripped).map_err(|e| ContextError::InvalidPath(format!("{}", e)))
         } else if path_str == ".." {
-            let mut components: Vec<String> = self.current_path.iter().cloned().collect();
+            let mut components: Vec<String> =
+                self.current_path.iter().map(str::to_string).collect();
             components.pop();
             Ok(Path::from_components(components))
         } else if path_str.starts_with("../") {
-            let mut components: Vec<String> = self.current_path.iter().cloned().collect();
+            let mut components: Vec<String> =
+                self.current_path.iter().map(str::to_string).collect();
             let mut remaining = path_str;
             while remaining.starts_with("../") {
                 components.pop();
@@ -562,7 +564,7 @@ impl<F: StoreFactory> StoreContext<F> {
             if !remaining.is_empty() {
                 let suffix = Path::parse(remaining)
                     .map_err(|e| ContextError::InvalidPath(format!("{}", e)))?;
-                components.extend(suffix.iter().cloned());
+                components.extend(suffix.iter().map(str::to_string));
             }
             Ok(Path::from_components(components))
         } else {

@@ -196,14 +196,14 @@ impl IsoSurface {
             return Ok(Some(Record::parsed(self.directory())));
         }
         // Process control (granted capability): delegate to the handle store.
-        if path[0] == "proc" {
+        if &path[0] == "proc" {
             let Some(proc) = &self.proc else {
                 return Ok(None);
             };
             let rel = path.slice(1, path.len());
             return proc.clone().read_detached(&rel).await;
         }
-        let value = match (path.len(), path[0].as_str()) {
+        let value = match (path.len(), &path[0]) {
             // === meta lens ===
             (1, "meta") => Some(self.meta()),
             // === server (the mailbox) ===
@@ -217,14 +217,14 @@ impl IsoSurface {
                     Value::from("write responses/{token}"),
                 ),
             ]))),
-            (2, "server") if path[1] == "requests" => {
+            (2, "server") if &path[1] == "requests" => {
                 return match self.cell.next_event().await? {
                     Some(event) => Ok(Some(Record::parsed(event.to_value()))),
                     // Shutdown: unblock with Null (spec 07).
                     None => Ok(Some(Record::parsed(Value::Null))),
                 };
             }
-            (3, "server") if path[1] == "requests" && path[2] == "pending" => Some(Value::Array(
+            (3, "server") if &path[1] == "requests" && &path[2] == "pending" => Some(Value::Array(
                 self.cell
                     .pending_events()
                     .iter()
@@ -236,13 +236,13 @@ impl IsoSurface {
                 ("id".to_string(), Value::from(self.cell.id.as_str())),
                 ("state".to_string(), Value::from(self.cell.state().as_str())),
             ]))),
-            (2, "self") if path[1] == "id" => Some(Value::from(self.cell.id.as_str())),
-            (2, "self") if path[1] == "state" => Some(Value::from(self.cell.state().as_str())),
-            (2, "self") if path[1] == "args" => Some(Value::Array(
+            (2, "self") if &path[1] == "id" => Some(Value::from(self.cell.id.as_str())),
+            (2, "self") if &path[1] == "state" => Some(Value::from(self.cell.state().as_str())),
+            (2, "self") if &path[1] == "args" => Some(Value::Array(
                 self.args.iter().map(|a| Value::String(a.clone())).collect(),
             )),
-            (2, "self") if path[1] == "interface" => self.cell.interface(),
-            (2, "self") if path[1] == "last_error" => self.cell.last_error().map(Value::from),
+            (2, "self") if &path[1] == "interface" => self.cell.interface(),
+            (2, "self") if &path[1] == "last_error" => self.cell.last_error().map(Value::from),
             // === env ===
             (1, "env") => Some(Value::Map(
                 self.env
@@ -252,7 +252,7 @@ impl IsoSurface {
             )),
             (2, "env") => self.env.get(&path[1]).map(|v| Value::String(v.clone())),
             // === stdio ===
-            (2, "stdio") if path[1] == "stdin" => {
+            (2, "stdio") if &path[1] == "stdin" => {
                 // Blocks the calling (block) thread until a line or EOF.
                 return Ok(self
                     .stdio
@@ -260,15 +260,15 @@ impl IsoSurface {
                     .map(|line| Record::parsed(Value::String(line))));
             }
             // === shutdown ===
-            (2, "shutdown") if path[1] == "requested" => {
+            (2, "shutdown") if &path[1] == "requested" => {
                 Some(Value::Bool(self.cell.shutdown_requested()))
             }
-            (2, "shutdown") if path[1] == "mode" => self
+            (2, "shutdown") if &path[1] == "mode" => self
                 .cell
                 .shutdown_mode()
                 .map(|mode| Value::from(mode.as_str())),
             // === time ===
-            (2, "time") if path[1] == "now" => {
+            (2, "time") if &path[1] == "now" => {
                 Some(Value::String(match self.sources.now_unix_ns() {
                     // Millisecond ISO 8601 with a Z: the rendering both
                     // hosts pin for seeded time, so a seeded run reads
@@ -279,20 +279,20 @@ impl IsoSurface {
                     None => chrono::Utc::now().to_rfc3339(),
                 }))
             }
-            (2, "time") if path[1] == "now_unix_ns" => {
+            (2, "time") if &path[1] == "now_unix_ns" => {
                 Some(Value::Integer(match self.sources.now_unix_ns() {
                     Some(ns) => ns,
                     None => chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX),
                 }))
             }
-            (2, "time") if path[1] == "monotonic" => {
+            (2, "time") if &path[1] == "monotonic" => {
                 Some(Value::Integer(match self.sources.monotonic_ns() {
                     Some(ns) => ns,
                     None => self.cell.monotonic_nanos(),
                 }))
             }
-            (2, "time") if path[1] == "zone" => Some(Value::from("UTC")),
-            (3, "time") if path[1] == "after" => {
+            (2, "time") if &path[1] == "zone" => Some(Value::from("UTC")),
+            (3, "time") if &path[1] == "after" => {
                 let ms: u64 = path[2]
                     .parse()
                     .map_err(|_| Error::store("iso", "time_after", "bad duration"))?;
@@ -311,7 +311,7 @@ impl IsoSurface {
                 }
             }
             // === random ===
-            (2, "random") if path[1] == "uuid" => {
+            (2, "random") if &path[1] == "uuid" => {
                 let id = match self.sources.entropy_bytes(16) {
                     Some(bytes) => {
                         uuid::Builder::from_random_bytes(bytes.try_into().expect("16 bytes"))
@@ -321,7 +321,7 @@ impl IsoSurface {
                 };
                 Some(Value::String(id.to_string()))
             }
-            (2, "random") if path[1] == "int" => {
+            (2, "random") if &path[1] == "int" => {
                 let bytes = match self.sources.entropy_bytes(8) {
                     Some(bytes) => bytes,
                     None => uuid::Uuid::new_v4().as_bytes()[..8].to_vec(),
@@ -330,7 +330,7 @@ impl IsoSurface {
                     bytes[..8].try_into().unwrap(),
                 )))
             }
-            (3, "random") if path[1] == "bytes" => {
+            (3, "random") if &path[1] == "bytes" => {
                 let n: usize = path[2]
                     .parse()
                     .map_err(|_| Error::store("iso", "random", "bad byte count"))?;
@@ -358,7 +358,7 @@ impl IsoSurface {
     /// Serve a write. Proc writes may await; everything else is immediate.
     pub async fn write(&self, path: &Path, value: Value) -> Result<Path, Error> {
         // Process control.
-        if !path.is_empty() && path[0] == "proc" {
+        if !path.is_empty() && &path[0] == "proc" {
             let Some(proc) = &self.proc else {
                 return Err(Error::permission_denied(
                     "spawn capability not granted to this block",
@@ -371,7 +371,7 @@ impl IsoSurface {
                 .await?;
             return Ok(Path::parse("proc").unwrap().join(&result));
         }
-        let components: Vec<&str> = path.iter().map(String::as_str).collect();
+        let components: Vec<&str> = path.iter().collect();
         match components.as_slice() {
             ["server", "responses", token] => {
                 let token: u64 = token

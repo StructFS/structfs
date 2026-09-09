@@ -179,7 +179,7 @@ impl Namespace {
         map.insert("iso".to_string(), Value::from("Isotope system services"));
         for prefix in self.wiring.prefixes() {
             if !prefix.is_empty() {
-                map.insert(prefix[0].clone(), Value::from("wired"));
+                map.insert(prefix[0].to_string(), Value::from("wired"));
             }
         }
         Value::Map(map)
@@ -191,7 +191,7 @@ impl Namespace {
         if from.is_empty() {
             return Ok(Some(Record::parsed(self.root_listing())));
         }
-        if from[0] == "iso" {
+        if &from[0] == "iso" {
             let rel = from.slice(1, from.len());
             return self.ctx.block_on(self.iso.read(&rel));
         }
@@ -216,7 +216,7 @@ impl Namespace {
         if to.is_empty() {
             return Err(Error::permission_denied("namespace root is not writable"));
         }
-        if to[0] == "iso" {
+        if &to[0] == "iso" {
             let rel = to.slice(1, to.len());
             let value = data.into_value(&structfs_core_store::NoCodec)?;
             let result = self.ctx.block_on(self.iso.write(&rel, value))?;

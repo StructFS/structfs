@@ -2,6 +2,9 @@
 
 use std::fmt;
 
+use bytes::Bytes;
+use structfs_ll_store::LLPath;
+
 /// Errors related to path parsing and validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -44,9 +47,40 @@ impl std::error::Error for PathError {}
 /// Path components must be valid Unicode identifiers (per UAX#31) or
 /// numeric strings (for array indexing). This ensures paths can be
 /// used as identifiers in most programming languages.
+///
+/// # Refinement of [`LLPath`]
+///
+/// `Path` is a validated *refinement* of the low-level [`LLPath`]: it wraps an
+/// `LLPath` whose every component is additionally guaranteed to be valid UTF-8
+/// and a valid component grammar (identifier or numeric). Because a `Path`
+/// *is* an `LLPath` that has been validated, widening ([`as_ll`](Self::as_ll) /
+/// [`into_ll`](Self::into_ll)) is free, and narrowing
+/// ([`validate`](Self::validate)) is the single place validation happens.
+/// Components are stored as byte components, so `Path -> LLPath` never copies
+/// and structural ops (`join`/`slice`/`strip_prefix`) clone `Bytes`
+/// (reference-count bumps) rather than deep-copying `String`s.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Path {
-    pub(crate) components: Vec<String>,
+pub struct Path(LLPath);
+
+/// View a validated byte component as `&str`.
+///
+/// Sound because the `Path` invariant guarantees every component is valid
+/// UTF-8; this is the accessor that lets the high-level API keep speaking
+/// `&str` over a byte representation without re-validating.
+#[inline]
+fn component_str(component: &Bytes) -> &str {
+    // SAFETY: every component of a `Path` was validated as a UTF-8 identifier
+    // or numeric string at construction (see `validate_component`).
+    unsafe { std::str::from_utf8_unchecked(component) }
+}
+
+/// Build validated byte components from already-validated strings, moving the
+/// `String` buffers into `Bytes` without copying.
+fn ll_from_strings(components: Vec<String>) -> LLPath {
+    components
+        .into_iter()
+        .map(|s| Bytes::from(s.into_bytes()))
+        .collect()
 }
 
 impl Path {
@@ -71,9 +105,7 @@ impl Path {
     /// ```
     pub fn parse(s: &str) -> Result<Self, PathError> {
         if s.is_empty() {
-            return Ok(Path {
-                components: Vec::new(),
-            });
+            return Ok(Path(LLPath::new()));
         }
 
         let components: Vec<String> = s
@@ -87,7 +119,7 @@ impl Path {
             Self::validate_component(component, i)?;
         }
 
-        Ok(Path { components })
+        Ok(Path(ll_from_strings(components)))
     }
 
     /// Create a path from pre-validated components.
@@ -100,7 +132,7 @@ impl Path {
         for (i, component) in components.iter().enumerate() {
             Self::validate_component(component, i).expect("invalid component");
         }
-        Path { components }
+        Path(ll_from_strings(components))
     }
 
     /// Create a path from components that are already known to be valid.
@@ -118,7 +150,7 @@ impl Path {
         for (i, component) in components.iter().enumerate() {
             Self::validate_component(component, i).expect("invalid pre-validated component");
         }
-        Path { components }
+        Path(ll_from_strings(components))
     }
 
     /// Try to create a path from components, validating each.
@@ -126,7 +158,7 @@ impl Path {
         for (i, component) in components.iter().enumerate() {
             Self::validate_component(component, i)?;
         }
-        Ok(Path { components })
+        Ok(Path(ll_from_strings(components)))
     }
 
     /// Validate a single path component against the StructFS grammar.
@@ -150,44 +182,45 @@ impl Path {
 
     /// Check if this path is empty (root path).
     pub fn is_empty(&self) -> bool {
-        self.components.is_empty()
+        self.0.is_empty()
     }
 
     /// Get the number of components.
     pub fn len(&self) -> usize {
-        self.components.len()
+        self.0.len()
     }
 
-    /// Iterate over components.
-    pub fn iter(&self) -> impl Iterator<Item = &String> {
-        self.components.iter()
+    /// Iterate over components as validated `&str`s.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(component_str)
     }
 
     /// Join this path with another.
     #[must_use]
     pub fn join(&self, other: &Path) -> Path {
-        let mut components = self.components.clone();
-        components.extend(other.components.iter().cloned());
-        Path { components }
+        let mut components = self.0.components().to_vec();
+        components.extend(other.0.iter().cloned());
+        Path(LLPath::from_components(components))
     }
 
     /// Return a new path with the component appended.
     #[must_use]
     pub fn child(&self, component: impl Into<PathComponent>) -> Path {
-        let mut components = self.components.clone();
-        components.push(component.into().into_string());
-        Path { components }
+        let mut components = self.0.components().to_vec();
+        components.push(Bytes::from(component.into().into_string().into_bytes()));
+        Path(LLPath::from_components(components))
     }
 
     /// Append a component in place.
     pub fn push(&mut self, component: impl Into<PathComponent>) {
-        self.components.push(component.into().into_string());
+        self.0
+            .push(Bytes::from(component.into().into_string().into_bytes()));
     }
 
     /// Check if this path has the given prefix.
     pub fn has_prefix(&self, prefix: &Path) -> bool {
-        prefix.components.len() <= self.components.len()
-            && prefix.components == self.components[..prefix.components.len()]
+        prefix.0.len() <= self.0.len()
+            && prefix.0.components() == &self.0.components()[..prefix.0.len()]
     }
 
     /// Strip a prefix from this path.
@@ -196,9 +229,9 @@ impl Path {
     #[must_use]
     pub fn strip_prefix(&self, prefix: &Path) -> Option<Path> {
         if self.has_prefix(prefix) {
-            Some(Path {
-                components: self.components[prefix.components.len()..].to_vec(),
-            })
+            Some(Path(LLPath::from_components(
+                self.0.components()[prefix.0.len()..].to_vec(),
+            )))
         } else {
             None
         }
@@ -206,49 +239,98 @@ impl Path {
 
     /// Get a slice of components as a new path.
     pub fn slice(&self, start: usize, end: usize) -> Path {
-        Path {
-            components: self.components[start..end].to_vec(),
-        }
+        Path(LLPath::from_components(
+            self.0.components()[start..end].to_vec(),
+        ))
     }
 
-    /// Convert to LL path (byte components).
-    pub fn to_ll_path(&self) -> structfs_ll_store::LLPath {
-        self.components
-            .iter()
-            .map(|c| bytes::Bytes::copy_from_slice(c.as_bytes()))
-            .collect()
+    /// Borrow this path as its underlying [`LLPath`] — the free widening from
+    /// the validated high-level contract to the opaque low-level one.
+    pub fn as_ll(&self) -> &LLPath {
+        &self.0
     }
 
-    /// Try to create from LL path (byte components).
-    ///
-    /// Fails if any component is not valid UTF-8 or not a valid identifier.
-    pub fn try_from_ll_path(ll_path: &[impl AsRef<[u8]>]) -> Result<Self, PathError> {
-        let mut components = Vec::with_capacity(ll_path.len());
-        for (i, bytes) in ll_path.iter().enumerate() {
-            let s =
-                std::str::from_utf8(bytes.as_ref()).map_err(|_| PathError::InvalidComponent {
-                    component: format!("{:?}", bytes.as_ref()),
+    /// Consume this path into its underlying [`LLPath`] — free widening with no
+    /// component copy.
+    pub fn into_ll(self) -> LLPath {
+        self.0
+    }
+
+    /// Validate an [`LLPath`] into a `Path` — the single narrowing point where
+    /// opaque bytes become a validated identifier path. Reuses the `Bytes`
+    /// components (no copy); fails if any component is not valid UTF-8 or not a
+    /// valid component grammar.
+    pub fn validate(ll: LLPath) -> Result<Self, PathError> {
+        for (i, component) in ll.iter().enumerate() {
+            let s = std::str::from_utf8(component.as_ref()).map_err(|_| {
+                PathError::InvalidComponent {
+                    component: format!("{:?}", component.as_ref()),
                     position: i,
                     message: "not valid UTF-8".to_string(),
-                })?;
+                }
+            })?;
             Self::validate_component(s, i)?;
-            components.push(s.to_string());
         }
-        Ok(Path { components })
+        Ok(Path(ll))
+    }
+
+    /// Wrap an [`LLPath`] known to already satisfy the `Path` invariant, without
+    /// re-validating. This is the byte-path analogue of
+    /// [`from_validated_components`](Self::from_validated_components): use it for
+    /// paths that originated host-side from a `Path` (e.g. a write result path
+    /// echoed back), so internal LL->HL hops don't re-pay validation. Debug
+    /// builds re-check as a safety net.
+    pub fn from_ll_unchecked(ll: LLPath) -> Self {
+        #[cfg(debug_assertions)]
+        for (i, component) in ll.iter().enumerate() {
+            let s = std::str::from_utf8(component.as_ref())
+                .expect("pre-validated LL component is not UTF-8");
+            Self::validate_component(s, i).expect("invalid pre-validated LL component");
+        }
+        Path(ll)
+    }
+
+    /// Convert to an owned LL path (byte components).
+    ///
+    /// Now a cheap clone (each component is a reference-counted `Bytes`); prefer
+    /// [`as_ll`](Self::as_ll)/[`into_ll`](Self::into_ll) to avoid even that.
+    pub fn to_ll_path(&self) -> LLPath {
+        self.0.clone()
+    }
+
+    /// Try to create from borrowed LL path components (byte slices).
+    ///
+    /// Copies the components into owned `Bytes` and validates. Fails if any
+    /// component is not valid UTF-8 or not a valid identifier. For an owned
+    /// [`LLPath`], prefer [`validate`](Self::validate) to reuse its `Bytes`.
+    pub fn try_from_ll_path(ll_path: &[impl AsRef<[u8]>]) -> Result<Self, PathError> {
+        let ll: LLPath = ll_path
+            .iter()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()))
+            .collect();
+        Self::validate(ll)
     }
 }
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.components.join("/"))
+        let mut first = true;
+        for component in self.iter() {
+            if !first {
+                f.write_str("/")?;
+            }
+            f.write_str(component)?;
+            first = false;
+        }
+        Ok(())
     }
 }
 
 impl std::ops::Index<usize> for Path {
-    type Output = String;
+    type Output = str;
 
     fn index(&self, i: usize) -> &Self::Output {
-        &self.components[i]
+        component_str(&self.0[i])
     }
 }
 
@@ -353,17 +435,19 @@ impl From<u64> for PathComponent {
 
 impl From<PathComponent> for Path {
     fn from(c: PathComponent) -> Self {
-        Path {
-            components: vec![c.into_string()],
-        }
+        Path(LLPath::from_components(vec![Bytes::from(
+            c.into_string().into_bytes(),
+        )]))
     }
 }
 
 impl FromIterator<PathComponent> for Path {
     fn from_iter<I: IntoIterator<Item = PathComponent>>(iter: I) -> Self {
-        Path {
-            components: iter.into_iter().map(PathComponent::into_string).collect(),
-        }
+        Path(
+            iter.into_iter()
+                .map(|c| Bytes::from(c.into_string().into_bytes()))
+                .collect(),
+        )
     }
 }
 
@@ -567,7 +651,7 @@ mod tests {
     #[test]
     fn iter_method() {
         let p = path!("a/b/c");
-        let components: Vec<&String> = p.iter().collect();
+        let components: Vec<&str> = p.iter().collect();
         assert_eq!(components.len(), 3);
         assert_eq!(components[0], "a");
         assert_eq!(components[1], "b");
@@ -734,5 +818,43 @@ mod tests {
         let debug = format!("{:?}", p);
         assert!(debug.contains("foo"));
         assert!(debug.contains("bar"));
+    }
+
+    #[test]
+    fn as_ll_and_into_ll_widen_losslessly() {
+        let p = path!("users/123/name");
+        // Borrowing widening exposes the byte components in order.
+        let ll = p.as_ll();
+        assert_eq!(ll.len(), 3);
+        assert_eq!(ll[0].as_ref(), b"users");
+        assert_eq!(ll[2].as_ref(), b"name");
+        // Owned widening yields the same components.
+        assert_eq!(p.clone().into_ll(), ll.clone());
+    }
+
+    #[test]
+    fn validate_narrows_and_rejects() {
+        // A valid LLPath narrows to the equivalent Path.
+        let ll: LLPath = [Bytes::from_static(b"a"), Bytes::from_static(b"b")]
+            .into_iter()
+            .collect();
+        assert_eq!(Path::validate(ll).unwrap(), path!("a/b"));
+
+        // A non-identifier component is rejected.
+        let bad: LLPath = [Bytes::from_static(b"a-b")].into_iter().collect();
+        assert!(Path::validate(bad).is_err());
+
+        // Non-UTF-8 is rejected.
+        let non_utf8: LLPath = [Bytes::from_static(&[0xff, 0xfe])].into_iter().collect();
+        assert!(Path::validate(non_utf8).is_err());
+    }
+
+    #[test]
+    fn widen_then_narrow_roundtrips() {
+        let p = path!("users/名前/0");
+        // Path -> LLPath (free) -> Path (validated) is the identity.
+        assert_eq!(Path::validate(p.clone().into_ll()).unwrap(), p);
+        // The trusted constructor agrees on already-valid input.
+        assert_eq!(Path::from_ll_unchecked(p.clone().into_ll()), p);
     }
 }

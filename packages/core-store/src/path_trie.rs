@@ -52,8 +52,8 @@ impl<T> PathTrie<T> {
     /// Navigate to node, creating intermediate nodes as needed.
     fn get_or_create_node(&mut self, path: &Path) -> &mut PathTrie<T> {
         let mut current = self;
-        for component in &path.components {
-            current = current.children.entry(component.clone()).or_default();
+        for component in path.iter() {
+            current = current.children.entry(component.to_string()).or_default();
         }
         current
     }
@@ -61,7 +61,7 @@ impl<T> PathTrie<T> {
     /// Navigate to node if it exists.
     fn get_node(&self, path: &Path) -> Option<&PathTrie<T>> {
         let mut current = self;
-        for component in &path.components {
+        for component in path.iter() {
             current = current.children.get(component)?;
         }
         Some(current)
@@ -70,7 +70,7 @@ impl<T> PathTrie<T> {
     /// Navigate to node if it exists (mutable).
     fn get_node_mut(&mut self, path: &Path) -> Option<&mut PathTrie<T>> {
         let mut current = self;
-        for component in &path.components {
+        for component in path.iter() {
             current = current.children.get_mut(component)?;
         }
         Some(current)
@@ -97,10 +97,8 @@ impl<T> PathTrie<T> {
                 None
             }
         } else {
-            let parent_path = Path {
-                components: path.components[..path.len() - 1].to_vec(),
-            };
-            let child_name = &path.components[path.len() - 1];
+            let parent_path = path.slice(0, path.len() - 1);
+            let child_name = &path[path.len() - 1];
             let parent = self.get_node_mut(&parent_path)?;
             parent.children.remove(child_name)
         }
@@ -150,7 +148,7 @@ impl<T> PathTrie<T> {
         let mut last_value: Option<&T> = self.value.as_ref();
         let mut last_depth: usize = 0;
 
-        for (depth, component) in path.components.iter().enumerate() {
+        for (depth, component) in path.iter().enumerate() {
             match current.children.get(component) {
                 Some(child) => {
                     current = child;
@@ -164,9 +162,7 @@ impl<T> PathTrie<T> {
         }
 
         last_value.map(|v| {
-            let suffix = Path {
-                components: path.components[last_depth..].to_vec(),
-            };
+            let suffix = path.slice(last_depth, path.len());
             (v, suffix)
         })
     }
@@ -179,7 +175,7 @@ impl<T> PathTrie<T> {
             let mut current = &*self;
             let mut last_depth: usize = if self.value.is_some() { 0 } else { usize::MAX };
 
-            for (d, component) in path.components.iter().enumerate() {
+            for (d, component) in path.iter().enumerate() {
                 match current.children.get(component) {
                     Some(child) => {
                         current = child;
@@ -198,12 +194,8 @@ impl<T> PathTrie<T> {
         };
 
         // Second pass: get mutable reference
-        let target_path = Path {
-            components: path.components[..depth].to_vec(),
-        };
-        let suffix = Path {
-            components: path.components[depth..].to_vec(),
-        };
+        let target_path = path.slice(0, depth);
+        let suffix = path.slice(depth, path.len());
 
         self.get_mut(&target_path).map(|v| (v, suffix))
     }
@@ -234,18 +226,14 @@ impl<'a, T> Iterator for PathTrieIter<'a, T> {
         while let Some((path, node)) = self.stack.pop() {
             // Push children onto stack (in reverse order for correct iteration)
             for (name, child) in node.children.iter().rev() {
+                // `name` is a trie key: a component of an already-validated
+                // path, so re-validation is unnecessary (debug-checked only).
                 let child_path = if path.is_empty() {
-                    Path {
-                        components: vec![name.clone()],
-                    }
+                    Path::from_validated_components(vec![name.clone()])
                 } else {
-                    Path {
-                        components: {
-                            let mut c = path.components.clone();
-                            c.push(name.clone());
-                            c
-                        },
-                    }
+                    let mut c: Vec<String> = path.iter().map(str::to_string).collect();
+                    c.push(name.clone());
+                    Path::from_validated_components(c)
                 };
                 self.stack.push((child_path, child));
             }

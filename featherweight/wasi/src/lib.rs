@@ -489,7 +489,7 @@ mod tests {
 
     impl Reader for FakeIso {
         fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            let components: Vec<&str> = from.iter().map(String::as_str).collect();
+            let components: Vec<&str> = from.iter().collect();
             let value = match components.as_slice() {
                 ["iso", "self", "args"] => Some(Value::Array(vec![
                     Value::from("prog"),
@@ -522,7 +522,7 @@ mod tests {
     impl Writer for FakeIso {
         fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
             let value = data.as_value().cloned().unwrap_or(Value::Null);
-            let components: Vec<&str> = to.iter().map(String::as_str).collect();
+            let components: Vec<&str> = to.iter().collect();
             match components.as_slice() {
                 ["iso", "stdio", "stdout"] => {
                     if let Value::String(s) = value {
@@ -629,7 +629,7 @@ mod tests {
 
     impl Reader for TestNs {
         fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            if !from.is_empty() && from[0] == "files" {
+            if !from.is_empty() && &from[0] == "files" {
                 self.files.read(&from.slice(1, from.len()))
             } else {
                 self.iso.read(from)
@@ -639,7 +639,7 @@ mod tests {
 
     impl Writer for TestNs {
         fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            if !to.is_empty() && to[0] == "files" {
+            if !to.is_empty() && &to[0] == "files" {
                 self.files.write(&to.slice(1, to.len()), data)
             } else {
                 self.iso.write(to, data)

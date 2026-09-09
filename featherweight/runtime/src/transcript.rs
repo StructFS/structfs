@@ -273,7 +273,7 @@ impl BlockTranscript {
             return profile;
         };
         for (index, entry) in entries.iter().enumerate() {
-            let components: Vec<&str> = entry.path.iter().map(String::as_str).collect();
+            let components: Vec<&str> = entry.path.iter().collect();
             let found = matches!(entry.answer, TranscriptAnswer::Found(_));
             match (entry.op.as_str(), components.as_slice()) {
                 ("read", ["iso", "random", "uuid"]) if found => profile.entropy_words += 2,

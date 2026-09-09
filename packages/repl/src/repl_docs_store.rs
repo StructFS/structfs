@@ -253,7 +253,7 @@ impl Reader for ReplDocsStore {
             return Ok(None); // Root of ReplStore, not docs
         }
 
-        if from[0] != "docs" {
+        if &from[0] != "docs" {
             return Ok(None); // Not a docs path
         }
 

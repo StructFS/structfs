@@ -104,7 +104,7 @@ fn parse_wire_line(line: &str) -> Result<WireDef> {
             "wiring prefix may not be the namespace root: {line}"
         )));
     }
-    if prefix[0] == "iso" {
+    if &prefix[0] == "iso" {
         return Err(RuntimeError::assembly(format!(
             "the iso/ prefix is reserved and cannot be wired: {line}"
         )));

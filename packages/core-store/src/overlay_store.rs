@@ -410,9 +410,7 @@ impl OverlayStore {
         // It's a store - get mutable reference
         match self.trie.find_ancestor_mut(path) {
             Some((RouteTarget::Store(store), suffix)) => {
-                let prefix = Path {
-                    components: path.components[..prefix_len].to_vec(),
-                };
+                let prefix = path.slice(0, prefix_len);
                 Ok(Some(ResolvedRoute {
                     store,
                     suffix,

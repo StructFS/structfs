@@ -76,12 +76,8 @@ impl<T, C> AsyncLLToCore<T, C> {
 #[async_trait]
 impl<T: AsyncLLReader, C: Send + Sync> AsyncReader for AsyncLLToCore<T, C> {
     async fn read_async(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        // Convert Path to Vec<Vec<u8>> (need owned data for async)
-        let components: Vec<Vec<u8>> = from
-            .components
-            .iter()
-            .map(|s| s.as_bytes().to_vec())
-            .collect();
+        // Own the byte components (async needs owned data across the await).
+        let components: Vec<Vec<u8>> = from.as_ll().iter().map(|b| b.to_vec()).collect();
 
         // Create slice of slices for LL call
         let refs: Vec<&[u8]> = components.iter().map(|v| v.as_slice()).collect();
@@ -104,12 +100,8 @@ impl<T: AsyncLLWriter, C: Codec + Send + Sync> AsyncWriter for AsyncLLToCore<T, 
         // Get bytes from Record (serialize if Parsed)
         let bytes = data.into_bytes(&self.codec, &self.write_format)?;
 
-        // Convert Path to Vec<Vec<u8>>
-        let components: Vec<Vec<u8>> = to
-            .components
-            .iter()
-            .map(|s| s.as_bytes().to_vec())
-            .collect();
+        // Own the byte components (async needs owned data across the await).
+        let components: Vec<Vec<u8>> = to.as_ll().iter().map(|b| b.to_vec()).collect();
 
         let refs: Vec<&[u8]> = components.iter().map(|v| v.as_slice()).collect();
 
@@ -230,8 +222,8 @@ impl<T: AsyncWriter, C: Send + Sync> AsyncLLWriter for AsyncCoreToLL<T, C> {
                     detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
                 })?;
 
-        // Convert result to LL path
-        Ok(result_path.to_ll_path())
+        // Widen the validated result path to LL (free — no component copy).
+        Ok(result_path.into_ll())
     }
 }
 

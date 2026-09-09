@@ -150,7 +150,7 @@ impl HandleProtocol for SpawnProtocol {
                     handle.instance.public_cell().status_value(),
                 )));
             }
-            if sub[0] == "store" {
+            if &sub[0] == "store" {
                 // The parent's channel to its child: route to the
                 // child's public store.
                 let rel = sub.slice(1, sub.len());
@@ -160,7 +160,7 @@ impl HandleProtocol for SpawnProtocol {
                     .await
                     .map(|v| v.map(Record::parsed));
             }
-            if sub.len() == 1 && sub[0] == "wait" {
+            if sub.len() == 1 && &sub[0] == "wait" {
                 // wait(2): park until terminal; released handles interrupt.
                 let public = handle.instance.public_cell().clone();
                 tokio::select! {
@@ -177,7 +177,7 @@ impl HandleProtocol for SpawnProtocol {
 
     fn write(&self, handle: Arc<Self::Handle>, sub: Path, data: Record) -> DetachedFuture<Path> {
         Box::pin(async move {
-            if !sub.is_empty() && sub[0] == "store" {
+            if !sub.is_empty() && &sub[0] == "store" {
                 let rel = sub.slice(1, sub.len());
                 let value = data.into_value(&structfs_core_store::NoCodec)?;
                 let result = handle.instance.write(rel, value).await?;

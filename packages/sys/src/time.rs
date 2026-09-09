@@ -34,7 +34,7 @@ impl TimeStore {
             return Ok(None);
         }
 
-        match path[0].as_str() {
+        match &path[0] {
             "now" => {
                 let now = chrono::Utc::now();
                 Ok(Some(Value::String(now.to_rfc3339())))
@@ -74,7 +74,7 @@ impl Writer for TimeStore {
             return Err(Error::store("time", "write", "Invalid time path"));
         }
 
-        match to[0].as_str() {
+        match &to[0] {
             "sleep" => {
                 let value = data.into_value(&NoCodec)?;
 
@@ -107,7 +107,7 @@ impl Writer for TimeStore {
             _ => Err(Error::store(
                 "time",
                 "write",
-                format!("Cannot write to time/{}", to[0]),
+                format!("Cannot write to time/{}", &to[0]),
             )),
         }
     }
