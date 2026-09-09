@@ -64,7 +64,7 @@ test("batch mode: manifest and a kv round trip", async () => {
 test("unwired paths are denied, namespace-style", () => {
   const iso = new IsoStore();
   assert.throws(
-    () => iso.read("iso/secrets"),
+    () => iso.read("secrets"),
     (error: unknown) =>
       error instanceof StoreError && error.code === status.PERMISSION_DENIED,
   );

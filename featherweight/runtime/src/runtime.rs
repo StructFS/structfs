@@ -337,11 +337,14 @@ impl RtCtx {
         // Determinism (spec 12) is the orthogonal feature: it decides how
         // the iso surface sources time and entropy, whether or not a
         // transcript is being kept.
+        // Streams derive from the transcript key, not the bare name:
+        // identity that is stable across runs and unique across the
+        // assembly tree, so two blocks named alike never share entropy.
         let sources = self
             .determinism
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .sources_for(&cell.name);
+            .sources_for(&block.transcript_key);
         if let Some(profile) = &profile {
             sources.fast_forward(profile.entropy_words, profile.clock_ticks);
         }
@@ -628,7 +631,30 @@ impl RuntimeInner {
 
         let mut cells: BTreeMap<String, Arc<BlockCell>> = BTreeMap::new();
         let mut drivers: BTreeMap<String, Driver> = BTreeMap::new();
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
         let mut children = Vec::new();
+
+        // Claim a block's transcript key: assembly-scoped, `#n` on
+        // reuse. The counter lives for the runtime, so the same
+        // definition spawned twice gets `…/kv` then `…/kv#2` — in spawn
+        // order, which a deterministic run makes stable. The key is also
+        // the block's *identity*: `BlockId` derives from it, so
+        // `iso/self/id` answers the same string on every run — an input
+        // a seeded run may read without breaking the same-seed claim.
+        let claim_key = |name: &str| -> String {
+            let base = format!("{scope}/{name}");
+            let mut keys = self
+                .ctx
+                .transcript_keys
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let uses = keys.entry(base.clone()).or_insert(0);
+            *uses += 1;
+            match *uses {
+                1 => base,
+                n => format!("{base}#{n}"),
+            }
+        };
 
         // Create cells (or recurse for nested assemblies).
         for (name, block_def) in &def.blocks {
@@ -637,19 +663,31 @@ impl RuntimeInner {
                 let factory = self.lock_builtins().get(builtin).cloned().ok_or_else(|| {
                     RuntimeError::assembly(format!("unknown builtin block '{builtin}'"))
                 })?;
+                let key = claim_key(name);
                 cells.insert(
                     name.clone(),
-                    Arc::new(BlockCell::new(name.clone(), def.failure_policy(name))),
+                    Arc::new(BlockCell::keyed(
+                        name.clone(),
+                        def.failure_policy(name),
+                        &key,
+                    )),
                 );
+                keys.insert(name.clone(), key);
                 drivers.insert(name.clone(), Driver::Native(factory));
             } else if artifact.ends_with(".wasm") {
                 let path = base_dir.join(artifact);
                 let driver = self.load_artifact(artifact, std::fs::read(&path)?)?;
                 let format = wasm_format(&driver.manifest()?, block_def.serialization.as_str())?;
+                let key = claim_key(name);
                 cells.insert(
                     name.clone(),
-                    Arc::new(BlockCell::new(name.clone(), def.failure_policy(name))),
+                    Arc::new(BlockCell::keyed(
+                        name.clone(),
+                        def.failure_policy(name),
+                        &key,
+                    )),
                 );
+                keys.insert(name.clone(), key);
                 drivers.insert(name.clone(), Driver::Wasm(driver, format));
             } else if artifact.ends_with(".json")
                 || artifact.ends_with(".yaml")
@@ -710,24 +748,7 @@ impl RuntimeInner {
                 entries.push((wire.prefix.clone(), target));
             }
 
-            // Claim the block's transcript key: assembly-scoped, `#n` on
-            // reuse. The counter lives for the runtime, so the same
-            // definition spawned twice gets `…/kv` then `…/kv#2` — in
-            // spawn order, which a deterministic run makes stable.
-            let transcript_key = {
-                let base = format!("{scope}/{name}");
-                let mut keys = self
-                    .ctx
-                    .transcript_keys
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let uses = keys.entry(base.clone()).or_insert(0);
-                *uses += 1;
-                match *uses {
-                    1 => base,
-                    n => format!("{base}#{n}"),
-                }
-            };
+            let transcript_key = keys[&name].clone();
 
             self.ctx.lock_blocks().insert(
                 cell.id.clone(),

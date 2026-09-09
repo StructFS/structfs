@@ -19,6 +19,7 @@ both directions, digests included.
 |------|------|
 | `structfs-host.ts` | The binding host: `instantiate(wasmBytes, store)` → `{manifest, run}` |
 | `iso-store.ts` | A minimal `/iso` surface: mailbox, responses, stdio, env/args, time, randomness, shutdown; everything else denied like an unwired namespace |
+| `determinism.ts` | Seeded time and entropy (spec 12), bit-identical to the native runtime — the committed seeded fixture holds both hosts to one derivation |
 | `transcript.ts` | Spec 12 transcripts: `RecordingStore`/`ReplayingStore` wrapping any store, JSONL to/from the native runtime's format |
 | `session.ts` | The session log (spec 12): an arrival-order forensic timeline across every block the page runs; `tap()` wraps any store transparently |
 | `channel.ts` | One-slot SharedArrayBuffer channel — a parked mailbox read via `Atomics.wait` |

@@ -270,7 +270,12 @@ impl IsoSurface {
             // === time ===
             (2, "time") if path[1] == "now" => {
                 Some(Value::String(match self.sources.now_unix_ns() {
-                    Some(ns) => chrono::DateTime::from_timestamp_nanos(ns).to_rfc3339(),
+                    // Millisecond ISO 8601 with a Z: the rendering both
+                    // hosts pin for seeded time, so a seeded run reads
+                    // the same string here and in the browser host.
+                    Some(ns) => chrono::DateTime::from_timestamp_nanos(ns)
+                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                        .to_string(),
                     None => chrono::Utc::now().to_rfc3339(),
                 }))
             }
@@ -291,6 +296,11 @@ impl IsoSurface {
                 let ms: u64 = path[2]
                     .parse()
                     .map_err(|_| Error::store("iso", "time_after", "bad duration"))?;
+                // Simulation semantics under the virtual clock: the wait
+                // completes at once, having advanced virtual time.
+                if self.sources.advance_after(ms) {
+                    return Ok(Some(Record::parsed(Value::Integer(ms as i64))));
+                }
                 let sleep = tokio::time::sleep(std::time::Duration::from_millis(ms));
                 tokio::pin!(sleep);
                 tokio::select! {

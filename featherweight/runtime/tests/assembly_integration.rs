@@ -382,7 +382,11 @@ async fn shell_exercises_the_os_surface() {
 
     let text = stdio.output();
     // Identity and system paths
-    assert!(text.contains("block-"), "id output missing: {text}");
+    // Ids derive from the assembly-scoped key — stable across runs.
+    assert!(
+        text.contains("block:demo/shell"),
+        "id output missing: {text}"
+    );
     assert!(text.contains("running"), "state output missing: {text}");
     // Environment and args from the block definition
     assert!(

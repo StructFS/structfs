@@ -46,6 +46,9 @@ export interface WorkerHostOptions {
   session?: SessionLog;
   /// The block name session entries are witnessed under.
   block?: string;
+  /// Deterministic time and entropy (spec 12), derived from the seed
+  /// and the block name — mix freely with everything else.
+  determinism?: { seed: number; block: string };
 }
 
 export type ResponseEnvelope =
@@ -151,6 +154,7 @@ export class WorkerHost {
     if (options.replay !== undefined) init.replay = options.replay;
     if (options.seek !== undefined) init.seek = options.seek;
     if (options.session !== undefined) init.session = options.block ?? "block";
+    if (options.determinism !== undefined) init.determinism = options.determinism;
     host.worker.postMessage(init);
     return ready;
   }

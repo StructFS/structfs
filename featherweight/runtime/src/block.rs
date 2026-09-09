@@ -26,6 +26,14 @@ impl BlockId {
         Self(format!("block-{}", Uuid::new_v4()))
     }
 
+    /// An id derived from a stable name — the assembly-scoped transcript
+    /// key — so identity is a function of the assembly's shape, never of
+    /// the run. `iso/self/id` then answers the same string every run,
+    /// which the same-seed-same-run claim requires: an id is an input.
+    pub fn named(key: &str) -> Self {
+        Self(format!("block:{key}"))
+    }
+
     /// The id string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -211,6 +219,33 @@ impl BlockCell {
         Self {
             name: name.into(),
             id: BlockId::new(),
+            failure,
+            cancel: CancelToken::new(),
+            state: Mutex::new(CellState {
+                state: BlockState::Created,
+                queue: VecDeque::new(),
+                responses: HashMap::new(),
+                shutdown: ShutdownFlags {
+                    requested: false,
+                    mode: None,
+                    complete: false,
+                    exit_code: None,
+                },
+                interface: None,
+                last_error: None,
+            }),
+            gate: Gate::new(),
+            next_token: AtomicU64::new(0),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// A cell whose id derives from its assembly-scoped key, so
+    /// identity is stable across runs (see [`BlockId::named`]).
+    pub fn keyed(name: impl Into<String>, failure: FailurePolicy, key: &str) -> Self {
+        Self {
+            name: name.into(),
+            id: BlockId::named(key),
             failure,
             cancel: CancelToken::new(),
             state: Mutex::new(CellState {

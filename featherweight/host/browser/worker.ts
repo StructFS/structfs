@@ -16,6 +16,7 @@
 // few lines below bridge the two message APIs.
 
 import { ChannelReceiver } from "./channel.ts";
+import { SeededSources } from "./determinism.ts";
 import { IsoStore } from "./iso-store.ts";
 import { tapStore, type SessionEvent } from "./session.ts";
 import { instantiate, type HostStore } from "./structfs-host.ts";
@@ -37,6 +38,10 @@ export interface WorkerInit {
   /// block name; events stream to the main thread, which assigns
   /// arrival order.
   session?: string;
+  /// Deterministic time and entropy (spec 12): seeded sources derived
+  /// from `seed` and `block` — the same stream the native runtime
+  /// derives for that pair.
+  determinism?: { seed: number; block: string };
 }
 
 export type WorkerMessage =
@@ -71,12 +76,21 @@ const onMessage = (handler: (init: WorkerInit) => void): void => {
   } else nodePort?.on("message", handler);
 };
 
-onMessage(async ({ wasm, sab, args, env, record, replay, seek, session }) => {
+onMessage(async (init) => {
+  const { wasm, sab, args, env, record, replay, seek, session } = init;
   try {
     const channel = new ChannelReceiver(sab);
     const iso = new IsoStore({
       args,
       env,
+      ...(init.determinism === undefined
+        ? {}
+        : {
+            sources: new SeededSources(
+              init.determinism.seed,
+              init.determinism.block,
+            ),
+          }),
       mailbox: () => {
         const value = channel.receive();
         post({ type: "taken" });

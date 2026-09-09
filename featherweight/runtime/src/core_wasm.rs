@@ -284,6 +284,13 @@ impl CoreWasmBlock {
         C: Codec + Send + Sync + 'static,
     {
         let mut config = wasmtime::Config::new();
+        // Deterministic execution (spec 12, runtime obligation 2), on
+        // unconditionally: the same guest bytes on the same answers must
+        // compute the same result on every host, or replay's claim is
+        // hollow. NaN canonicalization pins the one float behavior wasm
+        // leaves loose; deterministic relaxed-SIMD pins the other.
+        config.cranelift_nan_canonicalization(true);
+        config.relaxed_simd_deterministic(true);
         metering.configure_engine(&mut config);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::wasm("engine", e))?;
         let ticker = metering.start_ticker(&engine);

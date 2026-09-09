@@ -81,6 +81,37 @@ thing everywhere:
   Block's providers and not another's, or offer none of it today and add
   it later without an interface change.
 
+### Standard Virtual Providers
+
+For a seed to mean the same run on *every* runtime, the providers'
+derivations must be pinned, not merely similar. A conforming seeded
+implementation uses, per Block:
+
+- **Stream derivation**: the Block's entropy state starts at
+  `seed XOR fnv1a64(key)`, where `key` is the Block's stable
+  assembly-scoped identity — never a per-run id, and never a bare name
+  two Blocks could share.
+- **Entropy**: splitmix64, drawn as little-endian 64-bit words and
+  truncated to the requested length. `random/uuid` is sixteen such
+  bytes with the RFC 4122 version-4 and variant bits set;
+  `random/int` is eight such bytes as a signed little-endian 64-bit
+  integer.
+- **The virtual clock**: starts at 2000-01-01T00:00:00Z and advances
+  one millisecond per read, after answering. `time/now_unix_ns` is the
+  integer; `time/now` renders it as millisecond-precision ISO 8601
+  with a `Z`; `time/monotonic` is the same tick stream measured from
+  the epoch.
+- **Waits**: `time/after/{ms}` completes immediately, advancing the
+  virtual clock by the requested span — a seeded run waits in virtual
+  time, not wall time, so timers are a function of the run.
+- **Identity**: a Block's id derives from its stable key, because
+  `iso/self/id` is an input like any other.
+
+Two independent implementations of these rules — recording the same
+guest under the same seed — must produce byte-identical transcripts;
+a committed cross-runtime fixture is the recommended way to hold them
+to it.
+
 ## Determinism Classes
 
 Every mount in a Block's namespace belongs to exactly one class. The class
@@ -510,7 +541,7 @@ Properties that make it sound:
    Block that wants to refuse to run against simulation — a
    certificate-issuing service, say — can ask?
 
-6. **Standard provider semantics.** Seeded entropy has one obvious
-   meaning; a virtual clock has several (fixed epoch advancing per read,
-   scaled real time, event-driven logical time). Should the spec pin one
-   per `/iso/time` path, so a seed means the same run on every runtime?
+6. **Standard provider semantics** — *answered; see Standard Virtual
+   Providers above.* What remains open is whether alternative clock
+   policies (scaled real time, event-driven logical time) deserve
+   named variants beside the standard one.

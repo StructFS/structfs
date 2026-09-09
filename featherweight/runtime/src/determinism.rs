@@ -11,10 +11,20 @@
 //! run can be recorded too — the transcript is then a record, not a
 //! promise.
 //!
+//! The derivations are pinned by spec 12's *Standard Virtual
+//! Providers* and held cross-runtime by the committed seeded fixture:
+//! per-block streams derive from the seed and the block's stable
+//! assembly-scoped key, `time/after` waits in virtual time, and block
+//! ids derive from keys — so `iso/self/id`, like every other input,
+//! answers the same on every run.
+//!
 //! What this does not virtualize: scheduling. Blocks run on OS threads
-//! and the interleaving of timers and mailbox events is the host's; a
+//! and the cross-block interleaving of mailbox events is the host's; a
 //! single block that consumes only its own boundary is deterministic
 //! under a seed, an assembly's cross-block interleaving is not yet.
+//! Epoch-based metering can also kill a slow guest on wall-clock
+//! grounds — it never changes a surviving run's values, but whether a
+//! run survives a timeout is the host's, not the seed's.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
@@ -79,6 +89,21 @@ impl IsoSources {
     pub(crate) fn monotonic_ns(&self) -> Option<i64> {
         self.now_unix_ns()
             .map(|ns| ns - self.clock.as_ref().expect("checked").epoch_ns)
+    }
+
+    /// Under the virtual clock, `time/after/{ms}` completes immediately
+    /// after advancing virtual time by the requested span — simulation
+    /// semantics: a seeded run waits in virtual time, not wall time, so
+    /// timers are a function of the run rather than of the host's
+    /// scheduler. Answers false when time is live and the caller should
+    /// really sleep.
+    pub(crate) fn advance_after(&self, ms: u64) -> bool {
+        let Some(clock) = &self.clock else {
+            return false;
+        };
+        let ticks = (ms as i64 * 1_000_000) / clock.tick_ns;
+        clock.ticks.fetch_add(ticks, Ordering::SeqCst);
+        true
     }
 
     /// Fast-forward past a replayed prefix (spec 12 seek): advance the

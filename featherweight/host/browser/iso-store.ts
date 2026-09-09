@@ -7,6 +7,7 @@
 // shutdown/complete. Everything else is denied, exactly as an unwired
 // namespace path would be.
 
+import { SeededSources } from "./determinism.ts";
 import {
   RawJson,
   status,
@@ -35,6 +36,10 @@ export interface IsoStoreOptions {
   onStdio?: (stream: string, text: string) => void;
   /// Called for iso/log/{level} writes.
   onLog?: (level: string, value: unknown) => void;
+  /// Deterministic time and entropy (spec 12): seeded sources instead
+  /// of the world. Same seed and block key as the native runtime give
+  /// the same run.
+  sources?: SeededSources;
 }
 
 export class IsoStore implements HostStore {
@@ -48,6 +53,7 @@ export class IsoStore implements HostStore {
   private readonly onResponse: IsoStoreOptions["onResponse"];
   private readonly onStdio: IsoStoreOptions["onStdio"];
   private readonly onLog: IsoStoreOptions["onLog"];
+  private readonly sources: SeededSources | undefined;
   private readonly queue: ServerEnvelope[] = [];
   private nextResponse = 0;
 
@@ -58,6 +64,7 @@ export class IsoStore implements HostStore {
     this.onResponse = options.onResponse;
     this.onStdio = options.onStdio;
     this.onLog = options.onLog;
+    this.sources = options.sources;
   }
 
   /// Queue a server-protocol request (batch mode): mints the
@@ -84,9 +91,18 @@ export class IsoStore implements HostStore {
           "random/bytes limited to 1MiB",
         );
       }
+      if (this.sources !== undefined) return this.sources.entropyBytes(n);
       const bytes = new Uint8Array(n);
       crypto.getRandomValues(bytes);
       return Array.from(bytes);
+    }
+    const after = path.match(/^iso\/time\/after\/(\d+)$/);
+    if (after !== null && this.sources !== undefined) {
+      // Simulation semantics under the virtual clock: the wait
+      // completes at once, having advanced virtual time.
+      const ms = Number(after[1]);
+      this.sources.advanceAfter(ms);
+      return ms;
     }
     switch (path) {
       case "iso/server/requests":
@@ -98,23 +114,34 @@ export class IsoStore implements HostStore {
       case "iso/env":
         return this.env;
       case "iso/time/now":
-        return new Date().toISOString();
+        return this.sources?.nowIso() ?? new Date().toISOString();
       case "iso/time/now_unix_ns":
         // Nanoseconds exceed 2^53; RawJson keeps the integer exact.
-        return new RawJson((BigInt(Date.now()) * 1000000n).toString());
+        return (
+          this.sources?.nowUnixNs() ??
+          new RawJson((BigInt(Date.now()) * 1000000n).toString())
+        );
       case "iso/time/monotonic":
-        return Math.round(performance.now() * 1e6);
+        return (
+          this.sources?.monotonicNs() ?? Math.round(performance.now() * 1e6)
+        );
       case "iso/time/zone":
         return "UTC";
       case "iso/random/uuid":
-        return crypto.randomUUID();
+        return this.sources?.uuid() ?? crypto.randomUUID();
       case "iso/random/int": {
+        if (this.sources !== undefined) return this.sources.int();
         const words = new Uint32Array(2);
         crypto.getRandomValues(words);
         // A safe integer, so the JSON rendering is exact.
         return ((words[0] ?? 0) % 0x200000) * 0x100000000 + (words[1] ?? 0);
       }
       default:
+        // Unknown paths under the mounted iso surface are absent — the
+        // store convention, and the native runtime's answer; only
+        // non-iso paths are unwired-namespace denials. The two hosts
+        // must agree, or a recording made on one diverges on the other.
+        if (path.startsWith("iso/")) return undefined;
         throw new StoreError(status.PERMISSION_DENIED, `not wired: ${path}`);
     }
   }

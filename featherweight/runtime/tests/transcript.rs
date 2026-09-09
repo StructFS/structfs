@@ -742,3 +742,139 @@ async fn a_seek_past_peer_effects_is_refused() {
     assert!(message.contains("cannot seek"), "{message}");
     assert!(message.contains("services/kv"), "{message}");
 }
+
+/// Record the probe under seed 42 into `file` — the seeded fixture run.
+async fn record_seeded_probe(file: std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures_dir().join("transcript-probe.wasm"),
+        dir.path().join("probe.wasm"),
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(&file);
+    let runtime = Runtime::new()
+        .with_transcripts(TranscriptMode::Record(fixture_provider(file)))
+        .with_determinism(Determinism::Seeded { seed: 42 });
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+    assembly.wait_public_terminal().await;
+    assembly.shutdown(Duration::from_secs(2)).await;
+    assert_eq!(
+        assembly.public_cell().state(),
+        BlockState::Stopped,
+        "{:?}",
+        assembly.public_cell().last_error()
+    );
+}
+
+/// Determinism, pinned by the repository: a seeded run recorded today
+/// is byte-identical to the committed fixture recorded when the
+/// providers were specified. Any drift in the entropy stream, the
+/// virtual clock, uuid construction, digests, or the wire format
+/// fails here — and the browser host's tests hold its live seeded run
+/// to the same committed bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_seeded_fixture_is_byte_reproducible() {
+    let out = tempfile::tempdir().unwrap();
+    let fresh = out.path().join("seeded.jsonl");
+    record_seeded_probe(fresh.clone()).await;
+    assert_eq!(
+        std::fs::read_to_string(&fresh).unwrap(),
+        std::fs::read_to_string(fixtures_dir().join("seeded-recorded.jsonl")).unwrap(),
+        "the seeded run drifted from the committed fixture"
+    );
+}
+
+/// Regenerates the seeded cross-host fixture. Run by hand when the
+/// provider semantics change — and expect the browser host's fixture
+/// test to hold you to the spec when they do.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "regenerates committed fixtures; run by hand"]
+async fn regenerate_seeded_fixture() {
+    record_seeded_probe(fixtures_dir().join("seeded-recorded.jsonl")).await;
+}
+
+/// Block identity is a function of the assembly's shape, not the run:
+/// two instantiations answer `iso/self/id` with the same string, which
+/// the same-seed-same-run claim requires — an id is an input.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_ids_are_stable_across_runs() {
+    struct IdProbe {
+        seen: Seen,
+    }
+    impl NativeBlock for IdProbe {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            let id = ns.read(&path!("iso/self/id"))?;
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{:?}", id.and_then(|r| r.as_value().cloned())));
+            Ok(())
+        }
+    }
+    let run = |seen: Seen| async move {
+        let mut runtime = Runtime::new();
+        runtime.register_builtin(
+            "probe",
+            Arc::new(move || Box::new(IdProbe { seen: seen.clone() }) as Box<dyn NativeBlock>),
+        );
+        run_assembly(&runtime, UNWIRED).await;
+    };
+    let first: Seen = Arc::default();
+    run(first.clone()).await;
+    let second: Seen = Arc::default();
+    run(second.clone()).await;
+    let first = first.lock().unwrap().clone();
+    assert_eq!(first, second.lock().unwrap().clone());
+    assert!(first[0].contains("block:probed/probe"), "{:?}", first[0]);
+}
+
+/// Under the virtual clock, `time/after` completes in virtual time:
+/// instantly on the wall clock, with virtual now advanced by the span.
+#[tokio::test(flavor = "multi_thread")]
+async fn seeded_time_after_waits_in_virtual_time() {
+    struct Sleeper {
+        seen: Seen,
+    }
+    impl NativeBlock for Sleeper {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            let before = ns.read(&path!("iso/time/now_unix_ns"))?;
+            ns.read(&path!("iso/time/after/30000"))?;
+            let after = ns.read(&path!("iso/time/now_unix_ns"))?;
+            let ns_of = |r: Option<Record>| match r.and_then(|r| r.as_value().cloned()) {
+                Some(Value::Integer(ns)) => ns,
+                other => panic!("expected ns, got {other:?}"),
+            };
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{}", ns_of(after) - ns_of(before)));
+            Ok(())
+        }
+    }
+    let seen: Seen = Arc::default();
+    let mut runtime = Runtime::new().with_determinism(Determinism::Seeded { seed: 7 });
+    let captured = seen.clone();
+    runtime.register_builtin(
+        "probe",
+        Arc::new(move || {
+            Box::new(Sleeper {
+                seen: captured.clone(),
+            }) as Box<dyn NativeBlock>
+        }),
+    );
+    let started = std::time::Instant::now();
+    run_assembly(&runtime, UNWIRED).await;
+    // A thirty-second virtual sleep finishes in well under a second of
+    // wall time...
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // ...and virtual time moved by the span plus the `before` read's
+    // own tick (each clock read advances one tick after answering).
+    let elapsed: i64 = seen.lock().unwrap()[0].parse().unwrap();
+    assert_eq!(elapsed, 30_000_000_000 + 1_000_000);
+}
