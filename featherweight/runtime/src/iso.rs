@@ -405,6 +405,16 @@ impl IsoSurface {
                 Ok(path.clone())
             }
             ["timers"] => {
+                // A wall-clock timer delivers from a tokio task no turn
+                // governs — arrival order would be the host's, not the
+                // seed's. Refused loudly rather than quietly racy.
+                if self.cell.simulated() {
+                    return Err(Error::store(
+                        "iso",
+                        "timers",
+                        "mailbox timers are not supported under deterministic                          simulation: their delivery order would be wall-clock,                          not seeded",
+                    ));
+                }
                 let Value::Map(ref map) = value else {
                     return Err(Error::store("iso", "timers", "expected {ms, tag}"));
                 };

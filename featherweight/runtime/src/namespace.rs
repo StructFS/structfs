@@ -259,6 +259,18 @@ impl Namespace {
 }
 
 impl Namespace {
+    /// Under simulation, every boundary operation is a seeded
+    /// interleaving point: yield the turn and let the schedule decide
+    /// who runs next. A no-op outside simulation — the performance path
+    /// pays one None check.
+    fn sim_yield(&self) {
+        if let Some((key, turnstile)) = self.cell.sim() {
+            let turnstile = turnstile.clone();
+            let key = key.clone();
+            self.ctx.block_on(turnstile.yield_now(&key));
+        }
+    }
+
     /// A seek whose replay reached its horizon hands off here: the
     /// transcript goes inert and every subsequent operation runs live.
     fn hand_off_if_ready(&mut self) {
@@ -290,6 +302,7 @@ impl Reader for Namespace {
             transcript.record_read(from, &result)?;
         }
         self.witness("read", from, crate::session::read_outcome(&result), entry);
+        self.sim_yield();
         result
     }
 }
@@ -317,6 +330,7 @@ impl Writer for Namespace {
             transcript.record_write(to, wrote, &result)?;
         }
         self.witness("write", to, crate::session::write_outcome(&result), entry);
+        self.sim_yield();
         result
     }
 }

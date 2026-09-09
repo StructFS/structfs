@@ -190,6 +190,9 @@ struct CellState {
     state: BlockState,
     queue: VecDeque<BlockEvent>,
     responses: HashMap<u64, oneshot::Sender<Value>>,
+    /// Simulation only: which block parked awaiting each token, so the
+    /// response can make it runnable during the responder's turn.
+    callers: HashMap<u64, String>,
     shutdown: ShutdownFlags,
     interface: Option<Value>,
     last_error: Option<String>,
@@ -211,6 +214,10 @@ pub struct BlockCell {
     pub(crate) gate: Gate,
     next_token: AtomicU64,
     started_at: Instant,
+    /// Deterministic simulation (spec 12): the schedule this cell's
+    /// wakes report to, under the cell's stable key. `None` outside
+    /// simulation.
+    sim: Option<(String, std::sync::Arc<crate::turnstile::Turnstile>)>,
 }
 
 impl BlockCell {
@@ -233,11 +240,33 @@ impl BlockCell {
                 },
                 interface: None,
                 last_error: None,
+                callers: HashMap::new(),
             }),
             gate: Gate::new(),
             next_token: AtomicU64::new(0),
             started_at: Instant::now(),
+            sim: None,
         }
+    }
+
+    /// Enroll this cell in a deterministic simulation before it is
+    /// shared: its wakes then report to the turnstile under `key`.
+    pub(crate) fn attach_simulation(
+        &mut self,
+        key: &str,
+        turnstile: std::sync::Arc<crate::turnstile::Turnstile>,
+    ) {
+        self.sim = Some((key.to_string(), turnstile));
+    }
+
+    /// Whether this cell runs under the deterministic scheduler.
+    pub fn simulated(&self) -> bool {
+        self.sim.is_some()
+    }
+
+    /// The cell's schedule enrollment, when simulated.
+    pub(crate) fn sim(&self) -> Option<&(String, std::sync::Arc<crate::turnstile::Turnstile>)> {
+        self.sim.as_ref()
     }
 
     /// A cell whose id derives from its assembly-scoped key, so
@@ -260,10 +289,12 @@ impl BlockCell {
                 },
                 interface: None,
                 last_error: None,
+                callers: HashMap::new(),
             }),
             gate: Gate::new(),
             next_token: AtomicU64::new(0),
             started_at: Instant::now(),
+            sim: None,
         }
     }
 
@@ -280,16 +311,26 @@ impl BlockCell {
 
     /// Transition state and wake watchers.
     pub fn set_state(&self, state: BlockState) {
-        {
+        let orphaned = {
             let mut cell = self.lock();
             cell.state = state;
             if state.is_terminal() {
                 // No response will ever come: fail in-flight callers by
                 // dropping their senders.
                 cell.responses.clear();
+                std::mem::take(&mut cell.callers)
+            } else {
+                HashMap::new()
+            }
+        };
+        self.gate.notify();
+        // Simulated callers parked on those responses see the dropped
+        // sender only if the schedule runs them again.
+        if let Some((_, turnstile)) = &self.sim {
+            for caller in orphaned.into_values() {
+                turnstile.make_runnable(&caller);
             }
         }
-        self.gate.notify();
     }
 
     /// Attempt the Created -> Starting transition. Returns true if this
@@ -331,6 +372,13 @@ impl BlockCell {
         {
             let mut cell = self.lock();
             cell.responses.insert(token, tx);
+            if self.sim.is_some() {
+                // Remember who parks on this token, so the response can
+                // make them runnable during the responder's turn.
+                if let Some(caller) = crate::turnstile::current_block() {
+                    cell.callers.insert(token, caller);
+                }
+            }
             cell.queue.push_back(BlockEvent::Request(ServerRequest {
                 op,
                 path,
@@ -339,6 +387,12 @@ impl BlockCell {
             }));
         }
         self.gate.notify();
+        // An event landed: under simulation the mailbox owner is now
+        // runnable (delivered during the caller's turn, so the runnable
+        // set stays a function of the run).
+        if let Some((key, turnstile)) = &self.sim {
+            turnstile.make_runnable(key);
+        }
         rx
     }
 
@@ -349,12 +403,18 @@ impl BlockCell {
             data,
         });
         self.gate.notify();
+        if let Some((key, turnstile)) = &self.sim {
+            turnstile.make_runnable(key);
+        }
     }
 
     /// Deliver a timer expiry to the block's mailbox.
     pub fn deliver_timer(&self, tag: Value) {
         self.lock().queue.push_back(BlockEvent::Timer { tag });
         self.gate.notify();
+        if let Some((key, turnstile)) = &self.sim {
+            turnstile.make_runnable(key);
+        }
     }
 
     // === Server protocol: block side ===
@@ -368,6 +428,30 @@ impl BlockCell {
             let mut cell = self.lock();
             if cell.state == BlockState::Starting {
                 cell.state = BlockState::Running;
+            }
+        }
+        // Under simulation the park goes through the turnstile: the
+        // empty-check runs while holding the turn (no producer can be
+        // mid-enqueue), and the wake that refills the queue marks this
+        // block runnable during the producer's turn.
+        if let Some((key, turnstile)) = &self.sim {
+            loop {
+                if self.cancel.is_cancelled() {
+                    return Err(structfs_core_store::Error::cancelled(
+                        "block shutdown (immediate)",
+                    ));
+                }
+                {
+                    let mut cell = self.lock();
+                    if let Some(event) = cell.queue.pop_front() {
+                        return Ok(Some(event));
+                    }
+                    if cell.shutdown.requested {
+                        return Ok(None);
+                    }
+                }
+                turnstile.park(key);
+                turnstile.wait_turn(key).await;
             }
         }
         self.gate
@@ -394,9 +478,17 @@ impl BlockCell {
     /// Fulfill a response for a correlation token. Unknown tokens are
     /// ignored (the caller may have timed out and gone away).
     pub fn respond(&self, token: u64, response: Value) {
-        let sender = self.lock().responses.remove(&token);
+        let (sender, caller) = {
+            let mut cell = self.lock();
+            (cell.responses.remove(&token), cell.callers.remove(&token))
+        };
         if let Some(sender) = sender {
             let _ = sender.send(response);
+        }
+        // The parked caller's answer exists: runnable, during this
+        // (the responder's) turn.
+        if let (Some((_, turnstile)), Some(caller)) = (&self.sim, caller) {
+            turnstile.make_runnable(&caller);
         }
     }
 
@@ -416,6 +508,11 @@ impl BlockCell {
             }
         }
         self.gate.notify();
+        // A shutdown request is a wake: a simulated block parked on its
+        // mailbox must run to observe the null-unblock.
+        if let Some((key, turnstile)) = &self.sim {
+            turnstile.make_runnable(key);
+        }
         if mode == ShutdownMode::Immediate {
             self.cancel.cancel();
         }

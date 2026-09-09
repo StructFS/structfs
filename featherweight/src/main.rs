@@ -63,8 +63,14 @@ Orthogonal features, mixable freely:
                   prefix wrote to a wired peer (that state would be missing
                   live); with --seed, sources fast-forward so the run
                   continues exactly where a straight seeded run would be
-  --seed N        deterministic mode: seeded entropy and a virtual clock, so
-                  two runs with one seed are the same run
+  --seed N        deterministic sources: seeded entropy and a virtual clock,
+                  so two runs with one seed see the same inputs (blocks still
+                  run in parallel at full speed)
+  --sim N         full simulation: --seed plus the deterministic scheduler —
+                  cross-block interleaving is drawn from the seed too, racy
+                  assemblies become one reproducible run per seed, and
+                  deadlocks are detected and shut down loudly; blocks run one
+                  at a time, so this trades throughput for reproducibility
   --session FILE  forensics: an assembly-wide, arrival-order log of every
                   block's boundary operations — works live, recording, or
                   replaying";
@@ -218,6 +224,19 @@ fn main() {
         args.remove(at + 1);
         args.remove(at);
         determinism = Determinism::Seeded { seed };
+    }
+    if let Some(at) = args.iter().position(|a| a == "--sim") {
+        let Some(seed) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
+            eprintln!("fw: --sim needs an integer\n{USAGE}");
+            std::process::exit(2);
+        };
+        if !matches!(determinism, Determinism::Live) {
+            eprintln!("fw: --sim and --seed are mutually exclusive (--sim implies --seed)");
+            std::process::exit(2);
+        }
+        args.remove(at + 1);
+        args.remove(at);
+        determinism = Determinism::Simulation { seed };
     }
 
     let (source, base_dir) = match args.first().map(String::as_str) {

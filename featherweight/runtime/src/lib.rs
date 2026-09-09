@@ -66,6 +66,7 @@ pub mod session;
 pub mod spawn;
 pub mod stdio;
 pub mod transcript;
+pub(crate) mod turnstile;
 
 pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
 pub use block::{

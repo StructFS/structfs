@@ -22,6 +22,7 @@ use crate::session::SessionLog;
 use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
 use crate::transcript::{BlockTranscript, PreambleProfile, TranscriptMode};
+use crate::turnstile::Turnstile;
 use structfs_handles::CancelToken;
 
 /// A loaded wasm artifact in some binding of the Block ABI: it serves
@@ -150,6 +151,8 @@ pub(crate) struct RtCtx {
     /// The session log (spec 12): the assembly-wide forensic witness,
     /// when one is attached.
     session: Mutex<Option<Arc<SessionLog>>>,
+    /// The deterministic scheduler, when Determinism::Simulation is on.
+    turnstile: Mutex<Option<Arc<Turnstile>>>,
     runtime: Weak<RuntimeInner>,
 }
 
@@ -199,6 +202,21 @@ impl RtCtx {
         self.ensure_started(cell)
             .map_err(|e| Error::store("runtime", "start", e.to_string()))?;
 
+        // Under simulation, a block-thread caller parks through the
+        // turnstile: the enqueue registered it against the token, the
+        // callee's respond makes it runnable during the callee's turn,
+        // and there is no wall-clock timeout — a wedge is a detected
+        // deadlock, not a timing accident.
+        if let (Some(turnstile), Some(me)) = (self.turnstile(), crate::turnstile::current_block()) {
+            let rx = cell.enqueue(op, path, data);
+            turnstile.park(&me);
+            let response = rx.await;
+            turnstile.wait_turn(&me).await;
+            return match response {
+                Ok(response) => Ok(response),
+                Err(_) => Err(Error::overloaded("store temporarily unavailable")),
+            };
+        }
         let timeout = *self.timeout.lock().unwrap_or_else(|e| e.into_inner());
         let rx = cell.enqueue(op, path, data);
         match tokio::time::timeout(timeout, rx).await {
@@ -209,6 +227,13 @@ impl RtCtx {
                 "no response within {timeout:?}"
             ))),
         }
+    }
+
+    pub(crate) fn turnstile(&self) -> Option<Arc<Turnstile>> {
+        self.turnstile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn log_sink(&self) -> Arc<dyn LogSink> {
@@ -360,7 +385,21 @@ impl RtCtx {
         }));
 
         let ctx = self.clone();
+        let turnstile = self.turnstile();
+        let sim_key = block.transcript_key.clone();
+        // Enroll before the thread exists: the schedule's view of who is
+        // runnable follows instantiation order, never thread-start races.
+        if let Some(turnstile) = &turnstile {
+            turnstile.enroll(&sim_key);
+        }
         let task = self.handle.spawn_blocking(move || {
+            // Under simulation this thread is a scheduled block: it
+            // executes only while holding the turn, and the thread-local
+            // key lets every enqueue know who is asking.
+            if let Some(turnstile) = &turnstile {
+                crate::turnstile::set_current_block(Some(sim_key.clone()));
+                ctx.block_on(turnstile.start(&sim_key));
+            }
             let mut namespace = Namespace::new(
                 ctx.clone(),
                 iso,
@@ -406,6 +445,10 @@ impl RtCtx {
                         })
                 }
             };
+            if let Some(turnstile) = &turnstile {
+                turnstile.exit(&sim_key);
+                crate::turnstile::set_current_block(None);
+            }
             finalize(&block, result);
         });
         if let Some(entry) = self.lock_blocks().get(&cell.id) {
@@ -664,14 +707,11 @@ impl RuntimeInner {
                     RuntimeError::assembly(format!("unknown builtin block '{builtin}'"))
                 })?;
                 let key = claim_key(name);
-                cells.insert(
-                    name.clone(),
-                    Arc::new(BlockCell::keyed(
-                        name.clone(),
-                        def.failure_policy(name),
-                        &key,
-                    )),
-                );
+                let mut cell = BlockCell::keyed(name.clone(), def.failure_policy(name), &key);
+                if let Some(turnstile) = self.ctx.turnstile() {
+                    cell.attach_simulation(&key, turnstile);
+                }
+                cells.insert(name.clone(), Arc::new(cell));
                 keys.insert(name.clone(), key);
                 drivers.insert(name.clone(), Driver::Native(factory));
             } else if artifact.ends_with(".wasm") {
@@ -679,14 +719,11 @@ impl RuntimeInner {
                 let driver = self.load_artifact(artifact, std::fs::read(&path)?)?;
                 let format = wasm_format(&driver.manifest()?, block_def.serialization.as_str())?;
                 let key = claim_key(name);
-                cells.insert(
-                    name.clone(),
-                    Arc::new(BlockCell::keyed(
-                        name.clone(),
-                        def.failure_policy(name),
-                        &key,
-                    )),
-                );
+                let mut cell = BlockCell::keyed(name.clone(), def.failure_policy(name), &key);
+                if let Some(turnstile) = self.ctx.turnstile() {
+                    cell.attach_simulation(&key, turnstile);
+                }
+                cells.insert(name.clone(), Arc::new(cell));
                 keys.insert(name.clone(), key);
                 drivers.insert(name.clone(), Driver::Wasm(driver, format));
             } else if artifact.ends_with(".json")
@@ -776,8 +813,18 @@ impl RuntimeInner {
             children,
         });
 
-        // The public block starts eagerly; everything else is lazy.
+        // The public block starts eagerly; everything else is lazy —
+        // except under simulation, where every block starts at once:
+        // autonomous blocks are what concurrency means, and the seeded
+        // schedule needs them all in the runnable set from the top.
         self.ctx.ensure_started(&public)?;
+        if let Some(turnstile) = self.ctx.turnstile() {
+            for cell in instance.cells.values() {
+                self.ctx.ensure_started(cell)?;
+            }
+            // Every initial block is enrolled: make the first decision.
+            turnstile.launch();
+        }
         Ok(instance)
     }
 }
@@ -813,6 +860,7 @@ impl Runtime {
                 determinism: Mutex::new(Determinism::Live),
                 transcript_keys: Mutex::new(HashMap::new()),
                 session: Mutex::new(None),
+                turnstile: Mutex::new(None),
                 runtime: weak.clone(),
             }),
             builtins: Mutex::new(HashMap::new()),
@@ -860,13 +908,46 @@ impl Runtime {
 
     /// Set the determinism mode (spec 12; default: [`Determinism::Live`]).
     ///
-    /// `Seeded` gives every block a virtual clock and seeded entropy, so
-    /// two runs with one seed see the same answers from `/iso/time` and
-    /// `/iso/random` — reproducibility with no transcript involved.
+    /// Three levels, chosen per run:
+    ///
+    /// - `Live` — the performance mode: real clock and entropy, blocks
+    ///   fully parallel, no scheduler, and the determinism hooks cost a
+    ///   `None` check.
+    /// - `Seeded` — deterministic sources: two runs with one seed see
+    ///   the same `/iso/time` and `/iso/random` answers; blocks still
+    ///   run in parallel at full speed.
+    /// - `Simulation` — Antithesis-style: `Seeded` plus the seeded
+    ///   deterministic scheduler, so cross-block interleaving — racy
+    ///   assemblies included — is one reproducible run per seed, with
+    ///   deadlocks detected. Blocks run one turn at a time: this trades
+    ///   throughput for reproducibility, which is why it is a mode and
+    ///   not the default.
+    ///
     /// Orthogonal to [`Runtime::with_transcripts`] — mix and match: a
     /// seeded run can be recorded, and recording a live run is a record
     /// of what happened, not a promise it can be reproduced.
     pub fn with_determinism(self, determinism: Determinism) -> Self {
+        if let Some(seed) = determinism.simulation_seed() {
+            let turnstile = Turnstile::new(seed);
+            let runtime = Arc::downgrade(&self.inner);
+            // A wedged schedule can never recover on its own (all wakes
+            // happen on turns), so shut the assembly down loudly.
+            turnstile.set_deadlock_handler(move || {
+                if let Some(runtime) = runtime.upgrade() {
+                    for block in runtime.ctx.lock_blocks().values() {
+                        block
+                            .cell
+                            .request_shutdown(crate::block::ShutdownMode::Immediate);
+                    }
+                }
+            });
+            *self
+                .inner
+                .ctx
+                .turnstile
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(turnstile);
+        }
         *self
             .inner
             .ctx

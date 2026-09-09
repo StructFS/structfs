@@ -40,6 +40,14 @@ pub enum Determinism {
     /// stream from the seed and its name, so streams are stable per
     /// block and distinct across blocks.
     Seeded { seed: u64 },
+    /// Everything `Seeded` gives, plus the deterministic scheduler
+    /// (`crate::turnstile`): cross-block interleaving is drawn from the
+    /// seed too, so a whole assembly — racy topologies included — is
+    /// one reproducible run, and iterating seeds explores schedules
+    /// (Antithesis-style). Deadlocks are detected and shut down loudly.
+    /// `iso/timers` is refused under simulation; host-driven traffic
+    /// and blocking host stdio are outside the claim.
+    Simulation { seed: u64 },
 }
 
 impl Determinism {
@@ -50,10 +58,18 @@ impl Determinism {
                 entropy: None,
                 clock: None,
             },
-            Determinism::Seeded { seed } => IsoSources {
+            Determinism::Seeded { seed } | Determinism::Simulation { seed } => IsoSources {
                 entropy: Some(Mutex::new(seed ^ fnv1a(block.as_bytes()))),
                 clock: Some(VirtualClock::default()),
             },
+        }
+    }
+
+    /// The scheduler seed, when the deterministic scheduler is on.
+    pub(crate) fn simulation_seed(&self) -> Option<u64> {
+        match self {
+            Determinism::Simulation { seed } => Some(*seed),
+            _ => None,
         }
     }
 }

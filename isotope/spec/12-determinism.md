@@ -112,6 +112,16 @@ guest under the same seed — must produce byte-identical transcripts;
 a committed cross-runtime fixture is the recommended way to hold them
 to it.
 
+A runtime may extend seeded determinism with a **deterministic
+scheduler**: one turn of execution at a time, every scheduling decision
+drawn from the seed, every wake delivered during the waker's turn — so
+an Assembly's cross-Block interleaving, racy topologies included,
+becomes one reproducible run per seed, iterating seeds explores
+schedules, and a wedged schedule is a *detected* deadlock rather than a
+hang. This trades throughput for reproducibility and is a per-run mode
+beside the others, never a requirement; live execution remains the
+performance mode.
+
 ## Determinism Classes
 
 Every mount in a Block's namespace belongs to exactly one class. The class

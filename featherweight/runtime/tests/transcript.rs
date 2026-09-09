@@ -878,3 +878,146 @@ async fn seeded_time_after_waits_in_virtual_time() {
     let elapsed: i64 = seen.lock().unwrap()[0].parse().unwrap();
     assert_eq!(elapsed, 30_000_000_000 + 1_000_000);
 }
+
+// === Simulation: full determinism from seed, racy assemblies included ===
+
+/// An autonomous block: read-modify-write a shared counter five times.
+/// Two of these racing on one store make lost updates — and which
+/// updates are lost is a function of the schedule.
+struct Contender;
+impl NativeBlock for Contender {
+    fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+        for _ in 0..5 {
+            let seen = match ns.read(&path!("out/counter"))? {
+                Some(record) => match record.as_value() {
+                    Some(Value::Integer(n)) => *n,
+                    _ => 0,
+                },
+                None => 0,
+            };
+            ns.write(
+                &path!("out/counter"),
+                Record::parsed(Value::Integer(seen + 1)),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+const RACY: &str = r#"{
+    "assembly": "racy",
+    "blocks": {"w1": "builtin:contender", "w2": "builtin:contender"},
+    "public": "w1",
+    "imports": {"shared": "the contended store"},
+    "wiring": ["w1:/out -> $shared", "w2:/out -> $shared"]
+}"#;
+
+/// One simulated run of the racy assembly: the session timeline and the
+/// final counter.
+async fn racy_run(seed: u64) -> (Vec<(String, String, String)>, i64) {
+    let session = session_store();
+    let mut runtime = Runtime::new()
+        .with_determinism(Determinism::Simulation { seed })
+        .with_session_log(session.clone());
+    runtime.register_builtin(
+        "contender",
+        Arc::new(|| Box::new(Contender) as Box<dyn NativeBlock>),
+    );
+    let shared = host_store(structfs_core_store::MemoryStore::new());
+    let def = AssemblyDef::from_str(RACY).unwrap();
+    let assembly = runtime
+        .instantiate(
+            &def,
+            HashMap::from([(String::from("shared"), shared.clone())]),
+            &std::env::temp_dir(),
+        )
+        .unwrap();
+    for name in ["w1", "w2"] {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            assembly.cell(name).unwrap().wait_terminal(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} did not finish"));
+    }
+    assembly.shutdown(Duration::from_secs(2)).await;
+
+    let timeline: Vec<(String, String, String)> = session_entries(&session)
+        .into_iter()
+        .map(|e| (e.block, e.op, e.path.to_string()))
+        .collect();
+    let mut shared = shared;
+    let counter = match shared
+        .read(&structfs_core_store::path!("counter"))
+        .unwrap()
+        .and_then(|r| r.as_value().cloned())
+    {
+        Some(Value::Integer(n)) => n,
+        other => panic!("expected a counter, got {other:?}"),
+    };
+    (timeline, counter)
+}
+
+/// The Antithesis claim: a racy assembly is one reproducible run per
+/// seed — the interleaving, the lost updates, the whole timeline — and
+/// a different seed explores a different schedule.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_makes_racy_assemblies_a_function_of_the_seed() {
+    let (timeline_a, counter_a) = racy_run(42).await;
+    let (timeline_b, counter_b) = racy_run(42).await;
+    assert_eq!(timeline_a, timeline_b, "same seed, same interleaving");
+    assert_eq!(counter_a, counter_b, "same seed, same lost updates");
+
+    let (timeline_c, _) = racy_run(7).await;
+    assert_ne!(
+        timeline_a, timeline_c,
+        "a different seed explores a different schedule"
+    );
+}
+
+/// A wedged schedule is a detected deadlock, not a hang: a block parked
+/// on a mailbox nothing will ever write is shut down loudly once the
+/// rest of the assembly exits.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_detects_deadlock_and_shuts_down() {
+    struct Hermit;
+    impl NativeBlock for Hermit {
+        fn run(&mut self, ns: &mut Namespace) -> Result<(), Error> {
+            // Parks forever: nothing is wired to this block.
+            let _ = ns.read(&path!("iso/server/requests"))?;
+            Ok(())
+        }
+    }
+    struct Sprinter;
+    impl NativeBlock for Sprinter {
+        fn run(&mut self, _: &mut Namespace) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    let mut runtime = Runtime::new().with_determinism(Determinism::Simulation { seed: 3 });
+    runtime.register_builtin(
+        "hermit",
+        Arc::new(|| Box::new(Hermit) as Box<dyn NativeBlock>),
+    );
+    runtime.register_builtin(
+        "sprinter",
+        Arc::new(|| Box::new(Sprinter) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "wedged",
+            "blocks": {"driver": "builtin:sprinter", "hermit": "builtin:hermit"},
+            "public": "driver"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &std::env::temp_dir())
+        .unwrap();
+    for name in ["driver", "hermit"] {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            assembly.cell(name).unwrap().wait_terminal(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} still running: the deadlock was not detected"));
+    }
+}
