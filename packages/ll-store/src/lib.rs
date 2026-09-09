@@ -99,4 +99,44 @@ mod tests {
         let path = ll_path_from_strs(&[]);
         assert!(path.is_empty());
     }
+
+    #[test]
+    fn llpath_newtype_construction_and_views() {
+        // from_components / components / into_components round-trip.
+        let raw = vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")];
+        let path = LLPath::from_components(raw.clone());
+        assert_eq!(path.components(), raw.as_slice());
+        assert_eq!(path.clone().into_components(), raw);
+
+        // Deref gives slice access (len / index / iter) regardless of layout.
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].as_ref(), b"a");
+        assert_eq!(path.iter().count(), 2);
+
+        // as_byte_refs borrows without copying bytes -- the shape the
+        // `&[&[u8]]` read/write interface consumes.
+        assert_eq!(path.as_byte_refs(), vec![b"a".as_ref(), b"b".as_ref()]);
+    }
+
+    #[test]
+    fn llpath_from_iter_and_into_iter() {
+        // FromIterator<Bytes>: the `.collect()` the constructors rely on.
+        let path: LLPath = [Bytes::from_static(b"x"), Bytes::from_static(b"y")]
+            .into_iter()
+            .collect();
+        assert_eq!(path.len(), 2);
+
+        // IntoIterator (owned): the shape featherweight lowers back to the wire.
+        let components: Vec<Vec<u8>> = path.into_iter().map(|b| b.to_vec()).collect();
+        assert_eq!(components, vec![b"x".to_vec(), b"y".to_vec()]);
+    }
+
+    #[test]
+    fn llpath_push_grows() {
+        let mut path = LLPath::new();
+        assert!(path.is_empty());
+        path.push(Bytes::from_static(b"only"));
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].as_ref(), b"only");
+    }
 }
