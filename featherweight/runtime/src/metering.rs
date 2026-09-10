@@ -43,6 +43,18 @@ impl Default for Metering {
 }
 
 impl Metering {
+    /// Timer task for async guests: no OS thread or blocking join per store.
+    pub(crate) fn start_async_ticker(&self, engine: &wasmtime::Engine) -> Option<AsyncEpochTicker> {
+        let interval = self.epoch_interval?;
+        let engine = engine.clone();
+        Some(AsyncEpochTicker(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                engine.increment_epoch();
+            }
+        })))
+    }
+
     /// No fuel, no interruption — for tests and fully trusted guests.
     /// A spinning guest cannot be stopped under this configuration.
     pub fn disabled() -> Self {
@@ -114,6 +126,14 @@ impl Metering {
 pub struct EpochTicker {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+pub(crate) struct AsyncEpochTicker(tokio::task::JoinHandle<()>);
+
+impl Drop for AsyncEpochTicker {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Drop for EpochTicker {

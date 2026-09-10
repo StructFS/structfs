@@ -32,9 +32,26 @@ use structfs_handles::CancelToken;
 /// kinds; the core knows only the Block ABI (spec 10) and its own
 /// core-wasm binding (spec 11) — everything else registers through
 /// [`Runtime::register_loader`].
-pub trait WasmBlockDriver: Send + Sync {
+pub trait WasmBlockDriver: Send + Sync + 'static {
     /// The block's JSON manifest (spec 01), retrieved pre-wiring.
     fn manifest(&self) -> Result<Vec<u8>>;
+
+    /// Async execution entry point. Synchronous binding adapters use the
+    /// explicit blocking fallback; core-Wasm overrides this with Wasmtime fibers.
+    fn run_async(
+        self: Arc<Self>,
+        id: BlockId,
+        namespace: Namespace,
+        format: Format,
+        metering: Metering,
+        cancel: CancelToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
+        Box::pin(async move {
+            crate::turnstile::blocking(move || self.run(id, namespace, format, &metering, cancel))
+                .await
+                .map_err(|e| RuntimeError::wasm("driver task", e))?
+        })
+    }
 
     /// Run the block over its namespace in the declared format; returns
     /// the guest's exit code. The code is advisory per spec 11 — a
@@ -69,13 +86,37 @@ impl ArtifactLoader for CoreWasmLoader {
     }
 
     fn load(&self, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
-        Ok(Arc::new(CoreWasmDriver(CoreWasmBlock::new(bytes))))
+        Ok(Arc::new(CoreWasmDriver(Arc::new(CoreWasmBlock::new(
+            bytes,
+        )))))
     }
 }
 
-struct CoreWasmDriver(CoreWasmBlock);
+struct CoreWasmDriver(Arc<CoreWasmBlock>);
 
 impl WasmBlockDriver for CoreWasmDriver {
+    fn run_async(
+        self: Arc<Self>,
+        id: BlockId,
+        namespace: Namespace,
+        format: Format,
+        metering: Metering,
+        cancel: CancelToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
+        Box::pin(async move {
+            self.0
+                .run_async(
+                    id,
+                    namespace,
+                    MultiCodec::standard(),
+                    format,
+                    &metering,
+                    cancel,
+                )
+                .await
+        })
+    }
+
     fn manifest(&self) -> Result<Vec<u8>> {
         self.0.manifest()
     }
@@ -139,6 +180,8 @@ pub(crate) struct RtCtx {
     // Interior mutability: RtCtx sits behind Arcs (including a Weak from
     // new_cyclic), so builder-style configuration cannot use get_mut.
     timeout: Mutex<Duration>,
+    call_budget: Mutex<Arc<crate::admission::CallBudget>>,
+    execution: Mutex<Option<crate::execution::ExecutionScope>>,
     blocks: Mutex<HashMap<BlockId, Arc<BlockRuntime>>>,
     log: Mutex<Arc<dyn LogSink>>,
     stdio_provider: Mutex<Arc<StdioProvider>>,
@@ -194,11 +237,37 @@ impl RtCtx {
         path: Path,
         data: Value,
     ) -> std::result::Result<Value, Error> {
+        match self.execution_scope() {
+            Some(scope) => scope.run(self.call_live(cell, op, path, data)).await,
+            None => self.call_live(cell, op, path, data).await,
+        }
+    }
+
+    pub(crate) fn execution_scope(&self) -> Option<crate::execution::ExecutionScope> {
+        self.execution
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    async fn call_live(
+        self: &Arc<Self>,
+        cell: &Arc<BlockCell>,
+        op: &'static str,
+        path: Path,
+        data: Value,
+    ) -> std::result::Result<Value, Error> {
         // A caller cannot tell what's behind the path: dead blocks are
         // "temporarily unavailable", nothing more.
         if cell.state().is_terminal() {
             return Err(Error::overloaded("store temporarily unavailable"));
         }
+        let charge = self
+            .call_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .acquire(&cell.admission_id, &path, &data)?;
         self.ensure_started(cell)
             .map_err(|e| Error::store("runtime", "start", e.to_string()))?;
 
@@ -208,7 +277,7 @@ impl RtCtx {
         // and there is no wall-clock timeout — a wedge is a detected
         // deadlock, not a timing accident.
         if let (Some(turnstile), Some(me)) = (self.turnstile(), crate::turnstile::current_block()) {
-            let rx = cell.enqueue(op, path, data);
+            let rx = cell.enqueue_owned(op, path, data, charge);
             // A dependency on the callee: this park arms deadlock.
             turnstile.park(&me, crate::turnstile::ParkKind::Call);
             let response = rx.await;
@@ -219,7 +288,7 @@ impl RtCtx {
             };
         }
         let timeout = *self.timeout.lock().unwrap_or_else(|e| e.into_inner());
-        let rx = cell.enqueue(op, path, data);
+        let rx = cell.enqueue_owned(op, path, data, charge);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => Ok(response),
             // Sender dropped: the block reached a terminal state.
@@ -388,70 +457,82 @@ impl RtCtx {
         let ctx = self.clone();
         let turnstile = self.turnstile();
         let sim_key = block.transcript_key.clone();
-        // Enroll before the thread exists: the schedule's view of who is
-        // runnable follows instantiation order, never thread-start races.
+        // Enroll before the task exists: the schedule's view of who is
+        // runnable follows instantiation order, never task-start races.
         if let Some(turnstile) = &turnstile {
             turnstile.enroll(&sim_key);
         }
-        let task = self.handle.spawn_blocking(move || {
-            // Under simulation this thread is a scheduled block: it
-            // executes only while holding the turn, and the thread-local
-            // key lets every enqueue know who is asking.
-            if let Some(turnstile) = &turnstile {
-                crate::turnstile::set_current_block(Some(sim_key.clone()));
-                ctx.block_on(turnstile.start(&sim_key));
-            }
-            let mut namespace = Namespace::new(
-                ctx.clone(),
-                iso,
-                block.wiring.clone(),
-                block.cell.clone(),
-                transcript,
-                session,
-            );
-
-            // Spec 05 ties Running to "begins reading requests", but an
-            // interactive or client-only block may never read them; the
-            // strawman marks Running when the driver's code starts.
-            block.cell.set_state(BlockState::Running);
-
-            let result: std::result::Result<(), String> = match &block.driver {
-                Driver::Native(factory) => {
-                    let mut native = factory.create();
-                    native.run(&mut namespace).map_err(|e| e.to_string())
+        let identity = turnstile.as_ref().map(|_| sim_key.clone());
+        let task = self
+            .handle
+            .spawn(crate::turnstile::scope_block(identity, async move {
+                if let Some(turnstile) = &turnstile {
+                    turnstile.start(&sim_key).await;
                 }
-                Driver::Wasm(driver, format) => {
-                    let metering = ctx
-                        .metering
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    let cancel = block.cell.cancel.clone();
-                    driver
-                        .run(
-                            block.cell.id.clone(),
-                            namespace,
-                            format.clone(),
-                            &metering,
-                            cancel,
-                        )
-                        .map_err(|e| e.to_string())
-                        .map(|code| {
-                            // Spec 11: run's return value is the exit
-                            // code, unless the block already declared
-                            // one via shutdown/complete.
-                            if code != 0 && !block.cell.shutdown_complete() {
-                                block.cell.mark_shutdown_complete(code as i64);
-                            }
+                let mut namespace = Namespace::new(
+                    ctx.clone(),
+                    iso,
+                    block.wiring.clone(),
+                    block.cell.clone(),
+                    transcript,
+                    session,
+                );
+
+                // Spec 05 ties Running to "begins reading requests", but an
+                // interactive or client-only block may never read them; the
+                // strawman marks Running when the driver's code starts.
+                block.cell.set_state(BlockState::Running);
+
+                let _watch = ctx.execution_scope().map(|scope| {
+                    let cell = block.cell.clone();
+                    crate::execution::Watch(tokio::spawn(async move {
+                        scope.ended().await;
+                        cell.request_shutdown(ShutdownMode::Immediate);
+                    }))
+                });
+                let result: std::result::Result<(), String> = match &block.driver {
+                    Driver::Native(factory) => {
+                        let factory = factory.clone();
+                        crate::turnstile::blocking(move || {
+                            let mut native = factory.create();
+                            native.run(&mut namespace).map_err(|e| e.to_string())
                         })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    }
+                    Driver::Wasm(driver, format) => {
+                        let metering = ctx
+                            .metering
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        let cancel = block.cell.cancel.clone();
+                        driver
+                            .clone()
+                            .run_async(
+                                block.cell.id.clone(),
+                                namespace,
+                                format.clone(),
+                                metering,
+                                cancel,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
+                            .map(|code| {
+                                // Spec 11: run's return value is the exit
+                                // code, unless the block already declared
+                                // one via shutdown/complete.
+                                if code != 0 && !block.cell.shutdown_complete() {
+                                    block.cell.mark_shutdown_complete(code as i64);
+                                }
+                            })
+                    }
+                };
+                if let Some(turnstile) = &turnstile {
+                    turnstile.exit(&sim_key);
                 }
-            };
-            if let Some(turnstile) = &turnstile {
-                turnstile.exit(&sim_key);
-                crate::turnstile::set_current_block(None);
-            }
-            finalize(&block, result);
-        });
+                finalize(&block, result);
+            }));
         if let Some(entry) = self.lock_blocks().get(&cell.id) {
             *entry.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
         }
@@ -597,13 +678,32 @@ impl AssemblyInstance {
         for cell in &cells {
             cell.request_shutdown(ShutdownMode::Graceful);
         }
+        // One deadline for the whole tree, rather than N grace periods.
+        let grace = tokio::time::Instant::now() + timeout;
         for cell in &cells {
-            if tokio::time::timeout(timeout, cell.wait_terminal())
-                .await
-                .is_err()
-            {
+            let _ = tokio::time::timeout_at(grace, cell.wait_terminal()).await;
+        }
+        for cell in &cells {
+            if !cell.state().is_terminal() {
                 cell.request_shutdown(ShutdownMode::Immediate);
-                let _ = tokio::time::timeout(Duration::from_secs(1), cell.wait_terminal()).await;
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        for cell in &cells {
+            let block = self.ctx.lock_blocks().get(&cell.id).cloned();
+            if let Some(block) = block {
+                let task = block.task.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(mut task) = task {
+                    if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+                        // A native driver may not cooperate; retain its handle
+                        // and registration rather than claim it has stopped.
+                        *block.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
+                        continue;
+                    }
+                }
+                if cell.state().is_terminal() {
+                    self.ctx.lock_blocks().remove(&cell.id);
+                }
             }
         }
     }
@@ -615,6 +715,7 @@ pub struct RuntimeInner {
     ctx: Arc<RtCtx>,
     builtins: Mutex<HashMap<String, Arc<dyn NativeBlockFactory>>>,
     loaders: Mutex<Vec<Arc<dyn ArtifactLoader>>>,
+    prepared: Mutex<HashMap<String, Arc<dyn WasmBlockDriver>>>,
 }
 
 impl RuntimeInner {
@@ -631,7 +732,11 @@ impl RuntimeInner {
 
     /// Load a wasm artifact through the registered binding loaders.
     fn load_artifact(&self, artifact: &str, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
-        let loaders = self.loaders.lock().unwrap_or_else(|e| e.into_inner());
+        let loaders = self
+            .loaders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         for loader in loaders.iter() {
             if loader.matches(&bytes) {
                 return loader.load(bytes);
@@ -712,6 +817,12 @@ impl RuntimeInner {
         // Create cells (or recurse for nested assemblies).
         for (name, block_def) in &def.blocks {
             let artifact = block_def.artifact.as_str();
+            let prepared = self
+                .prepared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(artifact)
+                .cloned();
             if let Some(builtin) = artifact.strip_prefix("builtin:") {
                 let factory = self.lock_builtins().get(builtin).cloned().ok_or_else(|| {
                     RuntimeError::assembly(format!("unknown builtin block '{builtin}'"))
@@ -724,9 +835,13 @@ impl RuntimeInner {
                 cells.insert(name.clone(), Arc::new(cell));
                 keys.insert(name.clone(), key);
                 drivers.insert(name.clone(), Driver::Native(factory));
-            } else if artifact.ends_with(".wasm") {
-                let path = base_dir.join(artifact);
-                let driver = self.load_artifact(artifact, std::fs::read(&path)?)?;
+            } else if prepared.is_some() || artifact.ends_with(".wasm") {
+                let driver = match prepared {
+                    Some(driver) => driver,
+                    None => {
+                        self.load_artifact(artifact, std::fs::read(base_dir.join(artifact))?)?
+                    }
+                };
                 let format = wasm_format(&driver.manifest()?, block_def.serialization.as_str())?;
                 let key = claim_key(name);
                 let mut cell = BlockCell::keyed(name.clone(), def.failure_policy(name), &key);
@@ -843,7 +958,8 @@ impl RuntimeInner {
 /// The Featherweight runtime.
 ///
 /// Holds the builtin native-block registry and the shared context. Blocks
-/// run on blocking threads of the provided tokio runtime.
+/// run as async tasks on the provided Tokio runtime; native blocks and
+/// synchronous binding adapters use its blocking pool.
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
@@ -863,6 +979,8 @@ impl Runtime {
             ctx: Arc::new(RtCtx {
                 handle,
                 timeout: Mutex::new(Duration::from_secs(30)),
+                call_budget: Mutex::new(crate::admission::CallBudget::new(Default::default())),
+                execution: Mutex::new(None),
                 blocks: Mutex::new(HashMap::new()),
                 log: Mutex::new(Arc::new(StderrLog)),
                 stdio_provider: Mutex::new(Arc::new(|_| None)),
@@ -876,8 +994,48 @@ impl Runtime {
             }),
             builtins: Mutex::new(HashMap::new()),
             loaders: Mutex::new(vec![Arc::new(CoreWasmLoader)]),
+            prepared: Mutex::new(HashMap::new()),
         });
         Self { inner }
+    }
+
+    /// Register host-resolved core code under an assembly artifact identifier.
+    /// Share a prepared block across fresh session runtimes with this method.
+    pub fn register_core_artifact(&mut self, name: impl Into<String>, block: Arc<CoreWasmBlock>) {
+        self.inner
+            .prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.into(), Arc::new(CoreWasmDriver(block)));
+    }
+
+    /// Apply one absolute deadline/cancellation scope to all blocks, routed
+    /// calls and providers in this runtime. Use a fresh runtime per request.
+    pub fn with_execution_scope(self, scope: crate::execution::ExecutionScope) -> Self {
+        *self
+            .inner
+            .ctx
+            .execution
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(scope);
+        self
+    }
+
+    /// Share an immutable call budget across request runtimes. Configure
+    /// before starting sessions; saturated calls fail immediately as Overloaded.
+    pub fn with_call_budget(self, budget: Arc<crate::admission::CallBudget>) -> Self {
+        *self
+            .inner
+            .ctx
+            .call_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = budget;
+        self
+    }
+
+    /// Number of retained block registrations, including lazy blocks.
+    pub fn registered_blocks(&self) -> usize {
+        self.inner.ctx.lock_blocks().len()
     }
 
     /// Set the per-operation deadline for routed calls (default 30s).

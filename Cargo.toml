@@ -103,6 +103,6 @@ dirs = "6.0"
 
 # Featherweight runtime. default-features = false so the core runtime can
 # stay minimal; the component adapter re-enables the defaults it needs.
-wasmtime = { version = "40", default-features = false }
+wasmtime = { version = "=48.0.1", default-features = false }
 uuid = { version = "1.11", features = ["v4"] }
 tracing = "0.1"

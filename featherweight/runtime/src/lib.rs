@@ -6,8 +6,8 @@
 //! whose entire world is StructFS reads and writes.
 //!
 //! - **Blocks** run native Rust ([`NativeBlock`]) or core-binding wasm
-//!   ([`CoreWasmBlock`]) on blocking threads, against a per-block
-//!   [`Namespace`]. Other artifact kinds (e.g. WIT components via the
+//!   ([`CoreWasmBlock`]) against a per-block [`Namespace`]. Core Wasm
+//!   runs on async tasks; native blocks use blocking threads. Other artifact kinds (e.g. WIT components via the
 //!   `featherweight-component` adapter) register through
 //!   [`Runtime::register_loader`].
 //! - **`/iso/`** ([`IsoSurface`]) is the syscall surface: identity,
@@ -51,6 +51,12 @@
 //! # }
 //! ```
 
+pub mod execution;
+pub use execution::ExecutionScope;
+pub mod admission;
+pub use admission::{
+    CallBudget, CallLimits, CallUsage, SessionBudget, SessionLimits, SessionPermit, SessionUsage,
+};
 pub mod assembly;
 pub mod block;
 pub mod core_wasm;
@@ -72,12 +78,14 @@ pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
 pub use block::{
     BlockCell, BlockEvent, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode,
 };
-pub use core_wasm::{CoreWasmBlock, NoOpStore};
+pub use core_wasm::{CoreWasmBlock, CoreWasmEngine, CoreWasmSession, NoOpStore};
 pub use determinism::Determinism;
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use metering::Metering;
-pub use namespace::{host_store, GrantStore, HostStore, Namespace, Target, WiringTable};
+pub use namespace::{
+    async_host_store, host_store, GrantStore, HostStore, Namespace, Target, WiringTable,
+};
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
 pub use runtime::{ArtifactLoader, AssemblyInstance, Runtime, StdioProvider, WasmBlockDriver};
 pub use session::{SessionEntry, SessionLog};

@@ -179,6 +179,33 @@ impl BlockEvent {
     }
 }
 
+/// Owns queue/correlation cleanup when a caller finishes, times out, or drops.
+pub(crate) struct PendingCall {
+    cell: std::sync::Arc<BlockCell>,
+    token: u64,
+    receiver: oneshot::Receiver<Value>,
+    _charge: crate::admission::CallCharge,
+}
+impl std::future::Future for PendingCall {
+    type Output = Result<Value, oneshot::error::RecvError>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.receiver).poll(cx)
+    }
+}
+impl Drop for PendingCall {
+    fn drop(&mut self) {
+        let mut cell = self.cell.lock();
+        cell.responses.remove(&self.token);
+        cell.callers.remove(&self.token);
+        cell.queue.retain(
+            |event| !matches!(event, BlockEvent::Request(request) if request.token == self.token),
+        );
+    }
+}
+
 struct ShutdownFlags {
     requested: bool,
     mode: Option<ShutdownMode>,
@@ -204,6 +231,8 @@ pub struct BlockCell {
     pub name: String,
     /// The block's runtime-assigned identity.
     pub id: BlockId,
+    /// Host-only admission identity; transcript IDs may repeat across runtimes.
+    pub(crate) admission_id: BlockId,
     /// Failure policy from the assembly definition.
     pub failure: FailurePolicy,
     /// Cancelled on immediate shutdown: fails the block's parked reads.
@@ -226,6 +255,7 @@ impl BlockCell {
         Self {
             name: name.into(),
             id: BlockId::new(),
+            admission_id: BlockId::new(),
             failure,
             cancel: CancelToken::new(),
             state: Mutex::new(CellState {
@@ -275,6 +305,7 @@ impl BlockCell {
         Self {
             name: name.into(),
             id: BlockId::named(key),
+            admission_id: BlockId::new(),
             failure,
             cancel: CancelToken::new(),
             state: Mutex::new(CellState {
@@ -367,10 +398,22 @@ impl BlockCell {
     /// The caller awaits the receiver; a dropped receiver (block reached a
     /// terminal state) means the store is unavailable.
     pub fn enqueue(&self, op: &'static str, path: Path, data: Value) -> oneshot::Receiver<Value> {
+        self.enqueue_inner(op, path, data).1
+    }
+
+    fn enqueue_inner(
+        &self,
+        op: &'static str,
+        path: Path,
+        data: Value,
+    ) -> (u64, oneshot::Receiver<Value>) {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
             let mut cell = self.lock();
+            if cell.state.is_terminal() || cell.shutdown.requested {
+                return (token, rx);
+            }
             cell.responses.insert(token, tx);
             if self.sim.is_some() {
                 // Remember who parks on this token, so the response can
@@ -393,7 +436,29 @@ impl BlockCell {
         if let Some((key, turnstile)) = &self.sim {
             turnstile.wake_mailbox(key);
         }
-        rx
+        (token, rx)
+    }
+
+    pub(crate) fn enqueue_owned(
+        self: &std::sync::Arc<Self>,
+        op: &'static str,
+        path: Path,
+        data: Value,
+        charge: crate::admission::CallCharge,
+    ) -> PendingCall {
+        let (token, receiver) = self.enqueue_inner(op, path, data);
+        PendingCall {
+            cell: self.clone(),
+            token,
+            receiver,
+            _charge: charge,
+        }
+    }
+
+    /// Outstanding response identities and queued events, for overload diagnostics.
+    pub fn pending_counts(&self) -> (usize, usize) {
+        let cell = self.lock();
+        (cell.responses.len(), cell.queue.len())
     }
 
     /// Deliver a signal to the block's mailbox.

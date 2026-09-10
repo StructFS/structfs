@@ -11,8 +11,6 @@
 //! componentization, no bindgen. The whole ABI surface is the `sdk`
 //! module; everything below `kv` is ordinary library code.
 
-use std::collections::HashMap;
-
 /// The core-binding SDK: the entire ABI surface for a Rust guest.
 pub mod sdk {
     /// The ret record (spec 11): `{ptr, len}`, little-endian u32s.
@@ -90,100 +88,105 @@ pub mod sdk {
     }
 }
 
-const MANIFEST: &str = r#"{"name":"wasm-kv","version":"0.3.0","serialization":"application/json","paths":{"/{key}":{"read":"Get a stored value","write":"Store a value"}}}"#;
+#[cfg(feature = "reference-guest")]
+mod reference {
+    use super::sdk;
+    use std::collections::HashMap;
+    const MANIFEST: &str = r#"{"name":"wasm-kv","version":"0.3.0","serialization":"application/json","paths":{"/{key}":{"read":"Get a stored value","write":"Store a value"}}}"#;
 
-/// Guest export: the manifest, pre-wiring (spec 01).
-///
-/// # Safety
-///
-/// `ret_ptr` must point to a valid, writable ret record; the host
-/// guarantees this per the binding contract (spec 11).
-#[no_mangle]
-pub unsafe extern "C" fn manifest(ret_ptr: *mut sdk::Ret) -> i32 {
-    (*ret_ptr).ptr = MANIFEST.as_ptr() as u32;
-    (*ret_ptr).len = MANIFEST.len() as u32;
-    0
-}
-
-fn read_json(path: &str) -> Result<Option<serde_json::Value>, String> {
-    match sdk::structfs_read(path)? {
-        Some(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| format!("decode {path}: {e}")),
-        None => Ok(None),
+    /// Guest export: the manifest, pre-wiring (spec 01).
+    ///
+    /// # Safety
+    ///
+    /// `ret_ptr` must point to a valid, writable ret record; the host
+    /// guarantees this per the binding contract (spec 11).
+    #[no_mangle]
+    pub unsafe extern "C" fn manifest(ret_ptr: *mut sdk::Ret) -> i32 {
+        (*ret_ptr).ptr = MANIFEST.as_ptr() as u32;
+        (*ret_ptr).len = MANIFEST.len() as u32;
+        0
     }
-}
 
-fn write_json(path: &str, value: &serde_json::Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value).map_err(|e| format!("encode {path}: {e}"))?;
-    sdk::structfs_write(path, &bytes)?;
-    Ok(())
-}
+    fn read_json(path: &str) -> Result<Option<serde_json::Value>, String> {
+        match sdk::structfs_read(path)? {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| format!("decode {path}: {e}")),
+            None => Ok(None),
+        }
+    }
 
-/// The block's main: a kv store served over the server protocol.
-fn kv_main() -> Result<(), String> {
-    write_json(
-        "iso/self/interface",
-        &serde_json::json!({"name": "wasm-kv", "paths": {"/{key}": {"read": true, "write": true}}}),
-    )?;
+    fn write_json(path: &str, value: &serde_json::Value) -> Result<(), String> {
+        let bytes = serde_json::to_vec(value).map_err(|e| format!("encode {path}: {e}"))?;
+        sdk::structfs_write(path, &bytes)?;
+        Ok(())
+    }
 
-    let mut store: HashMap<String, serde_json::Value> = HashMap::new();
+    /// The block's main: a kv store served over the server protocol.
+    fn kv_main() -> Result<(), String> {
+        write_json(
+            "iso/self/interface",
+            &serde_json::json!({"name": "wasm-kv", "paths": {"/{key}": {"read": true, "write": true}}}),
+        )?;
 
-    // Blocking mailbox read: parks until an event; `null` unblocks on
-    // shutdown.
-    while let Some(request) = read_json("iso/server/requests")? {
-        if request.is_null() {
-            break;
+        let mut store: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Blocking mailbox read: parks until an event; `null` unblocks on
+        // shutdown.
+        while let Some(request) = read_json("iso/server/requests")? {
+            if request.is_null() {
+                break;
+            }
+
+            let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            let path = request.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(respond_to) = request.get("respond_to").and_then(|v| v.as_str()) else {
+                continue; // signals and timers carry no respond_to
+            };
+
+            let response = match op {
+                "read" => {
+                    let value = store.get(path).cloned().unwrap_or(serde_json::Value::Null);
+                    serde_json::json!({"result": "ok", "value": value})
+                }
+                "write" => {
+                    let data = request
+                        .get("data")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    if data.is_null() {
+                        store.remove(path);
+                    } else {
+                        store.insert(path.to_string(), data);
+                    }
+                    serde_json::json!({"result": "ok", "path": path})
+                }
+                other => serde_json::json!({
+                    "result": "error",
+                    "error": {
+                        "type": "store_error",
+                        "message": format!("unknown op: {other}"),
+                        "retryable": false
+                    }
+                }),
+            };
+            write_json(respond_to, &response)?;
         }
 
-        let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
-        let path = request.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(respond_to) = request.get("respond_to").and_then(|v| v.as_str()) else {
-            continue; // signals and timers carry no respond_to
-        };
-
-        let response = match op {
-            "read" => {
-                let value = store.get(path).cloned().unwrap_or(serde_json::Value::Null);
-                serde_json::json!({"result": "ok", "value": value})
-            }
-            "write" => {
-                let data = request
-                    .get("data")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                if data.is_null() {
-                    store.remove(path);
-                } else {
-                    store.insert(path.to_string(), data);
-                }
-                serde_json::json!({"result": "ok", "path": path})
-            }
-            other => serde_json::json!({
-                "result": "error",
-                "error": {
-                    "type": "store_error",
-                    "message": format!("unknown op: {other}"),
-                    "retryable": false
-                }
-            }),
-        };
-        write_json(respond_to, &response)?;
+        write_json("iso/shutdown/complete", &serde_json::json!({}))?;
+        Ok(())
     }
 
-    write_json("iso/shutdown/complete", &serde_json::json!({}))?;
-    Ok(())
-}
-
-/// Guest export: the block's main. Nonzero is the exit code.
-#[no_mangle]
-pub extern "C" fn run() -> i32 {
-    match kv_main() {
-        Ok(()) => 0,
-        Err(message) => {
-            // Best-effort diagnostic through the store before exiting.
-            let _ = write_json("iso/log/error", &serde_json::json!({ "msg": message }));
-            1
+    /// Guest export: the block's main. Nonzero is the exit code.
+    #[no_mangle]
+    pub extern "C" fn run() -> i32 {
+        match kv_main() {
+            Ok(()) => 0,
+            Err(message) => {
+                // Best-effort diagnostic through the store before exiting.
+                let _ = write_json("iso/log/error", &serde_json::json!({ "msg": message }));
+                1
+            }
         }
     }
 }

@@ -9,6 +9,10 @@ readme = "README.md"
 keywords = ["isotope", "wasm", "guest", "sdk", "store"]
 categories = ["wasm", "api-bindings"]
 
+[features]
+default = ["reference-guest"]
+reference-guest = []
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

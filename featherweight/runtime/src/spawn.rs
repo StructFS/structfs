@@ -32,7 +32,7 @@ use structfs_core_store::{DetachedFuture, Error, Path, Record, Value};
 use structfs_handles::{CancelToken, HandleCx, HandleProtocol, HandleStore};
 
 use crate::assembly::AssemblyDef;
-use crate::namespace::{host_store, GrantStore, HostStore, WiringTable};
+use crate::namespace::{GrantStore, HostStore, WiringTable};
 use crate::runtime::{AssemblyInstance, RuntimeInner};
 
 /// A spawn/management store: `HandleStore` over [`SpawnProtocol`].
@@ -108,7 +108,11 @@ impl SpawnProtocol {
             };
             imports.insert(
                 name,
-                host_store(GrantStore::new(runtime.ctx(), target.clone(), rel)),
+                HostStore::Grant(Arc::new(GrantStore::new(
+                    runtime.ctx(),
+                    target.clone(),
+                    rel,
+                ))),
             );
         }
         Ok(imports)

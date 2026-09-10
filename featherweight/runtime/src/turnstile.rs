@@ -52,7 +52,44 @@ pub(crate) fn set_current_block(key: Option<String>) {
 }
 
 pub(crate) fn current_block() -> Option<String> {
-    CURRENT_BLOCK.with(|current| current.borrow().clone())
+    ASYNC_BLOCK
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+        .or_else(|| CURRENT_BLOCK.with(|current| current.borrow().clone()))
+}
+
+tokio::task_local! {
+    static ASYNC_BLOCK: Option<String>;
+}
+
+/// Identity follows a future across worker threads, never ambient thread state.
+pub(crate) async fn scope_block<F: std::future::Future>(
+    key: Option<String>,
+    future: F,
+) -> F::Output {
+    ASYNC_BLOCK.scope(key, future).await
+}
+
+/// Explicit identity transfer at the synchronous adapter boundary.
+pub(crate) async fn blocking<F, T>(work: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let key = current_block();
+    tokio::task::spawn_blocking(move || {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                set_current_block(None);
+            }
+        }
+        set_current_block(key);
+        let _clear = Clear;
+        work()
+    })
+    .await
 }
 
 struct TurnState {

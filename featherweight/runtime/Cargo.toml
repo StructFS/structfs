@@ -15,6 +15,7 @@ structfs-ll-store = { workspace = true }
 structfs-serde-store = { workspace = true }
 structfs-handles = { workspace = true }
 bytes = "1.9"
+async-trait = { workspace = true }
 
 # Minimal engine: the core runtime speaks only the core-wasm binding
 # (spec 11). No component-model — the WIT adapter (featherweight-component)
@@ -24,6 +25,7 @@ wasmtime = { workspace = true, default-features = false, features = [
     "runtime",
     "parallel-compilation",
     "wat",
+    "async",
 ] }
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 serde = { workspace = true }

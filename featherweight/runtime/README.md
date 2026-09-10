@@ -35,6 +35,88 @@ teaches the runtime to run WIT component-model artifacts as blocks.
 WASI is a shim above the Block ABI (`featherweight-wasi`), never a
 runtime dependency.
 
+## Execution and host providers
+
+Core Wasm runs through Wasmtime async fibers. Mailbox waits and detached
+provider calls suspend the guest without retaining a blocking worker. Fuel
+yields keep the executor responsive even without a configured fuel cap;
+epoch interruption still controls cancellation of spinning guest code.
+Native blocks and synchronous binding adapters use the blocking pool.
+
+Use `async_host_store` for `DetachedStore` providers: their methods must
+return promptly, and their futures perform the waiting after the provider
+lock is released. `host_store` wraps synchronous providers, dispatching
+operations to the blocking pool. The synchronous `Namespace` and `HostStore`
+interfaces must be called from blocking threads when they bridge async work.
+Providers remain responsible for their I/O cancellation and deadlines.
+
+Core-binding transfers validate memory ranges before copying and reject
+individual payloads larger than 64 MiB. This is a host transfer limit, not
+a limit on guest memory or provider-side encoding allocations.
+
+## Prepared artifacts and fresh sessions
+
+`CoreWasmEngine::new(compile_parallelism)` creates a shared engine with one
+10 ms epoch ticker, bounded compilation concurrency, up to 10,000 active
+guest stores, and a 64 MiB linear-memory limit per store. `with_limits`
+configures the store count and memory limit. Prepared stores also allow one
+memory, one table (up to 100,000 elements), and one instance. These are host
+policy defaults, not new binding requirements. Memory limits also apply to
+manifest inspection. Hosts must budget aggregate memory separately.
+
+Call `engine.prepare(bytes).await` once for a verified artifact and retain the
+returned `CoreWasmBlock` in an `Arc`. Preparation compiles once and retrieves a
+fuel-bounded JSON manifest from the same module. Register that block using
+`runtime.register_core_artifact(identifier, block)`; assembly definitions can
+refer to the identifier without filesystem lookup. Each execution gets fresh
+memory, globals, fuel and providers. Prepared artifacts require async execution;
+custom epoch intervals other than 10 ms are rejected. Disabling epochs remains
+supported. Keep the engine's Tokio executor alive through all its sessions.
+
+A host can share prepared artifacts across separate `Runtime` instances to
+isolate request policy. `AssemblyInstance::shutdown` uses one grace deadline
+for its assembly tree, escalates, joins driver tasks, and removes stopped
+registrations. Noncooperative native work remains registered; inspect
+`Runtime::registered_blocks()` rather than assuming it was released. Explicit
+shutdown is required. Dropping a request handle alone does not close a session.
+Cancellation interrupts async guest execution, including parked imports and
+waiting for a store slot. Providers must make dropping their futures safe;
+already-dispatched synchronous work cannot be forcibly cancelled this way.
+
+For bounded embedding, reserve the entire assembly with
+`engine.reserve_session(block_count)` and bind each prepared artifact with
+`artifact.in_session(reservation.clone())`. Include lazy dependencies in the
+count. Admission fails before execution if the whole reservation is unavailable.
+Dynamic spawning needs additional admission.
+
+`SessionBudget` reserves request count, guest slots and worst-case guest
+linear memory, with a per-tenant ceiling. Hold its permit until teardown.
+`CallBudget` limits outstanding routed calls and logical payload bytes globally
+and per block; overload fails immediately. Dropping or timing out a routed call
+removes its queue entry, response identity and budget charge. Separate host-only
+IDs prevent quota collisions across runtimes sharing transcript identities.
+
+`Runtime::with_execution_scope` applies one absolute deadline and cancellation
+token across a fresh request runtime's blocks, routed calls and providers. An
+HTTP owner should cancel that scope on disconnect and retain a cleanup task
+until shutdown completes. The Appiware native listener demonstrates this pattern.
+
+These APIs do not yet bound all timer/signal queues, logs, response retention,
+compiler allocations or HTTP connection state. Admission limits are ceilings,
+not a fair-scheduling guarantee. Artifact cache eviction and durable provider
+effects remain host responsibilities.
+
+The [capacity harness](tests/capacity.rs) exercises two rounds of fresh sessions
+with simultaneous provider waits and checks response correctness, memory
+isolation, registration cleanup and provider release. It uses 128 sessions in
+normal tests. Run the larger experiment with:
+
+```sh
+FW_CAPACITY=10000 cargo test -p featherweight-runtime --test capacity --locked --offline -- --nocapture
+```
+
+See [recorded measurements](../../docs/featherweight-migration-progress.md).
+
 ## Example
 
 ```rust,no_run
@@ -64,6 +146,7 @@ assert_eq!(
 This is the reference strawman for the Isotope spec, not a production
 OS: JSON/CBOR/FlexBuffers transports are supported at the block
 boundary, but there is no hash verification, no registries, no restart
-policy, and no deadlock detection. The
+policy. Seeded simulation detects internal dependency deadlocks; it does
+not bound arbitrary host I/O. The
 [spec](https://github.com/StructFS/structfs/tree/main/isotope/spec) is
 the contract; this crate is the working model of it.
