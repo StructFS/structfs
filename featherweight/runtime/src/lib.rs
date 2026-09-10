@@ -55,7 +55,8 @@ pub mod execution;
 pub use execution::ExecutionScope;
 pub mod admission;
 pub use admission::{
-    CallBudget, CallLimits, CallUsage, SessionBudget, SessionLimits, SessionPermit, SessionUsage,
+    CallBudget, CallLimits, CallMetrics, CallUsage, SessionBudget, SessionLimits, SessionPermit,
+    SessionUsage,
 };
 pub mod assembly;
 pub mod block;

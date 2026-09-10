@@ -1021,8 +1021,10 @@ impl Runtime {
         self
     }
 
-    /// Share an immutable call budget across request runtimes. Configure
+    /// Share a live call budget across request runtimes. Configure
     /// before starting sessions; saturated calls fail immediately as Overloaded.
+    /// For per-request limits, pass a child of the shared tenant/global budget.
+    /// Update limits on the retained budget handle rather than replacing it.
     pub fn with_call_budget(self, budget: Arc<crate::admission::CallBudget>) -> Self {
         *self
             .inner

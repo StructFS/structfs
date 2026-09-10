@@ -132,3 +132,12 @@ session. File-loaded unprepared guests retain their existing compilation path.
 The Appiware P0 fixes, durable commit guarantees, Python/snapshot port, browser
 convergence, retained-data import, self-hosting and cutover gates remain
 outstanding as specified in the migration plan.
+
+### Live admission policy (September 10)
+
+Call and session limits can now change in place while preserving reservations.
+Call budgets support global/tenant/request hierarchies, cumulative admission
+metrics and peak occupancy. Lowered limits grandfather existing work and reject
+new work until it fits; cancellation releases every ancestor charge. Tests cover
+concurrent admission, policy changes under load and cancellation cleanup.
+Fuel consumption and actual guest-memory metering remain outstanding.

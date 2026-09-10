@@ -8,7 +8,7 @@ use std::{
 use structfs_core_store::{Error, Path, Value};
 
 /// Limits on outstanding calls, shared across runtimes when desired.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallLimits {
     pub calls: usize,
     pub bytes: usize,
@@ -30,23 +30,61 @@ pub struct CallUsage {
     pub calls: usize,
     pub bytes: usize,
 }
-#[derive(Default)]
+/// Cumulative admission measurements. Bytes are logical payload weight, not RSS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CallMetrics {
+    pub admitted: u64,
+    pub rejected: u64,
+    pub admitted_bytes: u64,
+    pub peak_calls: usize,
+    pub peak_bytes: usize,
+}
 struct Usage {
+    limits: CallLimits,
+    metrics: CallMetrics,
     total: CallUsage,
     blocks: HashMap<BlockId, CallUsage>,
 }
 /// A shared, fail-fast budget. Each block has its own ceiling in addition
 /// to the global limit; this bounds monopolization, not scheduling latency.
 pub struct CallBudget {
-    limits: CallLimits,
+    parent: Option<Arc<CallBudget>>,
     usage: Mutex<Usage>,
 }
 impl CallBudget {
     pub fn new(limits: CallLimits) -> Arc<Self> {
+        Self::build(limits, None)
+    }
+    fn build(limits: CallLimits, parent: Option<Arc<Self>>) -> Arc<Self> {
         Arc::new(Self {
-            limits,
-            usage: Mutex::new(Usage::default()),
+            parent,
+            usage: Mutex::new(Usage {
+                limits,
+                metrics: CallMetrics::default(),
+                total: CallUsage::default(),
+                blocks: HashMap::new(),
+            }),
         })
+    }
+    /// Create a request or tenant budget that also charges this budget and
+    /// every ancestor. Retain the returned handle to update or inspect it.
+    pub fn child(self: &Arc<Self>, limits: CallLimits) -> Arc<Self> {
+        Self::build(limits, Some(self.clone()))
+    }
+    /// Atomically replace admission policy without forgetting live charges.
+    /// Existing calls are grandfathered; new calls must fit the new limits.
+    pub fn set_limits(&self, limits: CallLimits) {
+        self.usage.lock().unwrap_or_else(|e| e.into_inner()).limits = limits;
+    }
+    pub fn limits(&self) -> CallLimits {
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .limits
+            .clone()
+    }
+    pub fn metrics(&self) -> CallMetrics {
+        self.usage.lock().unwrap_or_else(|e| e.into_inner()).metrics
     }
     pub fn usage(&self) -> CallUsage {
         self.usage.lock().unwrap_or_else(|e| e.into_inner()).total
@@ -57,7 +95,8 @@ impl CallBudget {
         path: &Path,
         data: &Value,
     ) -> Result<CallCharge, Error> {
-        let limit = self.limits.bytes.min(self.limits.bytes_per_block);
+        let limits = self.limits();
+        let limit = limits.bytes.min(limits.bytes_per_block);
         // Logical retained payload weight: Value nodes, keys, string/byte
         // contents, and path text. This is not an allocator/RSS measurement.
         let mut bytes = path.to_string().len().saturating_add(128);
@@ -77,20 +116,43 @@ impl CallBudget {
                 _ => {}
             }
             if bytes > limit {
+                let mut usage = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+                usage.metrics.rejected = usage.metrics.rejected.saturating_add(1);
                 return Err(Error::overloaded("request exceeds call byte budget"));
             }
         }
+        self.acquire_bytes(block, bytes)
+    }
+    fn acquire_bytes(self: &Arc<Self>, block: &BlockId, bytes: usize) -> Result<CallCharge, Error> {
         let mut usage = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        let limits = &usage.limits;
         let local = usage.blocks.get(block).copied().unwrap_or_default();
-        if usage.total.calls >= self.limits.calls
-            || local.calls >= self.limits.calls_per_block
-            || bytes > self.limits.bytes.saturating_sub(usage.total.bytes)
-            || bytes > self.limits.bytes_per_block.saturating_sub(local.bytes)
+        if usage.total.calls >= limits.calls
+            || local.calls >= limits.calls_per_block
+            || bytes > limits.bytes.saturating_sub(usage.total.bytes)
+            || bytes > limits.bytes_per_block.saturating_sub(local.bytes)
         {
+            usage.metrics.rejected = usage.metrics.rejected.saturating_add(1);
             return Err(Error::overloaded("outstanding call budget exhausted"));
         }
+        // All acquisition locks run from child to ancestor; the hierarchy is
+        // immutable and acyclic. A parent rejection leaves this child uncharged.
+        let parent = match &self.parent {
+            Some(parent) => match parent.acquire_bytes(block, bytes) {
+                Ok(charge) => Some(Box::new(charge)),
+                Err(error) => {
+                    usage.metrics.rejected = usage.metrics.rejected.saturating_add(1);
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
         usage.total.calls += 1;
         usage.total.bytes += bytes;
+        usage.metrics.admitted = usage.metrics.admitted.saturating_add(1);
+        usage.metrics.admitted_bytes = usage.metrics.admitted_bytes.saturating_add(bytes as u64);
+        usage.metrics.peak_calls = usage.metrics.peak_calls.max(usage.total.calls);
+        usage.metrics.peak_bytes = usage.metrics.peak_bytes.max(usage.total.bytes);
         let local = usage.blocks.entry(block.clone()).or_default();
         local.calls += 1;
         local.bytes += bytes;
@@ -98,6 +160,7 @@ impl CallBudget {
             budget: self.clone(),
             block: block.clone(),
             bytes,
+            _parent: parent,
         })
     }
 }
@@ -105,6 +168,7 @@ pub(crate) struct CallCharge {
     budget: Arc<CallBudget>,
     block: BlockId,
     bytes: usize,
+    _parent: Option<Box<CallCharge>>,
 }
 impl Drop for CallCharge {
     fn drop(&mut self) {
@@ -123,7 +187,7 @@ impl Drop for CallCharge {
 
 /// Admission for fresh HTTP/execution sessions. Reserve worst-case guest
 /// linear memory for the whole assembly, including lazy blocks, before start.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionLimits {
     pub sessions: usize,
     pub sessions_per_tenant: usize,
@@ -136,21 +200,35 @@ pub struct SessionUsage {
     pub guest_slots: usize,
     pub memory_bytes: usize,
 }
-#[derive(Default)]
 struct Sessions {
+    limits: SessionLimits,
     total: SessionUsage,
     tenants: HashMap<String, usize>,
 }
 pub struct SessionBudget {
-    limits: SessionLimits,
     state: Mutex<Sessions>,
 }
 impl SessionBudget {
     pub fn new(limits: SessionLimits) -> Arc<Self> {
         Arc::new(Self {
-            limits,
-            state: Mutex::new(Sessions::default()),
+            state: Mutex::new(Sessions {
+                limits,
+                total: SessionUsage::default(),
+                tenants: HashMap::new(),
+            }),
         })
+    }
+    /// Update policy atomically. Existing reservations remain charged and
+    /// valid; admissions resume once usage fits the updated ceilings.
+    pub fn set_limits(&self, limits: SessionLimits) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).limits = limits;
+    }
+    pub fn limits(&self) -> SessionLimits {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .limits
+            .clone()
     }
     pub fn usage(&self) -> SessionUsage {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).total
@@ -162,21 +240,14 @@ impl SessionBudget {
         memory_bytes: usize,
     ) -> Result<SessionPermit, Error> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let limits = &state.limits;
         let tenant_count = state.tenants.get(tenant).copied().unwrap_or(0);
         if guest_slots == 0
             || memory_bytes == 0
-            || state.total.sessions >= self.limits.sessions
-            || tenant_count >= self.limits.sessions_per_tenant
-            || guest_slots
-                > self
-                    .limits
-                    .guest_slots
-                    .saturating_sub(state.total.guest_slots)
-            || memory_bytes
-                > self
-                    .limits
-                    .memory_bytes
-                    .saturating_sub(state.total.memory_bytes)
+            || state.total.sessions >= limits.sessions
+            || tenant_count >= limits.sessions_per_tenant
+            || guest_slots > limits.guest_slots.saturating_sub(state.total.guest_slots)
+            || memory_bytes > limits.memory_bytes.saturating_sub(state.total.memory_bytes)
         {
             return Err(Error::overloaded("execution session budget exhausted"));
         }
@@ -217,6 +288,93 @@ impl Drop for SessionPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn call_limits(calls: usize) -> CallLimits {
+        CallLimits {
+            calls,
+            calls_per_block: calls,
+            ..CallLimits::default()
+        }
+    }
+
+    #[test]
+    fn request_hierarchy_retains_charges_across_policy_changes() {
+        let global = CallBudget::new(call_limits(2));
+        let tenant = global.child(call_limits(2));
+        let request = tenant.child(call_limits(1));
+        let peer = global.child(call_limits(2));
+        let block = BlockId::new();
+        let charge = request.acquire_bytes(&block, 100).unwrap();
+        assert!(request.acquire_bytes(&block, 100).is_err());
+        assert_eq!(global.usage().calls, 1);
+        request.set_limits(call_limits(2));
+        let second = request.acquire_bytes(&block, 100).unwrap();
+        assert!(peer.acquire_bytes(&BlockId::new(), 100).is_err());
+        assert_eq!(peer.usage(), CallUsage::default());
+        global.set_limits(call_limits(0));
+        assert_eq!(
+            global.usage(),
+            CallUsage {
+                calls: 2,
+                bytes: 200
+            }
+        );
+        drop(charge);
+        assert!(peer.acquire_bytes(&block, 100).is_err());
+        drop(second);
+        for budget in [&global, &tenant, &request] {
+            assert_eq!(budget.usage(), CallUsage::default());
+            assert_eq!(budget.metrics().admitted, 2);
+            assert_eq!(budget.metrics().admitted_bytes, 200);
+            assert_eq!(budget.metrics().peak_calls, 2);
+        }
+        global.set_limits(call_limits(1));
+        assert!(peer.acquire_bytes(&block, 100).is_ok());
+        assert_eq!(global.usage(), CallUsage::default());
+    }
+
+    #[test]
+    fn concurrent_requests_cannot_exceed_shared_capacity() {
+        let global = CallBudget::new(call_limits(4));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let request = global.child(call_limits(4));
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let charge = request.acquire_bytes(&BlockId::new(), 100);
+                    barrier.wait();
+                    drop(charge);
+                });
+            }
+        });
+        assert_eq!(global.metrics().admitted, 4);
+        assert_eq!(global.metrics().rejected, 12);
+        assert_eq!(global.usage(), CallUsage::default());
+    }
+
+    #[test]
+    fn session_reload_preserves_live_reservations() {
+        let limits = SessionLimits {
+            sessions: 2,
+            sessions_per_tenant: 2,
+            guest_slots: 4,
+            memory_bytes: 4096,
+        };
+        let budget = SessionBudget::new(limits.clone());
+        let permit = budget.admit("tenant", 2, 2048).unwrap();
+        budget.set_limits(SessionLimits {
+            memory_bytes: 1,
+            ..limits.clone()
+        });
+        assert_eq!(budget.usage().memory_bytes, 2048);
+        assert!(budget.admit("peer", 1, 1).is_err());
+        drop(permit);
+        assert_eq!(budget.usage(), SessionUsage::default());
+        budget.set_limits(limits.clone());
+        assert_eq!(budget.limits(), limits);
+        assert!(budget.admit("peer", 4, 4096).is_ok());
+    }
+
     #[test]
     fn session_limits_preserve_peer_capacity_and_release_all_charges() {
         let budget = SessionBudget::new(SessionLimits {

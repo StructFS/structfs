@@ -96,6 +96,19 @@ and per block; overload fails immediately. Dropping or timing out a routed call
 removes its queue entry, response identity and budget charge. Separate host-only
 IDs prevent quota collisions across runtimes sharing transcript identities.
 
+Both budgets expose `set_limits`: updates retain live charges, grandfather
+existing work, and apply the new ceilings to subsequent admissions. Zero closes
+admission. Raising a limit permits new work immediately. Call budgets support
+`global.child(tenant_limits).child(request_limits)`; give the request child to
+`Runtime::with_call_budget` and retain its handle for live updates and inspection.
+Every accepted call charges all ancestors, and cancellation refunds them all.
+`usage()` reports current occupancy; `metrics()` reports cumulative admitted
+calls/logical bytes, rejected calls, and peak occupancy. Rejections are counted
+at each budget consulted, not at ancestors skipped by an earlier rejection.
+These are admission measurements, not CPU, fuel consumption, or process RSS.
+Fuel and execution deadlines remain configured before execution, and guest
+linear-memory ceilings remain engine settings.
+
 `Runtime::with_execution_scope` applies one absolute deadline and cancellation
 token across a fresh request runtime's blocks, routed calls and providers. An
 HTTP owner should cancel that scope on disconnect and retain a cleanup task

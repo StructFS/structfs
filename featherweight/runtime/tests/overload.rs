@@ -32,7 +32,8 @@ async fn overloaded_block_does_not_starve_peers_and_dropped_calls_release_budget
         bytes: 4096,
         bytes_per_block: 2048,
     });
-    let mut runtime = Runtime::new().with_call_budget(budget.clone());
+    let request_budget = budget.child(budget.limits());
+    let mut runtime = Runtime::new().with_call_budget(request_budget.clone());
     runtime.register_builtin("deaf", Arc::new(|| Box::new(Deaf) as Box<dyn NativeBlock>));
     let def = AssemblyDef::from_str(
         r#"{"assembly":"overload","blocks":{"a":"builtin:deaf","b":"builtin:deaf"},"public":"a"}"#,
@@ -57,6 +58,15 @@ async fn overloaded_block_does_not_starve_peers_and_dropped_calls_release_budget
     let peer_call = tokio::spawn(async move { peer.read_block("b", path!("waiting")).await });
     queued(assembly.cell("b").unwrap(), 1).await;
     assert_eq!(budget.usage().calls, 3);
+    assert_eq!(request_budget.usage().calls, 3);
+    budget.set_limits(CallLimits {
+        calls: 0,
+        ..budget.limits()
+    });
+    assert!(matches!(
+        assembly.read(path!("reload")).await,
+        Err(Error::Overloaded { .. })
+    ));
     for call in callers {
         call.abort();
         assert!(call.await.unwrap_err().is_cancelled());
@@ -65,6 +75,8 @@ async fn overloaded_block_does_not_starve_peers_and_dropped_calls_release_budget
     let _ = peer_call.await;
     assert_eq!(budget.usage().calls, 0);
     assert_eq!(budget.usage().bytes, 0);
+    assert_eq!(request_budget.usage().calls, 0);
+    assert_eq!(request_budget.metrics().admitted, 3);
     assert_eq!(assembly.public_cell().pending_counts(), (0, 0));
     assert_eq!(assembly.cell("b").unwrap().pending_counts(), (0, 0));
     assert!(matches!(
