@@ -293,15 +293,8 @@ else
         fail "docs failed to build"
     fi
 
-    for i in "${!PUBLISH_NAMES[@]}"; do
-        crate="${PUBLISH_NAMES[$i]}"
-        printf "  package %s: " "$crate"
-        if cargo package -p "$crate" --quiet 2>&1; then
-            echo -e "${GREEN}ok${NC}"
-        else
-            fail "cargo package failed for ${crate}"
-        fi
-    done
+    info "Checking Featherweight archives with an external consumer"
+    "$SCRIPT_DIR/check-featherweight-release.sh"
 fi
 
 echo ""

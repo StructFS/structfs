@@ -406,7 +406,7 @@ async fn a_replay_that_writes_different_data_diverges() {
 // there replays here — the tests below are the "here" half.
 
 fn fixtures_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/browser/test/fixtures")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 /// A provider that serves one committed JSONL fixture, whatever the key.

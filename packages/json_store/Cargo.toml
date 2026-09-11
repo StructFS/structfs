@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "JSON-based store implementations for StructFS"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "json", "in-memory", "structured-data"]
 categories = ["data-structures"]
 

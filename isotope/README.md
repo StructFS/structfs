@@ -27,6 +27,7 @@ The normative specification of Isotope concepts:
 - [06-protocol.md](spec/06-protocol.md) — Store operation semantics
 - [07-server-protocol.md](spec/07-server-protocol.md) — How Blocks serve requests
 - [08-assembly-management.md](spec/08-assembly-management.md) — Deploying and updating Assemblies
+- [13-embedding.md](spec/13-embedding.md) — Embedding, resource accounting, and capability service profiles
 
 ### Rationale (`rationale/`)
 
