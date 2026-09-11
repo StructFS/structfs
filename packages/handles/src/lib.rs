@@ -20,6 +20,8 @@
 //!   blocking thread.
 //! - [`conformance`]: certify any handle store against the protocol rules.
 
+mod duplex;
+pub use duplex::{DuplexStream, StreamReadiness, StreamStore};
 mod byte_stream;
 mod gate;
 mod handle_store;
