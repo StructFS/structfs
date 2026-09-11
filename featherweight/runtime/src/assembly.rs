@@ -212,6 +212,14 @@ impl AssemblyDef {
             )));
         }
 
+        if map
+            .get("wiring")
+            .is_some_and(|value| !matches!(value, Value::Array(_)))
+        {
+            return Err(RuntimeError::assembly(
+                "wiring must be an array of declarations",
+            ));
+        }
         let mut wiring = Vec::new();
         if let Some(Value::Array(lines)) = map.get("wiring") {
             for line in lines {

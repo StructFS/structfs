@@ -163,3 +163,45 @@ policy. Seeded simulation detects internal dependency deadlocks; it does
 not bound arbitrary host I/O. The
 [spec](https://github.com/StructFS/structfs/tree/main/isotope/spec) is
 the contract; this crate is the working model of it.
+
+## External embedding (next release)
+
+Prepare code in the embedding host, then call `Runtime::register_artifact` with
+an `Arc<dyn WasmBlockDriver>`. Implement `execute(DriverContext)` for asynchronous
+execution; the context supplies namespace, cancellation, policy and instance
+metering. The built-in core driver uses the same entry point. Existing loader
+and synchronous driver adapters remain supported.
+
+For persistent services, keep one assembly and create an `assembly.request(...)`
+owner per client. Its deadline/cancellation and local call budget do not stop
+other clients. Server adapters can use `namespace.request_cancellation` to cancel
+request-owned provider waits. Cancellation cannot undo committed effects.
+Always call `shutdown` and inspect its `ShutdownReport` before refunding instance
+reservations. Driver panics become terminal failures; noncooperative native code
+is reported as remaining work.
+
+`cell.usage.snapshot()` reports Wasmtime fuel, current/peak linear-memory bytes,
+configured execution limits and optional adapter counters with explicit units.
+Core-Wasm samples at imports, epoch yields and exit; missing measurements are
+absent. Joined execution has zero current memory, while peaks and consumption
+remain available. These are not process RSS or request-attributed CPU measurements.
+`iso/execution/budget` exposes policy revisions and accounting read-only;
+`iso/capabilities` lists granted mount prefixes. Network, binary console and
+configuration providers should be wired outside `iso/`.
+
+Signals and registered timers share `cell.events`, a live budget defaulting to
+256 events and 1 MiB logical payload. Timer reservations last until cancellation
+or event consumption. `cell.replies` bounds retained response payloads until
+consumption; oversized responses become typed overload errors. `deliver_signal`/`deliver_timer` now return typed admission
+errors. Unowned raw mailbox enqueue is no longer a public embedding API; use
+assembly operations so cancellation cleans up correlations.
+
+`DriverCapabilities` and `DriverControl` let an adapter expose resumable execution
+or checkpoint controls without changing the core binding. The adapter owns safe
+points and provider-state validation; no universal snapshot support is implied.
+
+The independent consumer fixture lives in `tests/embedding` in the repository.
+`python3.12 scripts/check-featherweight-release.py` builds actual Cargo archives,
+runs that consumer and runtime/handle tests against the extracted packages, builds
+both guest SDK feature modes for wasm32, and checks documentation. It never
+publishes. See Isotope spec 13 for the detailed embedding and service contracts.

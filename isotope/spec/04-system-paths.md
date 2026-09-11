@@ -294,3 +294,10 @@ These are not part of the core specification but demonstrate extensibility.
 
 4. **Metrics emission**: Should `/iso/metrics/` be standardized for emitting
    metrics, or is that an extension?
+
+## Embedding profiles
+
+[Embedding and capability service profiles](13-embedding.md) specifies the new
+read-only execution budget and capability discovery paths, request cancellation,
+and the boundary between runtime services and assembly-granted providers. Existing
+paths remain supported; new network/configuration services belong in grants.

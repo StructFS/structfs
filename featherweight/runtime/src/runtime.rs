@@ -33,6 +33,30 @@ use structfs_handles::CancelToken;
 /// core-wasm binding (spec 11) — everything else registers through
 /// [`Runtime::register_loader`].
 pub trait WasmBlockDriver: Send + Sync + 'static {
+    /// Optional host-only control for a particular instance. The default
+    /// advertises no resumability or checkpoint support.
+    fn capabilities(&self) -> crate::DriverCapabilities {
+        Default::default()
+    }
+    fn control(&self, _id: &BlockId) -> Option<crate::DriverControl> {
+        None
+    }
+
+    /// Complete execution context. Legacy adapters inherit the blocking/async
+    /// bridge; new adapters override this method directly.
+    fn execute(
+        self: Arc<Self>,
+        context: crate::DriverContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
+        self.run_async(
+            context.id,
+            context.namespace,
+            context.format,
+            context.metering,
+            context.cancel,
+        )
+    }
+
     /// The block's JSON manifest (spec 01), retrieved pre-wiring.
     fn manifest(&self) -> Result<Vec<u8>>;
 
@@ -62,8 +86,14 @@ pub trait WasmBlockDriver: Send + Sync + 'static {
         namespace: Namespace,
         format: Format,
         metering: &Metering,
-        cancel: CancelToken,
-    ) -> Result<i32>;
+        _cancel: CancelToken,
+    ) -> Result<i32> {
+        let _ = (id, namespace, format, metering);
+        Err(RuntimeError::wasm(
+            "driver",
+            "synchronous execution is not supported",
+        ))
+    }
 }
 
 /// Recognizes and loads wasm artifacts for one binding of the Block ABI.
@@ -95,6 +125,25 @@ impl ArtifactLoader for CoreWasmLoader {
 struct CoreWasmDriver(Arc<CoreWasmBlock>);
 
 impl WasmBlockDriver for CoreWasmDriver {
+    fn execute(
+        self: Arc<Self>,
+        context: crate::DriverContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
+        Box::pin(async move {
+            self.0
+                .run_metered_async(
+                    context.id,
+                    context.namespace,
+                    MultiCodec::standard(),
+                    context.format,
+                    &context.metering,
+                    context.cancel,
+                    context.usage,
+                )
+                .await
+        })
+    }
+
     fn run_async(
         self: Arc<Self>,
         id: BlockId,
@@ -200,6 +249,13 @@ pub(crate) struct RtCtx {
 }
 
 impl RtCtx {
+    pub(crate) fn call_budget_snapshot(&self) -> Vec<crate::admission::CallBudgetSnapshot> {
+        self.call_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hierarchy()
+    }
+
     /// Run a future to completion from a blocking thread.
     pub(crate) fn block_on<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
         self.handle.block_on(fut)
@@ -478,6 +534,7 @@ impl RtCtx {
                     session,
                 );
 
+                let mut run_guard = RunGuard(block.clone(), true);
                 // Spec 05 ties Running to "begins reading requests", but an
                 // interactive or client-only block may never read them; the
                 // strawman marks Running when the driver's code starts.
@@ -507,15 +564,23 @@ impl RtCtx {
                             .unwrap_or_else(|e| e.into_inner())
                             .clone();
                         let cancel = block.cell.cancel.clone();
+                        let calls = ctx
+                            .call_budget
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
                         driver
                             .clone()
-                            .run_async(
-                                block.cell.id.clone(),
+                            .execute(crate::DriverContext {
+                                id: block.cell.id.clone(),
                                 namespace,
-                                format.clone(),
+                                format: format.clone(),
                                 metering,
                                 cancel,
-                            )
+                                execution: ctx.execution_scope(),
+                                calls,
+                                usage: block.cell.usage.clone(),
+                            })
                             .await
                             .map_err(|e| e.to_string())
                             .map(|code| {
@@ -532,6 +597,7 @@ impl RtCtx {
                     turnstile.exit(&sim_key);
                 }
                 finalize(&block, result);
+                run_guard.1 = false;
             }));
         if let Some(entry) = self.lock_blocks().get(&cell.id) {
             *entry.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
@@ -540,8 +606,18 @@ impl RtCtx {
     }
 }
 
+struct RunGuard(Arc<BlockRuntime>, bool);
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if self.1 {
+            finalize(&self.0, Err("driver task aborted or panicked".into()));
+        }
+    }
+}
+
 /// Record a finished driver run on the cell and apply the failure policy.
 fn finalize(block: &BlockRuntime, result: std::result::Result<(), String>) {
+    block.cell.usage.finish();
     match result {
         Ok(()) => block.cell.set_state(BlockState::Stopped),
         Err(message) => {
@@ -565,7 +641,20 @@ fn finalize(block: &BlockRuntime, result: std::result::Result<(), String>) {
 }
 
 /// A running (or runnable) assembly.
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownReport {
+    /// Registrations whose execution tasks have not been joined. Retain host
+    /// reservations until a subsequent shutdown reports an empty list.
+    pub remaining: Vec<BlockId>,
+}
+impl ShutdownReport {
+    pub fn complete(&self) -> bool {
+        self.remaining.is_empty()
+    }
+}
+
 pub struct AssemblyInstance {
+    shutdown_lock: tokio::sync::Mutex<()>,
     /// The assembly's name from its definition.
     pub name: String,
     ctx: Arc<RtCtx>,
@@ -585,7 +674,72 @@ impl std::fmt::Debug for AssemblyInstance {
     }
 }
 
+/// One client's operations on a persistent assembly. Dropping this owner
+/// cancels its pending calls, not the instance or other clients. This does not
+/// undo guest effects or attribute the guest's internal CPU to this request.
+pub struct AssemblyRequest {
+    assembly: Arc<AssemblyInstance>,
+    scope: crate::ExecutionScope,
+    budget: Arc<crate::CallBudget>,
+}
+impl AssemblyRequest {
+    pub fn cancel(&self) {
+        self.scope.cancel();
+    }
+    pub fn budget(&self) -> &Arc<crate::CallBudget> {
+        &self.budget
+    }
+    pub async fn read(&self, path: Path) -> std::result::Result<Option<Value>, Error> {
+        self.scope
+            .run(async {
+                let _charge =
+                    self.budget
+                        .acquire(&self.assembly.public.admission_id, &path, &Value::Null)?;
+                self.assembly.read(path).await
+            })
+            .await
+    }
+    pub async fn write(&self, path: Path, data: Value) -> std::result::Result<Path, Error> {
+        self.scope
+            .run(async {
+                let _charge =
+                    self.budget
+                        .acquire(&self.assembly.public.admission_id, &path, &data)?;
+                self.assembly.write(path, data).await
+            })
+            .await
+    }
+}
+impl Drop for AssemblyRequest {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 impl AssemblyInstance {
+    /// Start a request scope without changing the persistent instance's scope.
+    /// Runtime admission is charged separately, so this local budget has no
+    /// parent and cannot replace or bypass the runtime's shared budget.
+    pub fn request(
+        self: &Arc<Self>,
+        timeout: Duration,
+        limits: crate::CallLimits,
+    ) -> AssemblyRequest {
+        AssemblyRequest {
+            assembly: self.clone(),
+            scope: crate::ExecutionScope::new(timeout),
+            budget: crate::CallBudget::new(limits),
+        }
+    }
+    pub fn driver_control(&self, name: &str) -> Option<crate::DriverControl> {
+        let cell = self.cells.get(name)?;
+        let blocks = self.ctx.lock_blocks();
+        match &blocks.get(&cell.id)?.driver {
+            Driver::Wasm(driver, _) => driver.control(&cell.id),
+            Driver::Native(_) => None,
+        }
+    }
+
     /// The public block's cell — the assembly's identity from outside.
     pub fn public_cell(&self) -> &Arc<BlockCell> {
         &self.public
@@ -614,10 +768,7 @@ impl AssemblyInstance {
     /// Deliver a signal to a named block's mailbox.
     pub fn signal(&self, block: &str, name: impl Into<String>, data: Value) -> bool {
         match self.cells.get(block) {
-            Some(cell) => {
-                cell.deliver_signal(name, data);
-                true
-            }
+            Some(cell) => cell.deliver_signal(name, data).is_ok(),
             None => false,
         }
     }
@@ -673,7 +824,8 @@ impl AssemblyInstance {
     /// Shut the assembly down: graceful first, escalating to immediate
     /// for blocks that don't stop within `timeout`
     /// ([spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md)).
-    pub async fn shutdown(&self, timeout: Duration) {
+    pub async fn shutdown(&self, timeout: Duration) -> ShutdownReport {
+        let _shutdown = self.shutdown_lock.lock().await;
         let cells = self.all_cells();
         for cell in &cells {
             cell.request_shutdown(ShutdownMode::Graceful);
@@ -705,6 +857,14 @@ impl AssemblyInstance {
                     self.ctx.lock_blocks().remove(&cell.id);
                 }
             }
+        }
+        let blocks = self.ctx.lock_blocks();
+        ShutdownReport {
+            remaining: cells
+                .iter()
+                .filter(|cell| blocks.contains_key(&cell.id))
+                .map(|cell| cell.id.clone())
+                .collect(),
         }
     }
 }
@@ -931,6 +1091,7 @@ impl RuntimeInner {
         }
 
         let instance = Arc::new(AssemblyInstance {
+            shutdown_lock: tokio::sync::Mutex::new(()),
             name: def.name.clone(),
             ctx: self.ctx.clone(),
             cells,
@@ -1002,11 +1163,17 @@ impl Runtime {
     /// Register host-resolved core code under an assembly artifact identifier.
     /// Share a prepared block across fresh session runtimes with this method.
     pub fn register_core_artifact(&mut self, name: impl Into<String>, block: Arc<CoreWasmBlock>) {
+        self.register_artifact(name, Arc::new(CoreWasmDriver(block)));
+    }
+
+    /// Register an already-prepared artifact from any external adapter. The
+    /// host controls preparation concurrency, caching and artifact identity.
+    pub fn register_artifact(&mut self, name: impl Into<String>, driver: Arc<dyn WasmBlockDriver>) {
         self.inner
             .prepared
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(name.into(), Arc::new(CoreWasmDriver(block)));
+            .insert(name.into(), driver);
     }
 
     /// Apply one absolute deadline/cancellation scope to all blocks, routed

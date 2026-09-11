@@ -201,3 +201,6 @@ Key differences:
 
 3. **Namespace inspection**: Can a Block enumerate its own namespace structure,
    or only access paths it already knows about?
+
+`read iso/capabilities` lists the granted mount prefixes. It does not grant
+additional authority or enumerate provider contents. See [embedding profiles](13-embedding.md).

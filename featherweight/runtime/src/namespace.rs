@@ -284,6 +284,26 @@ impl Namespace {
         &self.cell
     }
 
+    /// Native/adapter cancellation token for a request served by this block.
+    /// Use it to cancel the request's provider waits without stopping the block.
+    pub fn request_cancellation(
+        &self,
+        response: &Path,
+    ) -> Result<structfs_handles::CancelToken, Error> {
+        let parts: Vec<_> = response.iter().collect();
+        match parts.as_slice() {
+            ["iso", "server", "responses", token] => {
+                let token = token
+                    .parse()
+                    .map_err(|_| Error::conflict("invalid response token"))?;
+                Ok(self.cell.request_cancellation(token))
+            }
+            _ => Err(Error::permission_denied(
+                "not a response path in this block",
+            )),
+        }
+    }
+
     fn root_listing(&self) -> Value {
         let mut map = std::collections::BTreeMap::new();
         map.insert("iso".to_string(), Value::from("Isotope system services"));
@@ -300,6 +320,30 @@ impl Namespace {
     async fn read_live(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         if from.is_empty() {
             return Ok(Some(Record::parsed(self.root_listing())));
+        }
+        if from == &structfs_core_store::path!("iso/capabilities") {
+            return Ok(Some(Record::parsed(Value::Array(
+                self.wiring
+                    .prefixes()
+                    .map(|path| Value::String(path.to_string()))
+                    .collect(),
+            ))));
+        }
+        if from == &structfs_core_store::path!("iso/execution/budget") {
+            let view = serde_json::json!({
+                "scope": "instance",
+                "calls": self.ctx.call_budget_snapshot(),
+                "events": self.cell.events.snapshot(),
+                "replies": self.cell.replies.snapshot(),
+                "execution": self.cell.usage.snapshot(),
+                "deadline_remaining_ms": self.ctx.execution_scope().map(|scope|
+                    scope.deadline().saturating_duration_since(tokio::time::Instant::now()).as_millis()),
+                "units": { "calls_bytes": "logical_payload_bytes", "linear_memory_bytes": "wasm_linear_memory_bytes",
+                    "wasm_fuel_consumed": "wasmtime_fuel" },
+            });
+            return Ok(Some(Record::parsed(structfs_serde_store::json_to_value(
+                view,
+            ))));
         }
         if &from[0] == "iso" {
             let rel = from.slice(1, from.len());

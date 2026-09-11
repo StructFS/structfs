@@ -1,0 +1,13 @@
+[package]
+name = "featherweight-external-embedding-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+featherweight-runtime = { version = "0.2.0", path = "../../featherweight/runtime" }
+structfs-core-store = { version = "0.2.0", path = "../../packages/core-store", features = ["async"] }
+structfs-handles = { version = "0.2.0", path = "../../packages/handles" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

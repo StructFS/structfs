@@ -57,6 +57,19 @@ struct CoreState<S, C> {
     codec: C,
     format: Format,
     limits: wasmtime::StoreLimits,
+    usage: Option<(crate::ExecutionMeter, u64)>,
+    memory: Option<wasmtime::Memory>,
+}
+
+fn sample_caller<S, C>(caller: &mut Caller<'_, CoreState<S, C>>) {
+    if let Some((meter, initial)) = caller.data().usage.clone() {
+        if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+            meter.sample_wasm(
+                initial.saturating_sub(caller.get_fuel().unwrap_or(initial)),
+                memory.data_size(&*caller),
+            );
+        }
+    }
 }
 
 /// Host transfer budget, independent of the guest's linear-memory size.
@@ -344,6 +357,8 @@ impl CoreWasmEngine {
                 codec: structfs_core_store::NoCodec,
                 format: Format::OCTET_STREAM,
                 limits: self.store_limits(),
+                usage: None,
+                memory: None,
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -550,6 +565,7 @@ impl CoreWasmBlock {
                 |mut caller: Caller<'_, CoreState<S, C>>,
                  (path_ptr, path_len, ret_ptr): (i32, i32, i32)| {
                     Box::new(async move {
+                        sample_caller(&mut caller);
                         let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
                         let path = match parse_path(&path_bytes) {
                             Ok(path) => path,
@@ -663,6 +679,41 @@ impl CoreWasmBlock {
         S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
         C: Codec + Send + Sync + 'static,
     {
+        self.run_metered_async(
+            _id,
+            root,
+            codec,
+            format,
+            metering,
+            cancel,
+            crate::ExecutionMeter::default(),
+        )
+        .await
+    }
+
+    /// Async execution with host-visible samples at imports, epoch yields and
+    /// termination. Fuel counts Wasmtime units, not emulated instructions.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_metered_async<S, C>(
+        &self,
+        _id: BlockId,
+        root: S,
+        codec: C,
+        format: Format,
+        metering: &Metering,
+        cancel: CancelToken,
+        usage: crate::ExecutionMeter,
+    ) -> Result<i32>
+    where
+        S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
+        C: Codec + Send + Sync + 'static,
+    {
+        usage.configure_wasm(
+            metering.fuel,
+            self.prepared
+                .as_ref()
+                .map(|(engine, _, _)| engine.memory_limit),
+        );
         let module = if let Some((_, module, _)) = &self.prepared {
             if metering
                 .epoch_interval
@@ -712,6 +763,8 @@ impl CoreWasmBlock {
                 store: root,
                 codec,
                 format,
+                usage: Some((usage.clone(), metering.fuel.unwrap_or(u64::MAX))),
+                memory: None,
                 limits: self
                     .prepared
                     .as_ref()
@@ -730,7 +783,15 @@ impl CoreWasmBlock {
         metering.arm_store(&mut store, cancel.clone())?;
         if metering.epoch_interval.is_some() {
             let epoch_cancel = cancel.clone();
-            store.epoch_deadline_callback(move |_| {
+            store.epoch_deadline_callback(move |context| {
+                if let Some((meter, initial)) = &context.data().usage {
+                    if let Some(memory) = context.data().memory {
+                        meter.sample_wasm(
+                            initial.saturating_sub(context.get_fuel().unwrap_or(*initial)),
+                            memory.data_size(&context),
+                        );
+                    }
+                }
                 if epoch_cancel.is_cancelled() {
                     Err(wasmtime::Error::msg(
                         "guest interrupted: immediate shutdown",
@@ -749,12 +810,13 @@ impl CoreWasmBlock {
         if self.prepared.is_some() && metering.epoch_interval.is_none() {
             store.set_epoch_deadline(u64::MAX / 2);
         }
-        tokio::select! {
+        let outcome = tokio::select! {
             result = async {
         let instance = linker
             .instantiate_async(&mut store, &module)
             .await
             .map_err(|e| RuntimeError::wasm("instantiate", e))?;
+        store.data_mut().memory = instance.get_memory(&mut store, "memory");
         let run = instance
             .get_typed_func::<(), i32>(&mut store, "run")
             .map_err(|e| RuntimeError::wasm("run", e))?;
@@ -763,7 +825,23 @@ impl CoreWasmBlock {
             .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
             } => result,
             _ = cancel.cancelled() => Err(RuntimeError::wasm("execution", "guest interrupted: immediate shutdown")),
+        };
+        usage.sample_fuel(
+            metering
+                .fuel
+                .unwrap_or(u64::MAX)
+                .saturating_sub(store.get_fuel().unwrap_or(0)),
+        );
+        if let Some(memory) = store.data().memory {
+            usage.sample_wasm(
+                metering
+                    .fuel
+                    .unwrap_or(u64::MAX)
+                    .saturating_sub(store.get_fuel().unwrap_or(0)),
+                memory.data_size(&store),
+            );
         }
+        outcome
     }
 
     #[allow(clippy::type_complexity)]
@@ -866,6 +944,8 @@ impl CoreWasmBlock {
             codec: NoCodec,
             format: Format::OCTET_STREAM,
             limits: wasmtime::StoreLimits::default(),
+            usage: None,
+            memory: None,
         };
         let metering = Metering {
             fuel: Some(10_000_000_000),
@@ -915,6 +995,8 @@ impl CoreWasmBlock {
             codec,
             format,
             limits: wasmtime::StoreLimits::default(),
+            usage: None,
+            memory: None,
         };
         let (mut store, instance, _ticker) = self.instantiate(state, metering, cancel)?;
         let run = instance

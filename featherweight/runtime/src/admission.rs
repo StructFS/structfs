@@ -1,6 +1,7 @@
 //! Nonblocking admission for routed calls. Charges last until response or
 //! abandonment, including calls already dequeued by the guest.
 use crate::block::BlockId;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -8,7 +9,7 @@ use std::{
 use structfs_core_store::{Error, Path, Value};
 
 /// Limits on outstanding calls, shared across runtimes when desired.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimits {
     pub calls: usize,
     pub bytes: usize,
@@ -25,13 +26,13 @@ impl Default for CallLimits {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallUsage {
     pub calls: usize,
     pub bytes: usize,
 }
 /// Cumulative admission measurements. Bytes are logical payload weight, not RSS.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallMetrics {
     pub admitted: u64,
     pub rejected: u64,
@@ -39,7 +40,16 @@ pub struct CallMetrics {
     pub peak_calls: usize,
     pub peak_bytes: usize,
 }
+/// An atomic view of this budget, not an aggregate snapshot of its ancestors.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CallBudgetSnapshot {
+    pub revision: u64,
+    pub limits: CallLimits,
+    pub usage: CallUsage,
+    pub metrics: CallMetrics,
+}
 struct Usage {
+    revision: u64,
     limits: CallLimits,
     metrics: CallMetrics,
     total: CallUsage,
@@ -60,6 +70,7 @@ impl CallBudget {
             parent,
             usage: Mutex::new(Usage {
                 limits,
+                revision: 0,
                 metrics: CallMetrics::default(),
                 total: CallUsage::default(),
                 blocks: HashMap::new(),
@@ -74,7 +85,9 @@ impl CallBudget {
     /// Atomically replace admission policy without forgetting live charges.
     /// Existing calls are grandfathered; new calls must fit the new limits.
     pub fn set_limits(&self, limits: CallLimits) {
-        self.usage.lock().unwrap_or_else(|e| e.into_inner()).limits = limits;
+        let mut state = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        state.limits = limits;
+        state.revision = state.revision.saturating_add(1);
     }
     pub fn limits(&self) -> CallLimits {
         self.usage
@@ -82,6 +95,26 @@ impl CallBudget {
             .unwrap_or_else(|e| e.into_inner())
             .limits
             .clone()
+    }
+    /// Child-to-root observations. Each budget snapshot is atomic; the whole
+    /// hierarchy is not a transaction. Every listed ceiling is enforced.
+    pub fn hierarchy(&self) -> Vec<CallBudgetSnapshot> {
+        let mut result = vec![self.snapshot()];
+        let mut parent = self.parent.as_deref();
+        while let Some(budget) = parent {
+            result.push(budget.snapshot());
+            parent = budget.parent.as_deref();
+        }
+        result
+    }
+    pub fn snapshot(&self) -> CallBudgetSnapshot {
+        let state = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        CallBudgetSnapshot {
+            revision: state.revision,
+            limits: state.limits.clone(),
+            usage: state.total,
+            metrics: state.metrics,
+        }
     }
     pub fn metrics(&self) -> CallMetrics {
         self.usage.lock().unwrap_or_else(|e| e.into_inner()).metrics
@@ -187,20 +220,28 @@ impl Drop for CallCharge {
 
 /// Admission for fresh HTTP/execution sessions. Reserve worst-case guest
 /// linear memory for the whole assembly, including lazy blocks, before start.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLimits {
     pub sessions: usize,
     pub sessions_per_tenant: usize,
     pub guest_slots: usize,
     pub memory_bytes: usize,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsage {
     pub sessions: usize,
     pub guest_slots: usize,
     pub memory_bytes: usize,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionBudgetSnapshot {
+    pub revision: u64,
+    pub limits: SessionLimits,
+    /// Reserved capacity, not measured guest-memory usage.
+    pub usage: SessionUsage,
+}
 struct Sessions {
+    revision: u64,
     limits: SessionLimits,
     total: SessionUsage,
     tenants: HashMap<String, usize>,
@@ -213,6 +254,7 @@ impl SessionBudget {
         Arc::new(Self {
             state: Mutex::new(Sessions {
                 limits,
+                revision: 0,
                 total: SessionUsage::default(),
                 tenants: HashMap::new(),
             }),
@@ -221,7 +263,9 @@ impl SessionBudget {
     /// Update policy atomically. Existing reservations remain charged and
     /// valid; admissions resume once usage fits the updated ceilings.
     pub fn set_limits(&self, limits: SessionLimits) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).limits = limits;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.limits = limits;
+        state.revision = state.revision.saturating_add(1);
     }
     pub fn limits(&self) -> SessionLimits {
         self.state
@@ -229,6 +273,14 @@ impl SessionBudget {
             .unwrap_or_else(|e| e.into_inner())
             .limits
             .clone()
+    }
+    pub fn snapshot(&self) -> SessionBudgetSnapshot {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        SessionBudgetSnapshot {
+            revision: state.revision,
+            limits: state.limits.clone(),
+            usage: state.total,
+        }
     }
     pub fn usage(&self) -> SessionUsage {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).total

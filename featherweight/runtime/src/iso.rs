@@ -70,8 +70,13 @@ pub struct IsoSurface {
     sources: crate::determinism::IsoSources,
 }
 
-const SECTIONS: [(&str, &str); 10] = [
+const SECTIONS: [(&str, &str); 12] = [
     ("server", "Server protocol: the event mailbox, responses"),
+    ("execution", "Instance budget and measured usage"),
+    (
+        "capabilities",
+        "Granted mount prefixes; listing grants no authority",
+    ),
     ("self", "Block identity: id, state, args, interface"),
     ("shutdown", "Lifecycle control: requested, mode, complete"),
     (
@@ -151,6 +156,11 @@ impl IsoSurface {
                 descriptor(false, true, false),
             ),
             ("self/id".to_string(), descriptor(true, false, false)),
+            (
+                "execution/budget".to_string(),
+                descriptor(true, false, false),
+            ),
+            ("capabilities".to_string(), descriptor(true, false, false)),
             ("self/state".to_string(), descriptor(true, false, false)),
             ("self/args".to_string(), descriptor(true, false, false)),
             ("self/interface".to_string(), descriptor(true, true, false)),
@@ -236,6 +246,14 @@ impl IsoSurface {
                 ("id".to_string(), Value::from(self.cell.id.as_str())),
                 ("state".to_string(), Value::from(self.cell.state().as_str())),
             ]))),
+            (3, "server") if &path[1] == "cancelled" => {
+                let token = path[2]
+                    .parse()
+                    .map_err(|_| Error::conflict("invalid response token"))?;
+                Some(Value::Bool(
+                    self.cell.request_cancellation(token).is_cancelled(),
+                ))
+            }
             (2, "self") if &path[1] == "id" => Some(Value::from(self.cell.id.as_str())),
             (2, "self") if &path[1] == "state" => Some(Value::from(self.cell.state().as_str())),
             (2, "self") if &path[1] == "args" => Some(Value::Array(
@@ -423,16 +441,20 @@ impl IsoSurface {
                     _ => return Err(Error::store("iso", "timers", "missing ms")),
                 };
                 let tag = map.get("tag").cloned().unwrap_or(Value::Null);
+                let charge = self.cell.reserve_event(&tag)?;
                 let id = self.next_timer.fetch_add(1, Ordering::SeqCst);
                 let cell = self.cell.clone();
                 let task = self.handle.spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-                    cell.deliver_timer(tag);
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {
+                            let _ = cell.deliver_event(crate::BlockEvent::Timer { tag }, charge);
+                        }
+                        _ = cell.cancel.cancelled() => {}
+                    }
                 });
-                self.timers
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(id, task);
+                let mut timers = self.timers.lock().unwrap_or_else(|e| e.into_inner());
+                timers.retain(|_, task| !task.is_finished());
+                timers.insert(id, task);
                 Ok(Path::from_components(vec![
                     "timers".to_string(),
                     id.to_string(),
@@ -502,6 +524,40 @@ mod tests {
             .await
             .unwrap()
             .map(|r| r.as_value().unwrap().clone())
+    }
+
+    #[tokio::test]
+    async fn timers_reserve_capacity_and_cancel_refunds_it() {
+        let (cell, iso) = surface();
+        cell.events.set_limits(crate::CallLimits {
+            calls: 1,
+            calls_per_block: 1,
+            ..Default::default()
+        });
+        let value = Value::Map(BTreeMap::from([
+            ("ms".into(), Value::Integer(60000)),
+            ("tag".into(), Value::from("tick")),
+        ]));
+        let timer = iso.write(&path!("timers"), value.clone()).await.unwrap();
+        assert_eq!(cell.events.usage().calls, 1);
+        assert!(iso.write(&path!("timers"), value).await.is_err());
+        assert!(cell.deliver_signal("full", Value::Null).is_err());
+        iso.write(&timer, Value::Null).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while cell.events.usage().calls != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cell.deliver_signal("fits", Value::Null).unwrap();
+        assert_eq!(cell.events.usage().calls, 1);
+        assert_eq!(cell.pending_events().len(), 1);
+        assert_eq!(cell.events.usage().calls, 0);
+        cell.deliver_signal("cleanup", Value::Null).unwrap();
+        cell.set_state(crate::BlockState::Stopped);
+        assert_eq!(cell.events.usage().calls, 0);
+        assert!(cell.deliver_signal("late", Value::Null).is_err());
     }
 
     #[tokio::test]

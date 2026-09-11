@@ -183,7 +183,7 @@ impl BlockEvent {
 pub(crate) struct PendingCall {
     cell: std::sync::Arc<BlockCell>,
     token: u64,
-    receiver: oneshot::Receiver<Value>,
+    receiver: oneshot::Receiver<ResponseDelivery>,
     _charge: crate::admission::CallCharge,
 }
 impl std::future::Future for PendingCall {
@@ -192,16 +192,21 @@ impl std::future::Future for PendingCall {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        std::pin::Pin::new(&mut self.receiver).poll(cx)
+        std::pin::Pin::new(&mut self.receiver)
+            .poll(cx)
+            .map(|result| result.map(|delivery| delivery.value))
     }
 }
 impl Drop for PendingCall {
     fn drop(&mut self) {
         let mut cell = self.cell.lock();
         cell.responses.remove(&self.token);
+        if let Some(cancel) = cell.request_cancels.remove(&self.token) {
+            cancel.cancel();
+        }
         cell.callers.remove(&self.token);
         cell.queue.retain(
-            |event| !matches!(event, BlockEvent::Request(request) if request.token == self.token),
+            |event| !matches!(&event.event, BlockEvent::Request(request) if request.token == self.token),
         );
     }
 }
@@ -213,10 +218,19 @@ struct ShutdownFlags {
     exit_code: Option<i64>,
 }
 
+struct ResponseDelivery {
+    value: Value,
+    _charge: Option<crate::admission::CallCharge>,
+}
+struct QueuedEvent {
+    event: BlockEvent,
+    _charge: Option<crate::admission::CallCharge>,
+}
 struct CellState {
     state: BlockState,
-    queue: VecDeque<BlockEvent>,
-    responses: HashMap<u64, oneshot::Sender<Value>>,
+    queue: VecDeque<QueuedEvent>,
+    responses: HashMap<u64, oneshot::Sender<ResponseDelivery>>,
+    request_cancels: HashMap<u64, CancelToken>,
     /// Simulation only: which block parked awaiting each token, so the
     /// response can make it runnable during the responder's turn.
     callers: HashMap<u64, String>,
@@ -237,6 +251,11 @@ pub struct BlockCell {
     pub failure: FailurePolicy,
     /// Cancelled on immediate shutdown: fails the block's parked reads.
     pub cancel: CancelToken,
+    pub usage: crate::ExecutionMeter,
+    /// Signals and outstanding timers share this bounded instance budget.
+    pub events: std::sync::Arc<crate::CallBudget>,
+    /// Bounds responses retained before callers consume them.
+    pub replies: std::sync::Arc<crate::CallBudget>,
 
     state: Mutex<CellState>,
     /// Notified on every state/queue/shutdown change a waiter might watch.
@@ -258,10 +277,19 @@ impl BlockCell {
             admission_id: BlockId::new(),
             failure,
             cancel: CancelToken::new(),
+            usage: crate::ExecutionMeter::default(),
+            replies: crate::CallBudget::new(crate::CallLimits::default()),
+            events: crate::CallBudget::new(crate::CallLimits {
+                calls: 256,
+                calls_per_block: 256,
+                bytes: 1024 * 1024,
+                bytes_per_block: 1024 * 1024,
+            }),
             state: Mutex::new(CellState {
                 state: BlockState::Created,
                 queue: VecDeque::new(),
                 responses: HashMap::new(),
+                request_cancels: HashMap::new(),
                 shutdown: ShutdownFlags {
                     requested: false,
                     mode: None,
@@ -308,10 +336,19 @@ impl BlockCell {
             admission_id: BlockId::new(),
             failure,
             cancel: CancelToken::new(),
+            usage: crate::ExecutionMeter::default(),
+            replies: crate::CallBudget::new(crate::CallLimits::default()),
+            events: crate::CallBudget::new(crate::CallLimits {
+                calls: 256,
+                calls_per_block: 256,
+                bytes: 1024 * 1024,
+                bytes_per_block: 1024 * 1024,
+            }),
             state: Mutex::new(CellState {
                 state: BlockState::Created,
                 queue: VecDeque::new(),
                 responses: HashMap::new(),
+                request_cancels: HashMap::new(),
                 shutdown: ShutdownFlags {
                     requested: false,
                     mode: None,
@@ -349,6 +386,10 @@ impl BlockCell {
                 // No response will ever come: fail in-flight callers by
                 // dropping their senders.
                 cell.responses.clear();
+                for (_, cancel) in cell.request_cancels.drain() {
+                    cancel.cancel();
+                }
+                cell.queue.clear();
                 std::mem::take(&mut cell.callers)
             } else {
                 HashMap::new()
@@ -397,8 +438,16 @@ impl BlockCell {
     ///
     /// The caller awaits the receiver; a dropped receiver (block reached a
     /// terminal state) means the store is unavailable.
-    pub fn enqueue(&self, op: &'static str, path: Path, data: Value) -> oneshot::Receiver<Value> {
-        self.enqueue_inner(op, path, data).1
+    #[cfg(test)]
+    pub(crate) fn enqueue(
+        &self,
+        op: &'static str,
+        path: Path,
+        data: Value,
+    ) -> impl std::future::Future<Output = std::result::Result<Value, oneshot::error::RecvError>>
+    {
+        let receiver = self.enqueue_inner(op, path, data).1;
+        async move { receiver.await.map(|delivery| delivery.value) }
     }
 
     fn enqueue_inner(
@@ -406,7 +455,7 @@ impl BlockCell {
         op: &'static str,
         path: Path,
         data: Value,
-    ) -> (u64, oneshot::Receiver<Value>) {
+    ) -> (u64, oneshot::Receiver<ResponseDelivery>) {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
@@ -415,6 +464,7 @@ impl BlockCell {
                 return (token, rx);
             }
             cell.responses.insert(token, tx);
+            cell.request_cancels.insert(token, CancelToken::new());
             if self.sim.is_some() {
                 // Remember who parks on this token, so the response can
                 // make them runnable during the responder's turn.
@@ -422,12 +472,15 @@ impl BlockCell {
                     cell.callers.insert(token, caller);
                 }
             }
-            cell.queue.push_back(BlockEvent::Request(ServerRequest {
-                op,
-                path,
-                data,
-                token,
-            }));
+            cell.queue.push_back(QueuedEvent {
+                event: BlockEvent::Request(ServerRequest {
+                    op,
+                    path,
+                    data,
+                    token,
+                }),
+                _charge: None,
+            });
         }
         self.gate.notify();
         // A mailbox event landed: under simulation the owner, if idle,
@@ -461,25 +514,51 @@ impl BlockCell {
         (cell.responses.len(), cell.queue.len())
     }
 
-    /// Deliver a signal to the block's mailbox.
-    pub fn deliver_signal(&self, name: impl Into<String>, data: Value) {
-        self.lock().queue.push_back(BlockEvent::Signal {
-            name: name.into(),
-            data,
-        });
-        self.gate.notify();
-        if let Some((key, turnstile)) = &self.sim {
-            turnstile.wake_mailbox(key);
-        }
+    /// Deliver a signal, failing explicitly if the event budget is full.
+    pub fn deliver_signal(&self, name: impl Into<String>, data: Value) -> Result<(), Error> {
+        let charged = Value::Array(vec![Value::String(name.into()), data]);
+        let charge = self.reserve_event(&charged)?;
+        let Value::Array(mut values) = charged else {
+            unreachable!()
+        };
+        let data = values.pop().unwrap();
+        let Value::String(name) = values.pop().unwrap() else {
+            unreachable!()
+        };
+        self.deliver_event(BlockEvent::Signal { name, data }, charge)
     }
-
-    /// Deliver a timer expiry to the block's mailbox.
-    pub fn deliver_timer(&self, tag: Value) {
-        self.lock().queue.push_back(BlockEvent::Timer { tag });
+    pub(crate) fn reserve_event(
+        &self,
+        data: &Value,
+    ) -> Result<crate::admission::CallCharge, Error> {
+        self.events
+            .acquire(&self.admission_id, &Path::parse("").unwrap(), data)
+    }
+    /// Reserve at registration, not expiry: an admitted timer cannot be lost
+    /// because signals fill the mailbox while the timer is sleeping.
+    pub(crate) fn deliver_event(
+        &self,
+        event: BlockEvent,
+        charge: crate::admission::CallCharge,
+    ) -> Result<(), Error> {
+        let mut cell = self.lock();
+        if cell.state.is_terminal() || cell.shutdown.requested {
+            return Err(Error::cancelled("event target stopped"));
+        }
+        cell.queue.push_back(QueuedEvent {
+            event,
+            _charge: Some(charge),
+        });
+        drop(cell);
         self.gate.notify();
         if let Some((key, turnstile)) = &self.sim {
             turnstile.wake_mailbox(key);
         }
+        Ok(())
+    }
+    pub fn deliver_timer(&self, tag: Value) -> Result<(), Error> {
+        let charge = self.reserve_event(&tag)?;
+        self.deliver_event(BlockEvent::Timer { tag }, charge)
     }
 
     // === Server protocol: block side ===
@@ -509,7 +588,7 @@ impl BlockCell {
                 {
                     let mut cell = self.lock();
                     if let Some(event) = cell.queue.pop_front() {
-                        return Ok(Some(event));
+                        return Ok(Some(event.event));
                     }
                     if cell.shutdown.requested {
                         return Ok(None);
@@ -524,7 +603,7 @@ impl BlockCell {
             .wait_until_cancellable(&self.cancel, || {
                 let mut cell = self.lock();
                 if let Some(event) = cell.queue.pop_front() {
-                    return Some(Some(event));
+                    return Some(Some(event.event));
                 }
                 if cell.shutdown.requested {
                     return Some(None);
@@ -538,7 +617,21 @@ impl BlockCell {
     /// Drain all pending mailbox events without blocking.
     pub fn pending_events(&self) -> Vec<BlockEvent> {
         let mut cell = self.lock();
-        cell.queue.drain(..).collect()
+        cell.queue.drain(..).map(|queued| queued.event).collect()
+    }
+
+    /// Cooperative cancellation for one served request. Missing/finished
+    /// identities return an already-cancelled token, never a new live scope.
+    pub fn request_cancellation(&self, token: u64) -> CancelToken {
+        self.lock()
+            .request_cancels
+            .get(&token)
+            .cloned()
+            .unwrap_or_else(|| {
+                let cancel = CancelToken::new();
+                cancel.cancel();
+                cancel
+            })
     }
 
     /// Fulfill a response for a correlation token. Unknown tokens are
@@ -546,10 +639,27 @@ impl BlockCell {
     pub fn respond(&self, token: u64, response: Value) {
         let (sender, caller) = {
             let mut cell = self.lock();
+            if let Some(cancel) = cell.request_cancels.remove(&token) {
+                cancel.cancel();
+            }
             (cell.responses.remove(&token), cell.callers.remove(&token))
         };
         if let Some(sender) = sender {
-            let _ = sender.send(response);
+            let delivery =
+                match self
+                    .replies
+                    .acquire(&self.admission_id, &Path::parse("").unwrap(), &response)
+                {
+                    Ok(charge) => ResponseDelivery {
+                        value: response,
+                        _charge: Some(charge),
+                    },
+                    Err(error) => ResponseDelivery {
+                        value: crate::protocol::error_to_response(&error),
+                        _charge: None,
+                    },
+                };
+            let _ = sender.send(delivery);
         }
         // The parked caller's answer exists: runnable, during this
         // (the responder's) turn.
@@ -566,6 +676,9 @@ impl BlockCell {
         let callers = {
             let mut cell = self.lock();
             cell.responses.clear();
+            for (_, cancel) in cell.request_cancels.drain() {
+                cancel.cancel();
+            }
             std::mem::take(&mut cell.callers)
         };
         if let Some((_, turnstile)) = &self.sim {
@@ -676,6 +789,38 @@ mod tests {
     use structfs_core_store::path;
 
     #[tokio::test]
+    async fn replies_are_charged_until_consumed_and_oversize_is_typed() {
+        let cell = BlockCell::new("replies", FailurePolicy::FailFast);
+        let reply = cell.enqueue("read", path!("x"), Value::Null);
+        let event = cell.next_event().await.unwrap().unwrap();
+        let BlockEvent::Request(request) = event else {
+            panic!("not a request")
+        };
+        cell.respond(
+            request.token,
+            crate::protocol::ok_value(Value::from("answer")),
+        );
+        assert_eq!(cell.replies.usage().calls, 1);
+        reply.await.unwrap();
+        assert_eq!(cell.replies.usage().calls, 0);
+        cell.replies.set_limits(crate::CallLimits {
+            bytes: 1,
+            ..Default::default()
+        });
+        let reply = cell.enqueue("read", path!("x"), Value::Null);
+        let BlockEvent::Request(request) = cell.next_event().await.unwrap().unwrap() else {
+            panic!("not a request")
+        };
+        cell.respond(request.token, Value::Bytes(vec![0; 100]));
+        let response = reply.await.unwrap();
+        assert!(matches!(
+            crate::protocol::decode_read_response(response),
+            Err(Error::Overloaded { .. })
+        ));
+        assert_eq!(cell.replies.usage().calls, 0);
+    }
+
+    #[tokio::test]
     async fn enqueue_and_serve_round_trip() {
         let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
         cell.set_state(BlockState::Starting);
@@ -712,8 +857,8 @@ mod tests {
         let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
         cell.set_state(BlockState::Running);
         let _rx = cell.enqueue("read", path!("a"), Value::Null);
-        cell.deliver_signal("usr1", Value::from(1i64));
-        cell.deliver_timer(Value::from("flush"));
+        cell.deliver_signal("usr1", Value::from(1i64)).unwrap();
+        cell.deliver_timer(Value::from("flush")).unwrap();
 
         assert!(matches!(
             cell.next_event().await.unwrap().unwrap(),
@@ -737,7 +882,7 @@ mod tests {
             tokio::spawn(async move { cell.next_event().await })
         };
         tokio::task::yield_now().await;
-        cell.deliver_signal("wake", Value::Null);
+        cell.deliver_signal("wake", Value::Null).unwrap();
         assert!(matches!(
             server.await.unwrap().unwrap(),
             Some(BlockEvent::Signal { .. })

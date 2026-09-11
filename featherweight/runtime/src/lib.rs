@@ -51,12 +51,16 @@
 //! # }
 //! ```
 
+pub mod driver;
+pub use driver::{
+    DriverCapabilities, DriverContext, DriverControl, DriverCounter, ExecutionMeter, ExecutionUsage,
+};
 pub mod execution;
 pub use execution::ExecutionScope;
 pub mod admission;
 pub use admission::{
-    CallBudget, CallLimits, CallMetrics, CallUsage, SessionBudget, SessionLimits, SessionPermit,
-    SessionUsage,
+    CallBudget, CallBudgetSnapshot, CallLimits, CallMetrics, CallUsage, SessionBudget,
+    SessionBudgetSnapshot, SessionLimits, SessionPermit, SessionUsage,
 };
 pub mod assembly;
 pub mod block;
@@ -88,7 +92,10 @@ pub use namespace::{
     async_host_store, host_store, GrantStore, HostStore, Namespace, Target, WiringTable,
 };
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
-pub use runtime::{ArtifactLoader, AssemblyInstance, Runtime, StdioProvider, WasmBlockDriver};
+pub use runtime::{
+    ArtifactLoader, AssemblyInstance, AssemblyRequest, Runtime, ShutdownReport, StdioProvider,
+    WasmBlockDriver,
+};
 pub use session::{SessionEntry, SessionLog};
 pub use spawn::{ProcStore, SpawnProtocol};
 pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
