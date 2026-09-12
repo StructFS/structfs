@@ -13,6 +13,7 @@ use tokio::{sync::Notify, time::Instant};
 
 #[derive(Clone, Debug)]
 pub struct StateLimits {
+    pub request_bytes: usize,
     pub state_bytes: usize,
     pub history_bytes: usize,
     pub history_records: usize,
@@ -30,6 +31,7 @@ pub struct StateLimits {
 impl Default for StateLimits {
     fn default() -> Self {
         Self {
+            request_bytes: 2 << 20,
             state_bytes: 1 << 20,
             history_bytes: 1 << 20,
             history_records: 256,
@@ -151,6 +153,7 @@ impl State {
             .state_bytes
             .checked_mul(2)
             .and_then(|n| n.checked_add(state.limits.history_bytes))
+            .and_then(|n| n.checked_add(state.limits.snapshot_bytes))
             .ok_or_else(|| Error::resource_limit("state reservation overflow"))?;
         let registration =
             owner.register(ResourceKind::Retained, reserved, move || async move {
@@ -748,7 +751,14 @@ impl Service for View {
                     if p == structfs_core_store::path!("operations") {
                         let value = r.into_value(&structfs_core_store::NoCodec)?;
                         // Bound before recursive Serde conversion; arbitrary Raw records fail.
-                        validate(&value, &this.state.limits)
+                        // Envelope nesting is separate from the state-tree depth.
+                        // Otherwise a valid tree at the depth limit could not be set.
+                        let mut envelope_limits = this.state.limits.clone();
+                        envelope_limits.state_bytes = envelope_limits.request_bytes;
+                        envelope_limits.depth = envelope_limits.depth.saturating_add(8);
+                        envelope_limits.nodes =
+                            envelope_limits.nodes.saturating_mul(2).saturating_add(1024);
+                        validate(&value, &envelope_limits)
                             .map_err(|e| Error::resource_limit(e.to_string()))?;
                         let request: Request = from_value(value)?;
                         let id =

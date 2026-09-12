@@ -385,3 +385,22 @@ async fn concurrent_conditional_batches_have_one_winner_and_no_partial_publicati
         + usize::from(c.data(&path!("b")).await.unwrap().is_some());
     assert_eq!(present, 1);
 }
+
+#[tokio::test]
+async fn command_envelopes_do_not_consume_the_state_tree_depth_allowance() {
+    let (_s, _o, state, c, _) = setup(StateLimits {
+        depth: 2,
+        ..Default::default()
+    });
+    let allowed = Value::Map(BTreeMap::from([(
+        "a".into(),
+        Value::Map(BTreeMap::from([("b".into(), Value::Null)])),
+    )]));
+    c.batch(None, vec![set("", allowed)]).await.unwrap();
+    let before = state.token();
+    assert!(matches!(
+        c.batch(None, vec![set("a/b/c", Value::Null)]).await,
+        Err(ClientError::State(Fault::ResourceLimit { .. }))
+    ));
+    assert_eq!(state.token(), before);
+}

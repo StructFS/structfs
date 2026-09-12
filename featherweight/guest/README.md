@@ -62,3 +62,8 @@ The crate's own `lib.rs` is the worked example: the wasm-kv block reads
 its mailbox, serves read/write requests, and exits cleanly on the
 shutdown signal — about a hundred lines, most of them ordinary library
 code.
+
+The optional `state` feature adds `state::Client`, using the selected Value codec
+and the portable `structfs-state` protocol for batches, snapshots, and observation.
+State faults remain typed reply values. The host owns handles across guest traps;
+release handles explicitly when done. Batches never retry automatically.

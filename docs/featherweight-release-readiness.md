@@ -106,3 +106,8 @@ owned registrations, provider supervision, bounded results/tails, and provider
 resources in Featherweight shutdown reports. Hosts must check `complete()` and
 retain the cleanup supervisor while any resources remain. Revisioned state and
 bounded observation are the next application-substrate priority (P0-D).
+
+P0-D is implemented in [revisioned state](design/2026-09-12-revisioned-state.md).
+The release gate now tests the packaged state provider/protocol, an external
+projection/effect fixture, an actual guest import, and the `state` guest SDK build.
+Broader external application fixtures remain P0-E before a coordinated release.

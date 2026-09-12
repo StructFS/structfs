@@ -173,6 +173,7 @@ passed 631 tests plus external-consumer Clippy, the independent value encoder,
 guest Wasm builds, and documentation checks. Formatting and diff checks passed.
 No crates were published.
 
-P0-D is next: revisioned state, atomic updates, and bounded observation. This step
+P0-D is now implemented in [revisioned state](2026-09-12-revisioned-state.md),
+including atomic updates and bounded observation. This step
 does not implement application-specific subprocess/network cleanup, durable
 operation recovery, or automatic migration of legacy unbounded logs.

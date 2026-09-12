@@ -429,6 +429,10 @@ charges cover effects and retained buffers beyond the routed call's lifetime.
 
 ## 9. Revisioned state and change service v1
 
+Implementation: [P0-D revisioned state](2026-09-12-revisioned-state.md) now provides
+the reference provider and native/guest protocol, including documented wire and
+retention choices.
+
 ### 9.1 Scope
 
 Ship one in-memory reference provider and its wire/guest/native clients. It is a
@@ -670,14 +674,16 @@ not imply identical host features or scheduling guarantees.
 ## 13. Priority and dependency order
 
 Implementation reports: [P0-A Value v1](../specs/value-v1-implementation.md) and
-[P0-B shared async services](2026-09-11-shared-async-services.md).
+[P0-B shared async services](2026-09-11-shared-async-services.md),
+[P0-C owned services](2026-09-11-owned-services.md), and
+[P0-D revisioned state](2026-09-12-revisioned-state.md).
 
 | Priority | Deliverable | Completion criterion |
 |---|---|---|
 | P0-A | Value IR, direct Serde bridge, typed errors, encoding profiles | Fidelity matrix and adversarial conversion corpus pass |
 | P0-B | Shared async router/client/provider contracts | Native and guest callers exercise identical routing, authority, cancellation, and admission behavior |
 | P0-C | [Implemented: owned registrations, provider work, cleanup, bounded tails/results](2026-09-11-owned-services.md) | Independent lifecycle and overload fixtures pass; no unaccounted detached work |
-| P0-D | Revisioned state/observation reference implementation | Atomic batches, snapshot/watch handshake, expired cursors, stale-result rejection pass |
+| P0-D | [Implemented: revisioned state/observation](2026-09-12-revisioned-state.md) | Atomic batches, snapshot/watch handshake, expired cursors, stale-result rejection pass |
 | P0-E | Isotope profile/SDK alignment and application fixtures | Three archive-built external consumers pass documented scenarios |
 | P1 | Production interactive/process adapters; RON authoring exploration | Domain-specific integration and platform tests, without changing core contracts |
 | P2 | Richer typed IR profile, stable canonical hashing, advanced inspection | Separate specification and independently versioned acceptance vectors |

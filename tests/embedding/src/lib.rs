@@ -243,3 +243,95 @@ mod tests {
         assert!(peer.readiness().released);
     }
 }
+
+#[cfg(test)]
+mod state_consumer {
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use structfs_core_store::{path, Reader, Value};
+    use structfs_service::{
+        BudgetAdmission, CallBudget, CallLimits, CleanupSupervisor, Mount, Router,
+    };
+    use structfs_state::{
+        ClientError, Command, Fault, Mutation, ReadLimits, State, StateClient, StateLimits,
+    };
+    #[tokio::test]
+    async fn packaged_state_supports_projection_and_conditional_effect_results() {
+        let supervisor = CleanupSupervisor::new(2).unwrap();
+        let service_owner = supervisor.owner(Default::default()).unwrap();
+        let request = supervisor.owner(Default::default()).unwrap();
+        let state = State::new(
+            &service_owner.handle(),
+            Some(Value::Map(BTreeMap::new())),
+            StateLimits::default(),
+        )
+        .unwrap();
+        let raw = Router::new(vec![Mount::new(
+            path!(""),
+            path!(""),
+            state.view(path!(""), true),
+            Arc::new(BudgetAdmission {
+                budget: CallBudget::<String>::new(CallLimits::default()),
+                key: "state".into(),
+            }),
+        )])
+        .unwrap()
+        .client()
+        .owned_by(&request.handle());
+        let client = StateClient::new(raw);
+        let generation = client
+            .batch(
+                None,
+                vec![Mutation::Set {
+                    path: "generation".into(),
+                    value: Value::Unsigned(u64::MAX),
+                }],
+            )
+            .await
+            .unwrap();
+        let observation = client
+            .open(Command::Observe {
+                prefix: "".into(),
+                limits: ReadLimits::default(),
+            })
+            .await
+            .unwrap();
+        let mut view = observation.projection(65536, 128).await.unwrap();
+        assert_eq!(
+            view.read(&path!("generation")).unwrap().unwrap().as_value(),
+            Some(&Value::Unsigned(u64::MAX))
+        );
+        client
+            .batch(
+                Some(generation.clone()),
+                vec![Mutation::Set {
+                    path: "generation".into(),
+                    value: Value::Integer(2),
+                }],
+            )
+            .await
+            .unwrap();
+        // A superseded effect must revalidate; cancellation alone is not a fence.
+        assert!(matches!(
+            client
+                .batch(
+                    Some(generation.clone()),
+                    vec![Mutation::Set {
+                        path: "result".into(),
+                        value: Value::String("stale".into())
+                    }]
+                )
+                .await,
+            Err(ClientError::State(Fault::Conflict { .. }))
+        ));
+        assert_eq!(client.data(&path!("result")).await.unwrap(), None);
+        assert_eq!(
+            observation.changes(&generation).await.unwrap().items.len(),
+            1
+        );
+        assert!(request.close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(service_owner
+            .close(Duration::from_secs(1))
+            .await
+            .is_quiescent());
+    }
+}
