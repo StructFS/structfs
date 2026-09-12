@@ -67,3 +67,19 @@ The optional `state` feature adds `state::Client`, using the selected Value code
 and the portable `structfs-state` protocol for batches, snapshots, and observation.
 State faults remain typed reply values. The host owns handles across guest traps;
 release handles explicitly when done. Batches never retry automatically.
+
+The optional `profiles` feature adds `sdk::profiles(root, codec)` to read a
+granted provider's `meta/profiles`, plus portable input, operation, approval,
+configuration-acknowledgment and process-request schemas. It implies
+`value-codecs` and adds no imports. Discovery does not invoke the provider's
+effectful start/read operations. Profile declarations describe support; they do
+not grant authority.
+
+The reference server emits explicit read-response presence. Hosts and servers
+using the legacy Null-as-absence envelope should migrate using Isotope 07's
+`present` field. The sample kv store retains its documented delete-on-null
+convention; the Value and ABI layers distinguish present Null from absence.
+
+`sdk::read_typed` and `sdk::write_typed` preserve `HostError { status, message }`.
+Value/profile helpers use that typed host error; existing `structfs_read` and
+`structfs_write` remain diagnostic-only compatibility wrappers.

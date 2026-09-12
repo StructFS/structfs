@@ -37,7 +37,7 @@ pub enum Input {
     Paste { text: String },
     Resize { columns: u32, rows: u32 },
     Mouse { x: u32, y: u32, button: u8 },
-    Close,
+    Close {},
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +112,14 @@ pub struct CommitAck {
     pub token: Token,
     pub persisted: bool,
     pub durability: Durability,
+}
+impl CommitAck {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.persisted != matches!(self.durability, Durability::FileSynced) {
+            return Err("inconsistent persistence acknowledgment");
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

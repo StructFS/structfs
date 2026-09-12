@@ -6,7 +6,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "tsc",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.ts",
     "serve": "node serve.ts"
   },
   "devDependencies": {

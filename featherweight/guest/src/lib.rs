@@ -17,7 +17,8 @@ pub mod sdk {
     #[cfg(feature = "value-codecs")]
     #[derive(Debug)]
     pub enum ValueError {
-        Host(String),
+        Host(HostError),
+        Protocol(String),
         Codec(structfs_serde_store::Error),
     }
 
@@ -29,7 +30,7 @@ pub mod sdk {
     ) -> Result<Vec<structfs_profiles::Declaration>, ValueError> {
         let path = root.join(&structfs_serde_store::Path::parse("meta/profiles").unwrap());
         let value = read_value(&path.to_string(), codec)?
-            .ok_or_else(|| ValueError::Host("profile discovery unavailable".into()))?;
+            .ok_or_else(|| ValueError::Protocol("profile discovery unavailable".into()))?;
         structfs_serde_store::from_value(value).map_err(ValueError::Codec)
     }
 
@@ -40,7 +41,7 @@ pub mod sdk {
         codec: &structfs_serde_store::ValueCodec,
     ) -> Result<Option<structfs_serde_store::Value>, ValueError> {
         use structfs_serde_store::Codec;
-        structfs_read(path)
+        read_typed(path)
             .map_err(ValueError::Host)?
             .map(|b| {
                 codec
@@ -61,8 +62,21 @@ pub mod sdk {
         let bytes = codec
             .encode(value, &codec.profile.format())
             .map_err(ValueError::Codec)?;
-        structfs_write(path, &bytes).map_err(ValueError::Host)
+        write_typed(path, &bytes).map_err(ValueError::Host)
     }
+
+    /// ABI status category and diagnostic, preserved without string matching.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct HostError {
+        pub status: i32,
+        pub message: String,
+    }
+    impl std::fmt::Display for HostError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "StructFS status {}: {}", self.status, self.message)
+        }
+    }
+    impl std::error::Error for HostError {}
 
     /// The ret record (spec 11): `{ptr, len}`, little-endian u32s.
     #[repr(C)]
@@ -110,18 +124,21 @@ pub mod sdk {
 
     /// StructFS read: `Ok(Some(bytes))`, `Ok(None)` when absent, or the
     /// host's diagnostic message on error.
-    pub fn structfs_read(path: &str) -> Result<Option<Vec<u8>>, String> {
+    pub fn read_typed(path: &str) -> Result<Option<Vec<u8>>, HostError> {
         let mut ret = Ret { ptr: 0, len: 0 };
         let status = unsafe { read(path.as_ptr(), path.len() as i32, &mut ret) };
         match status {
             0 => Ok(Some(take(ret))),
             1 => Ok(None),
-            _ => Err(message(ret)),
+            _ => Err(HostError {
+                status,
+                message: message(ret),
+            }),
         }
     }
 
     /// StructFS write: the result path, or the host's diagnostic message.
-    pub fn structfs_write(path: &str, data: &[u8]) -> Result<String, String> {
+    pub fn write_typed(path: &str, data: &[u8]) -> Result<String, HostError> {
         let mut ret = Ret { ptr: 0, len: 0 };
         let status = unsafe {
             write(
@@ -134,8 +151,19 @@ pub mod sdk {
         };
         match status {
             0 => Ok(message(ret)),
-            _ => Err(message(ret)),
+            _ => Err(HostError {
+                status,
+                message: message(ret),
+            }),
         }
+    }
+    /// Compatibility wrapper returning only diagnostic text.
+    pub fn structfs_read(path: &str) -> Result<Option<Vec<u8>>, String> {
+        read_typed(path).map_err(|e| e.message)
+    }
+    /// Compatibility wrapper returning only diagnostic text.
+    pub fn structfs_write(path: &str, data: &[u8]) -> Result<String, String> {
+        write_typed(path, data).map_err(|e| e.message)
     }
 }
 
@@ -196,10 +224,12 @@ mod reference {
             };
 
             let response = match op {
-                "read" => {
-                    let value = store.get(path).cloned().unwrap_or(serde_json::Value::Null);
-                    serde_json::json!({"result": "ok", "value": value})
-                }
+                "read" => match store.get(path) {
+                    Some(value) => {
+                        serde_json::json!({"result": "ok", "value": value, "present": true})
+                    }
+                    None => serde_json::json!({"result": "ok", "present": false}),
+                },
                 "write" => {
                     let data = request
                         .get("data")

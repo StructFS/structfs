@@ -245,4 +245,62 @@ mod tests {
         let (a, _b) = DuplexStream::pair(4).unwrap();
         assert!(a.write(&[0; 5], &CancelToken::new()).await.is_err());
     }
+    struct PendingRead(Arc<AtomicUsize>);
+    impl Service for PendingRead {
+        fn call(&self, c: CallContext, _: Operation) -> DetachedFuture<Response> {
+            let cleaned = self.0.clone();
+            Box::pin(async move {
+                struct Guard(Arc<AtomicUsize>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(cleaned);
+                let _context = c;
+                std::future::pending().await
+            })
+        }
+    }
+    #[tokio::test]
+    async fn request_timeout_and_disconnect_before_open_do_not_leak_admission() {
+        let supervisor = CleanupSupervisor::new(1).unwrap();
+        let owner = supervisor.owner(Default::default()).unwrap();
+        let budget = CallBudget::<String>::new(CallLimits::default());
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let router = Router::new(vec![Mount::new(
+            structfs_core_store::path!(""),
+            structfs_core_store::path!(""),
+            Arc::new(PendingRead(cleaned.clone())),
+            Arc::new(BudgetAdmission {
+                budget: budget.clone(),
+                key: "upstream".into(),
+            }),
+        )])
+        .unwrap();
+        let client = router.client().owned_by(&owner.handle()).with_context(
+            CallContext::default()
+                .with_timeout(Duration::from_millis(5))
+                .unwrap(),
+        );
+        assert!(matches!(
+            client.read(&structfs_core_store::path!("open")).await,
+            Err(Error::DeadlineExceeded { .. })
+        ));
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.usage().calls, 0);
+        owner.cancel();
+        let started = Arc::new(AtomicUsize::new(0));
+        let count = started.clone();
+        assert!(owner
+            .handle()
+            .open(1, move |_| async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(((), || async { Ok(()) }))
+            })
+            .await
+            .is_err());
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+        assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    }
 }

@@ -153,7 +153,9 @@ mod tests {
                 };
                 let request: ProcessRequest =
                     from_value(r.into_value(&structfs_core_store::NoCodec)?)?;
-                if request.version != 1
+                if p != path!("start")
+                    || !request.args.is_empty()
+                    || request.version != 1
                     || request.operation != expected
                     || request.program != "fake-tool"
                     || request.environment_grant != "safe_env"
@@ -358,6 +360,54 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
+        // An ordinary state commit and immutable snapshot do not write the journal.
+        let config_state = State::new(
+            &restarted.handle(),
+            Some(Value::from("draft")),
+            StateLimits::default(),
+        )
+        .unwrap();
+        let config_client = StateClient::new(
+            Router::new(vec![Mount::new(
+                path!(""),
+                path!(""),
+                config_state.view(path!(""), true),
+                Arc::new(BudgetAdmission {
+                    budget: CallBudget::<String>::new(CallLimits::default()),
+                    key: "config".into(),
+                }),
+            )])
+            .unwrap()
+            .client(),
+        );
+        config_client
+            .batch(
+                None,
+                vec![structfs_state::Mutation::Set {
+                    path: "".into(),
+                    value: Value::from("saved"),
+                }],
+            )
+            .await
+            .unwrap();
+        let snapshot = config_client
+            .open(Command::Snapshot {
+                prefix: "".into(),
+                limits: ReadLimits::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.projection(65536, 128).await.unwrap().root(),
+            Some(&Value::from("saved"))
+        );
+        snapshot.release().await.unwrap();
+        assert!(!reopened
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .contains_key("configuration"));
         // Configuration persistence is an explicit boundary, distinct from state snapshots.
         let j = reopened.clone();
         let config = tokio::task::spawn_blocking(move || j.commit("configuration", "saved"))
@@ -397,5 +447,91 @@ mod tests {
         drop(journal);
         drop(reopened);
         std::fs::remove_file(temp).unwrap();
+    }
+    struct FakeProcess {
+        operation: Arc<structfs_profiles::OperationHandle>,
+        stream: Arc<structfs_handles::DuplexStream>,
+        _registration: Registration,
+    }
+    fn fake_process(owner: &OwnerHandle, request: ProcessRequest) -> Result<FakeProcess, Error> {
+        if request.version != 1
+            || request.program != "echo"
+            || request.environment_grant != "safe_env"
+            || request.workspace_grant != "workspace"
+            || !request.args.is_empty()
+        {
+            return Err(Error::permission_denied("fake process grant"));
+        }
+        let (process, client) = structfs_handles::DuplexStream::pair(8)?;
+        let cleanup = process.clone();
+        let registration = owner.register(ResourceKind::Registration, 16, move || async move {
+            cleanup.release();
+            Ok(())
+        })?;
+        let operation = structfs_profiles::OperationHandle::start(
+            owner,
+            request.operation,
+            64,
+            move |cancel| async move {
+                let bytes = process.read(8, &cancel).await?;
+                process.write(&bytes, &cancel).await?;
+                process.shutdown_write();
+                Ok(br#"{"exit_code":0}"#.to_vec())
+            },
+        )?;
+        Ok(FakeProcess {
+            operation,
+            stream: client,
+            _registration: registration,
+        })
+    }
+    #[tokio::test]
+    async fn fake_process_grants_streams_exit_and_cancel_join() {
+        let supervisor = CleanupSupervisor::new(1).unwrap();
+        let owner = supervisor.owner(Default::default()).unwrap();
+        let request = ProcessRequest {
+            version: 1,
+            operation: "echo_once".into(),
+            program: "echo".into(),
+            args: vec![],
+            environment_grant: "safe_env".into(),
+            workspace_grant: "workspace".into(),
+        };
+        let mut denied = request.clone();
+        denied.workspace_grant = "ambient".into();
+        assert!(fake_process(&owner.handle(), denied).is_err());
+        let FakeProcess {
+            operation,
+            stream,
+            _registration,
+        } = fake_process(&owner.handle(), request.clone()).unwrap();
+        stream.write(b"hello", &CancelToken::new()).await.unwrap();
+        assert_eq!(stream.read(8, &CancelToken::new()).await.unwrap(), b"hello");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !operation.status().joined {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(operation.result().unwrap().unwrap(), br#"{"exit_code":0}"#);
+        let FakeProcess {
+            operation: pending,
+            stream: _stream,
+            _registration: _pending_registration,
+        } = fake_process(&owner.handle(), request).unwrap();
+        pending.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pending.status().joined {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            pending.status().phase,
+            structfs_profiles::Phase::Failed
+        ));
+        assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
     }
 }

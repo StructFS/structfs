@@ -61,7 +61,7 @@ impl NativeBlock for ProxyBlock {
                     Ok(Some(record)) => {
                         protocol::ok_value(record.as_value().cloned().unwrap_or(Value::Null))
                     }
-                    Ok(None) => protocol::ok_value(Value::Null),
+                    Ok(None) => protocol::ok_absent(),
                     Err(e) => protocol::error_to_response(&e),
                 },
                 "write" => match ns.write(&target, Record::parsed(request.data.clone())) {
@@ -692,9 +692,10 @@ async fn signals_reach_the_mailbox() {
                     *last = Some(name.clone());
                     None
                 }
-                protocol::EventEnvelope::Request(_request) => Some(protocol::ok_value(
-                    last.clone().map(Value::String).unwrap_or(Value::Null),
-                )),
+                protocol::EventEnvelope::Request(_request) => Some(match last.clone() {
+                    Some(name) => protocol::ok_value(Value::String(name)),
+                    None => protocol::ok_absent(),
+                }),
                 _ => None,
             })
         }
@@ -886,4 +887,37 @@ async fn exit_codes_propagate() {
         .unwrap();
     assert_eq!(assembly.public_cell().state(), BlockState::Stopped);
     assert_eq!(assembly.public_cell().exit_code(), 42);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_server_presence_preserves_null_across_assembly_calls() {
+    struct NullServer;
+    impl NativeBlock for NullServer {
+        fn run(&mut self, ns: &mut featherweight_runtime::Namespace) -> Result<(), Error> {
+            native::serve_only_requests(ns, |_, request| {
+                if request.path == path!("present") {
+                    protocol::ok_value(Value::Null)
+                } else {
+                    protocol::ok_absent()
+                }
+            })
+        }
+    }
+    let mut runtime = runtime();
+    runtime.register_builtin(
+        "nulls",
+        Arc::new(|| Box::new(NullServer) as Box<dyn NativeBlock>),
+    );
+    let def = AssemblyDef::from_str(
+        r#"{"assembly":"presence","blocks":{"server":"builtin:nulls"},"public":"server"}"#,
+    )
+    .unwrap();
+    let instance = runtime
+        .instantiate(&def, HashMap::new(), &base_dir())
+        .unwrap();
+    let present = instance.read(path!("present")).await;
+    let absent = instance.read(path!("absent")).await;
+    assert!(instance.shutdown(Duration::from_secs(2)).await.complete());
+    assert_eq!(present.unwrap(), Some(Value::Null));
+    assert_eq!(absent.unwrap(), None);
 }

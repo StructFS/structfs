@@ -10,7 +10,7 @@ mod tests {
         sync::Arc,
         time::Duration,
     };
-    use structfs_core_store::{path, DetachedFuture, Error, Record, Value};
+    use structfs_core_store::{path, DetachedFuture, Error, Path, Record, Value};
     use structfs_profiles::{
         Declaration, HeadlessHost, Implementation, Input, InputEnvelope, Profile, Profiled, Session,
     };
@@ -123,6 +123,8 @@ mod tests {
         let supervisor = CleanupSupervisor::new(4).unwrap();
         let host = Arc::new(HeadlessHost::default());
         let budget = CallBudget::new(CallLimits::default());
+        let router = Router::new(vec![]).unwrap();
+        let mut mounts = vec![];
         let mut owners = vec![];
         let mut projections = vec![];
         let mut sessions = vec![];
@@ -146,6 +148,22 @@ mod tests {
                 },
             )
             .unwrap();
+            mounts.push(
+                router
+                    .register(
+                        &owner.handle(),
+                        Mount::new(
+                            Path::parse(surface).unwrap(),
+                            path!(""),
+                            state.view(path!(""), true),
+                            Arc::new(BudgetAdmission {
+                                budget: budget.clone(),
+                                key: "Catalog".into(),
+                            }),
+                        ),
+                    )
+                    .unwrap(),
+            );
             let raw = client(state.view(path!(""), true), &owner.handle(), budget.clone());
             let sc = StateClient::new(raw.clone());
             let observation = sc
@@ -245,6 +263,22 @@ mod tests {
         }
         assert_eq!(projections[0], projections[1]);
         assert!(owners[0].close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(router
+            .client()
+            .read(&path!("left/data/label"))
+            .await
+            .is_err());
+        assert_eq!(
+            router
+                .client()
+                .read(&path!("right/data/label"))
+                .await
+                .unwrap()
+                .unwrap()
+                .into_value(&structfs_core_store::NoCodec)
+                .unwrap(),
+            Value::from("Catalog")
+        );
         assert!(!sessions[1].status().closed);
         sessions[1]
             .submit(InputEnvelope {

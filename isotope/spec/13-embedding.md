@@ -10,7 +10,8 @@ the embedding host. An instance owns its namespace, execution state, memory and
 provider resources. A request owns its outstanding operations, deadline and
 cancellation; multiple requests may address one persistent instance.
 
-Request cancellation removes pending correlations and refunds admission. It does
+Request cancellation removes pending correlations. Admission is refunded when
+the underlying charged work ends; noninterruptible work retains its lease. It does
 not terminate a shared instance, undo committed effects or interrupt unrelated
 requests. A cooperative server cancels request-owned work when its response
 identity is cancelled. Native adapters obtain a token through
@@ -22,7 +23,9 @@ individual request.
 
 Instance shutdown stops admissions, requests graceful exit, escalates after one
 grace deadline and joins execution tasks. `ShutdownReport.remaining` identifies
-work not joined; hosts must retain its reservations. Blocking native code can
+execution work not joined; `ShutdownReport.providers` reports provider owners
+and resources still pending cleanup. Use `complete()` for aggregate completion,
+and retain the cleanup supervisor and reservations until reconciliation. Blocking native code can
 ignore cancellation and cannot be forcibly reclaimed. Dropping an ordinary
 assembly reference is not shutdown.
 
@@ -136,3 +139,16 @@ separate host-only inspection surface whose operations cannot change guest-visib
 state. Application reads and writes remain in the effect transcript. Debugging
 must never make arbitrary application reads replay-exempt. This release does not
 provide a universal snapshot/restore or debugger ABI.
+
+
+## Independently versioned application profiles
+
+[Application capability profiles v1](14-capability-profiles.md) defines
+`meta/profiles` discovery, state, operation handles, binary streams, interactive
+sessions, explicit configuration persistence acknowledgments, and fixture-only
+process grants. These are ordinary granted providers, not additional `iso/`
+branches or core-Wasm imports. Rust and portable guest schemas are in
+`structfs-profiles`; reusable state is in `structfs-state`.
+
+The [implementation and support matrix](../../docs/design/2026-09-12-application-profiles-and-fixtures.md)
+records archive-built migration fixtures and platform limits.

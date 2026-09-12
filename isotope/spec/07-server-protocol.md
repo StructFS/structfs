@@ -107,7 +107,16 @@ The Block writes a Response to the `respond_to` path:
 }
 ```
 
-The `value` is what the caller's read returns.
+The `value` is what the caller's read returns. New servers MUST include
+`"present": true` for present values, including Null. Absence is
+`{"result":"ok","present":false}` with no `value` field. True without a value,
+false with a value, and non-boolean presence markers are malformed responses.
+
+For compatibility, an unmarked response with a missing or Null value remains
+absent. Runtime `protocol::ok_value` emits explicit presence and
+`protocol::ok_absent` emits absence. Servers using `ok_value(Null)` to mean
+absence must migrate to `ok_absent()`. The reference guest's read responses also
+use explicit presence. This is an envelope extension, not an ABI import change.
 
 ### Response for Write
 
@@ -473,3 +482,15 @@ while True:
    what happens? Queue limits? Errors?
 
 5. **Request priority**: Should there be priority levels for Requests?
+
+
+## Value v1 and error compatibility
+
+Response Values use the selected codec; plain JSON is a compatibility subset.
+Use a lossless Value profile for Bytes, full-width integers or non-finite floats.
+The runtime preserves `cancelled` and `resource_limit` errors separately from
+`unavailable`. Older `forbidden`, `unavailable` and `timeout` names remain
+accepted. Diagnostics are not machine-readable error codes; richer profile faults
+are typed Value envelopes. Existing path-less error envelopes cannot reconstruct
+every native path error. See [protocol](06-protocol.md) and
+[application profiles](14-capability-profiles.md).

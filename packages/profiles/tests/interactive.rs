@@ -5,11 +5,13 @@ fn shared_input_corpus() {
         serde_json::from_str(include_str!("fixtures/input-v1.json")).unwrap();
     let mut last = 0;
     for case in cases {
-        let input: InputEnvelope = serde_json::from_value(case["event"].clone()).unwrap();
-        let valid = input.validate("s", last).is_ok();
-        assert_eq!(valid, case["ok"].as_bool().unwrap());
+        let parsed = serde_json::from_value::<InputEnvelope>(case["event"].clone());
+        let valid = parsed
+            .as_ref()
+            .is_ok_and(|input| input.validate("s", last).is_ok());
+        assert_eq!(valid, case["ok"].as_bool().unwrap(), "{case}");
         if valid {
-            last = input.sequence;
+            last = parsed.unwrap().sequence;
         }
     }
     assert_eq!(last, 6);
@@ -62,4 +64,81 @@ async fn queue_bounds_identity_and_presentation_are_independent() {
     let replacement = host.open(&other.handle(), "surface", 1, 1024).unwrap();
     a.release();
     assert!(!replacement.status().closed);
+}
+
+#[cfg(feature = "host")]
+#[tokio::test]
+async fn discovery_is_pure_read_only_and_version_checked() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use structfs_core_store::{path, DetachedFuture, Error, Record, Value};
+    use structfs_service::*;
+    struct Effects(Arc<AtomicUsize>);
+    impl Service for Effects {
+        fn call(&self, _: CallContext, _: Operation) -> DetachedFuture<Response> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(Error::permission_denied("effect")) })
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let inner = Arc::new(Effects(calls.clone()));
+    let declaration = Declaration {
+        profile: Profile::Interactive,
+        version: 1,
+        implementation: Implementation::Reference,
+    };
+    assert!(Profiled::new(
+        inner.clone(),
+        vec![Declaration {
+            version: 2,
+            ..declaration.clone()
+        }]
+    )
+    .is_err());
+    assert!(Profiled::new(
+        inner.clone(),
+        vec![declaration.clone(), declaration.clone()]
+    )
+    .is_err());
+    let provider = Profiled::new(inner, vec![declaration]).unwrap();
+    let response = provider
+        .call(
+            CallContext::default(),
+            Operation::Read(path!("meta/profiles")),
+        )
+        .await
+        .unwrap();
+    let Response::Read(Some(record)) = response else {
+        panic!("missing discovery")
+    };
+    let declarations: Vec<Declaration> =
+        structfs_serde_store::from_value(record.into_value(&structfs_core_store::NoCodec).unwrap())
+            .unwrap();
+    assert_eq!(declarations[0].profile, Profile::Interactive);
+    assert!(provider
+        .call(
+            CallContext::default(),
+            Operation::Write(path!("meta/profiles"), Record::parsed(Value::Null))
+        )
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn persistence_acknowledgments_cannot_claim_memory_is_durable() {
+    let mut ack = CommitAck {
+        token: Token {
+            epoch: "e".into(),
+            revision: 1,
+        },
+        persisted: false,
+        durability: Durability::Memory,
+    };
+    ack.validate().unwrap();
+    ack.persisted = true;
+    assert!(ack.validate().is_err());
+    ack.durability = Durability::FileSynced;
+    ack.validate().unwrap();
 }

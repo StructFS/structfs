@@ -11,7 +11,9 @@ use std::sync::Arc;
 use structfs_core_store::{path, Error, MemoryStore, Path, Reader, Record, Value, Writer};
 
 use crate::namespace::Namespace;
-use crate::protocol::{error_to_response, ok_path, ok_value, EventEnvelope, RequestEnvelope};
+use crate::protocol::{
+    error_to_response, ok_absent, ok_path, ok_value, EventEnvelope, RequestEnvelope,
+};
 
 /// A block implemented in native Rust.
 pub trait NativeBlock: Send {
@@ -115,7 +117,7 @@ impl NativeBlock for KvBlock {
         serve_only_requests(ns, |_ns, request| match request.op.as_str() {
             "read" => match store.read(&request.path) {
                 Ok(Some(record)) => ok_value(record.as_value().cloned().unwrap_or(Value::Null)),
-                Ok(None) => ok_value(Value::Null),
+                Ok(None) => ok_absent(),
                 Err(e) => error_to_response(&e),
             },
             "write" => match store.write(&request.path, Record::parsed(request.data.clone())) {

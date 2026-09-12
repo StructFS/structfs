@@ -52,7 +52,7 @@ export interface WorkerHostOptions {
 }
 
 export type ResponseEnvelope =
-  | { result: "ok"; value?: unknown; path?: string }
+  | { result: "ok"; value?: unknown; path?: string; present?: boolean }
   | { result: "error"; error: unknown };
 
 const listen = (

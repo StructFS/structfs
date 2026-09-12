@@ -39,13 +39,13 @@ impl Client {
             &v,
             &self.codec,
         )?;
-        let path =
-            Path::parse(&returned).map_err(|_| ValueError::Host("invalid state handle".into()))?;
+        let path = Path::parse(&returned)
+            .map_err(|_| ValueError::Protocol("invalid state handle".into()))?;
         let relative = path
             .strip_prefix(&self.root)
-            .ok_or_else(|| ValueError::Host("escaped state handle".into()))?;
+            .ok_or_else(|| ValueError::Protocol("escaped state handle".into()))?;
         if relative.len() != 2 || &relative[0] != "outstanding" {
-            return Err(ValueError::Host("invalid state handle".into()).into());
+            return Err(ValueError::Protocol("invalid state handle".into()).into());
         }
         let h = Handle { client: self, path };
         if let Err(e) = h.describe() {
@@ -67,10 +67,11 @@ impl Client {
 impl Handle<'_> {
     fn read<T: serde::de::DeserializeOwned>(&self, suffix: &str) -> Result<T, Error> {
         let path = self.path.join(
-            &Path::parse(suffix).map_err(|_| ValueError::Host("invalid handle suffix".into()))?,
+            &Path::parse(suffix)
+                .map_err(|_| ValueError::Protocol("invalid handle suffix".into()))?,
         );
         let v = sdk::read_value(&path.to_string(), &self.client.codec)?
-            .ok_or_else(|| ValueError::Host("missing state handle".into()))?;
+            .ok_or_else(|| ValueError::Protocol("missing state handle".into()))?;
         let reply: structfs_state::Reply<T> = from_value(v).map_err(ValueError::Codec)?;
         reply.into_result().map_err(Error::State)
     }

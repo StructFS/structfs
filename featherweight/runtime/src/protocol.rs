@@ -96,12 +96,21 @@ impl EventEnvelope {
     }
 }
 
-/// Build a successful read response: `{result: "ok", value}`.
+/// Build a successful present read response: `{result: "ok", present: true, value}`.
 pub fn ok_value(value: Value) -> Value {
     let mut map = BTreeMap::new();
     map.insert("result".to_string(), Value::from("ok"));
     map.insert("value".to_string(), value);
+    map.insert("present".to_string(), Value::Bool(true));
     Value::Map(map)
+}
+
+/// Build an absent read response without conflating absence with Null.
+pub fn ok_absent() -> Value {
+    Value::Map(BTreeMap::from([
+        ("result".into(), Value::from("ok")),
+        ("present".into(), Value::Bool(false)),
+    ]))
 }
 
 /// Build a successful write response: `{result: "ok", path}`.
@@ -135,9 +144,11 @@ pub fn error_to_response(error: &Error) -> Value {
         }
         Error::Path(_) => err_response("invalid_path", &error.to_string(), false),
         Error::PermissionDenied { .. } => err_response("forbidden", &error.to_string(), false),
-        Error::Overloaded { .. } | Error::Cancelled { .. } => {
+        Error::Overloaded { .. } => {
             err_response("unavailable", "store temporarily unavailable", true)
         }
+        Error::Cancelled { .. } => err_response("cancelled", "operation cancelled", false),
+        Error::ResourceLimit { .. } => err_response("resource_limit", &error.to_string(), false),
         Error::DeadlineExceeded { .. } => err_response("timeout", &error.to_string(), true),
         Error::Conflict { .. } => err_response("conflict", &error.to_string(), false),
         _ => err_response("store_error", &error.to_string(), false),
@@ -165,11 +176,13 @@ fn decode_error(map: &BTreeMap<String, Value>) -> Error {
         "unavailable" => Error::overloaded(message),
         "timeout" => Error::deadline_exceeded(message),
         "conflict" => Error::conflict(message),
+        "cancelled" => Error::cancelled(message),
+        "resource_limit" => Error::resource_limit(message),
         _ => Error::store("server_protocol", "call", message),
     }
 }
 
-/// Decode a response to a read: `Ok(None)` for a Null value.
+/// Decode explicit presence; unmarked legacy Null responses remain absent.
 pub fn decode_read_response(response: Value) -> Result<Option<Value>, Error> {
     let map = match response {
         Value::Map(map) => map,
@@ -182,12 +195,19 @@ pub fn decode_read_response(response: Value) -> Result<Option<Value>, Error> {
         }
     };
     match map.get("result") {
-        Some(Value::String(result)) if result == "ok" => {
-            match map.get("value").cloned().unwrap_or(Value::Null) {
+        Some(Value::String(result)) if result == "ok" => match map.get("present") {
+            Some(Value::Bool(true)) => map
+                .get("value")
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| Error::conflict("present response missing value")),
+            Some(Value::Bool(false)) if !map.contains_key("value") => Ok(None),
+            Some(_) => Err(Error::conflict("invalid response presence")),
+            None => match map.get("value").cloned().unwrap_or(Value::Null) {
                 Value::Null => Ok(None),
                 value => Ok(Some(value)),
-            }
-        }
+            },
+        },
         _ => Err(decode_error(&map)),
     }
 }
@@ -244,7 +264,21 @@ mod tests {
             decode_read_response(ok_value(Value::from("x"))).unwrap(),
             Some(Value::from("x"))
         );
-        assert_eq!(decode_read_response(ok_value(Value::Null)).unwrap(), None);
+        assert_eq!(
+            decode_read_response(ok_value(Value::Null)).unwrap(),
+            Some(Value::Null)
+        );
+        assert_eq!(decode_read_response(ok_absent()).unwrap(), None);
+        let legacy = Value::Map(BTreeMap::from([
+            ("result".into(), "ok".into()),
+            ("value".into(), Value::Null),
+        ]));
+        assert_eq!(decode_read_response(legacy).unwrap(), None);
+        let invalid = Value::Map(BTreeMap::from([
+            ("result".into(), "ok".into()),
+            ("present".into(), true.into()),
+        ]));
+        assert!(decode_read_response(invalid).is_err());
     }
 
     #[test]
@@ -257,6 +291,14 @@ mod tests {
 
     #[test]
     fn error_responses_decode_structurally() {
+        assert!(matches!(
+            decode_read_response(error_to_response(&Error::cancelled("stop"))),
+            Err(Error::Cancelled { .. })
+        ));
+        assert!(matches!(
+            decode_read_response(error_to_response(&Error::resource_limit("large"))),
+            Err(Error::ResourceLimit { .. })
+        ));
         let response = error_to_response(&Error::permission_denied("no capability"));
         let err = decode_write_response(response).unwrap_err();
         assert!(matches!(err, Error::PermissionDenied { .. }));
@@ -270,7 +312,7 @@ mod tests {
     fn implementation_details_do_not_leak_through_unavailable() {
         // The abstraction rule: a crashed block shows as "unavailable",
         // never as its internal error text.
-        let response = error_to_response(&Error::cancelled("cache block crashed horribly"));
+        let response = error_to_response(&Error::overloaded("cache block crashed horribly"));
         match response {
             Value::Map(map) => match map.get("error") {
                 Some(Value::Map(error)) => {

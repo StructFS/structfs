@@ -818,3 +818,11 @@ If consumers require transparent round trips for arbitrary Serde options,
 non-string maps, or format-specific tags, revise section 6 explicitly before
 implementation. Do not silently grow a reserved-map convention or claim the
 structural profile is a universal Serde AST.
+
+## Implementation follow-up (2026-09-12)
+
+P0-A through P0-D have landed, followed by P0-E profile/SDK alignment and three
+archive-built application consumers. The [P0-E implementation report](2026-09-12-application-profiles-and-fixtures.md)
+records delivered surfaces, fixture limitations, host/toolchain scope and release
+gates. Production gateway, durability, process-isolation and browser presentation
+adapters remain P1. No crates.io publication is implied.

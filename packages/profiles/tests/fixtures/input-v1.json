@@ -1,12 +1,159 @@
 [
- {"event":{"version":1,"session":"s","sequence":1,"input":{"type":"key","text":"é"}},"ok":true},
- {"event":{"version":1,"session":"s","sequence":2,"input":{"type":"key","text":"é"}},"ok":true},
- {"event":{"version":1,"session":"s","sequence":2,"input":{"type":"key","text":"é"}},"ok":false},
- {"event":{"version":2,"session":"s","sequence":3,"input":{"type":"key","text":"x"}},"ok":false},
- {"event":{"version":1,"session":"wrong","sequence":3,"input":{"type":"close"}},"ok":false},
- {"event":{"version":1,"session":"s","sequence":3,"input":{"type":"resize","columns":0,"rows":24}},"ok":false},
- {"event":{"version":1,"session":"s","sequence":3,"input":{"type":"resize","columns":80,"rows":24}},"ok":true},
- {"event":{"version":1,"session":"s","sequence":4,"input":{"type":"paste","text":"hello\nworld"}},"ok":true},
- {"event":{"version":1,"session":"s","sequence":5,"input":{"type":"mouse","x":0,"y":1,"button":1}},"ok":true},
- {"event":{"version":1,"session":"s","sequence":6,"input":{"type":"close"}},"ok":true}
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 1,
+      "input": {
+        "type": "key",
+        "text": "é"
+      }
+    },
+    "ok": true
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 2,
+      "input": {
+        "type": "key",
+        "text": "é"
+      }
+    },
+    "ok": true
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 2,
+      "input": {
+        "type": "key",
+        "text": "é"
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 2,
+      "session": "s",
+      "sequence": 3,
+      "input": {
+        "type": "key",
+        "text": "x"
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "wrong",
+      "sequence": 3,
+      "input": {
+        "type": "close"
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 3,
+      "input": {
+        "type": "resize",
+        "columns": 0,
+        "rows": 24
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 3,
+      "input": {
+        "type": "unknown"
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 3,
+      "input": {
+        "type": "close",
+        "text": "ignored"
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 3,
+      "extra": true,
+      "input": {
+        "type": "close"
+      }
+    },
+    "ok": false
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 3,
+      "input": {
+        "type": "resize",
+        "columns": 80,
+        "rows": 24
+      }
+    },
+    "ok": true
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 4,
+      "input": {
+        "type": "paste",
+        "text": "hello\nworld"
+      }
+    },
+    "ok": true
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 5,
+      "input": {
+        "type": "mouse",
+        "x": 0,
+        "y": 1,
+        "button": 1
+      }
+    },
+    "ok": true
+  },
+  {
+    "event": {
+      "version": 1,
+      "session": "s",
+      "sequence": 6,
+      "input": {
+        "type": "close"
+      }
+    },
+    "ok": true
+  }
 ]

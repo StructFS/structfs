@@ -158,3 +158,20 @@ export function read(path: string): Uint8Array | null {
 }
 // write() is the same shape; everything else is ordinary library code.
 ```
+
+
+## Value and capability profile SDK
+
+The `featherweight-guest` optional `value-codecs` feature supplies typed Value
+read/write wrappers. `state` adds portable state commands and faults; `profiles`
+adds pure profile discovery and shared application schemas. All use the same
+`structfs.read` and `structfs.write` imports.
+
+The reference runtime accepts plain JSON, the explicitly versioned tagged Value
+JSON media type, CBOR and FlexBuffers according to the
+[Value v1 codec contracts](../../docs/specs/structfs-value-v1.md).
+Do not infer support for another MIME type from the general protocol. ABI status
+1 remains absence; status 0 with encoded Null remains present. Negative status
+codes preserve categories, while their UTF-8 diagnostics do not preserve all
+native codec error fields. Typed profile faults can use successful Value reply
+envelopes to retain additional structure.

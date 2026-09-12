@@ -166,7 +166,7 @@ impl Session {
         }
         q.status.accepted = input.sequence;
         q.bytes += bytes;
-        q.input_closed = matches!(input.input, Input::Close);
+        q.input_closed = matches!(input.input, Input::Close {});
         q.events.push_back(input);
         drop(q);
         self.inner.gate.notify();
@@ -233,6 +233,7 @@ impl Service for Session {
         let released = self.registration.cancellation();
         match op {
             Operation::Read(p) if p.to_string() == "input/next" => Box::pin(async move {
+                c.ensure_active()?;
                 let _lease = c.lease();
                 let read = inner.gate.wait_until_cancellable(&c.cancellation, || {
                     let mut q = inner.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -257,7 +258,9 @@ impl Service for Session {
                             "input" => self.submit(from_value(value)?)?,
                             "processed" => self.processed(from_value(value)?)?,
                             "presented" => self.presented(from_value(value)?)?,
-                            "release" => self.release(),
+                            "release" if value == structfs_core_store::Value::Null => {
+                                self.release()
+                            }
                             _ => return Err(Error::permission_denied("interactive path")),
                         }
                         Ok(Response::Written(p))

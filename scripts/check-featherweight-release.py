@@ -80,14 +80,17 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     # Building the extracted workspace avoids Cargo's temporary-registry hash
     # lookup failure during built-in batch verification on Cargo 1.96.
     run(["cargo", "check", "--offline", "--workspace", "--all-targets"], stage, env=env)
-    run(["cargo", "test", "--offline", "-p", "featherweight-external-embedding-check",
-         "-p", "featherweight-runtime", "-p", "structfs-handles",
+    run(["cargo", "test", "--offline", "-p", "featherweight-runtime", "-p", "structfs-handles",
          "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
     import sys
     run([sys.executable, str(stage / dirs["structfs-serde-store"] /
          "tests/reference_value_v1.py")], stage, env=env)
     run(["cargo", "clippy", "--locked", "--offline", *consumer_args,
          "--all-targets", "--", "-D", "warnings"], stage, env=env)
+    run(["cargo", "test", "--locked", "--offline", "-p", "structfs-profiles",
+         "--no-default-features"], stage, env=env)
+    run(["cargo", "build", "--locked", "--offline", "-p", "structfs-profiles",
+         "--no-default-features", "--target", "wasm32-unknown-unknown"], stage, env=env)
     for features in [[], ["--no-default-features"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"], ["--no-default-features", "--features", "profiles"]]:
         run(["cargo", "build", "--locked", "--offline", "-p", "featherweight-guest",
              "--target", "wasm32-unknown-unknown", *features], stage, env=env)

@@ -204,3 +204,11 @@ Key differences:
 
 `read iso/capabilities` lists the granted mount prefixes. It does not grant
 additional authority or enumerate provider contents. See [embedding profiles](13-embedding.md).
+
+
+Provider `meta/profiles` discovery is pure and read-only. Reading arbitrary roots
+to enumerate a namespace can invoke effects; use explicit listing contracts.
+Labels are diagnostic. Two services with identical labels under different granted
+prefixes remain separate capabilities with independent owners. Native host-owned
+dynamic registration does not give a guest permission to mutate assembly wiring.
+See [application profiles](14-capability-profiles.md).
