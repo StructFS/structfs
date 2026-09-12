@@ -55,14 +55,20 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
                 for dep in table.get(section, {}).values():
                     assert not isinstance(dep, dict) or "path" not in dep, (name, dep)
 
-    consumer = stage / "consumer"
-    shutil.copytree(ROOT / "tests/embedding/src", consumer / "src")
-    source = (ROOT / "tests/embedding/Cargo.toml").read_text()
-    source = source.replace("[workspace]\n", "")
     import re
-    source = re.sub(r', path = "[^"]+"', '', source)
-    (consumer / "Cargo.toml").write_text(source)
-    members = [*dirs.values(), "consumer"]
+    consumers = ["embedding", "reactive-screen", "streaming-gateway", "conversation-service"]
+    consumer_packages = ["featherweight-external-embedding-check"]
+    for name in consumers:
+        origin = ROOT / "tests" / ("embedding" if name == "embedding" else f"applications/{name}")
+        consumer = stage / name
+        shutil.copytree(origin / "src", consumer / "src")
+        source = (origin / "Cargo.toml").read_text().replace("[workspace]\n", "")
+        source = re.sub(r', path = "[^"]+"', '', source)
+        (consumer / "Cargo.toml").write_text(source)
+        if name != "embedding":
+            consumer_packages.append(tomllib.loads(source)["package"]["name"])
+    consumer_args = [arg for name in consumer_packages for arg in ["-p", name]]
+    members = [*dirs.values(), *consumers]
     workspace = '[workspace]\nresolver = "2"\nmembers = ' + json.dumps(members) + '\n'
     workspace += '\n[patch.crates-io]\n'
     for name, directory in dirs.items():
@@ -76,15 +82,15 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     run(["cargo", "check", "--offline", "--workspace", "--all-targets"], stage, env=env)
     run(["cargo", "test", "--offline", "-p", "featherweight-external-embedding-check",
          "-p", "featherweight-runtime", "-p", "structfs-handles",
-         "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state"], stage, env=env)
+         "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
     import sys
     run([sys.executable, str(stage / dirs["structfs-serde-store"] /
          "tests/reference_value_v1.py")], stage, env=env)
-    run(["cargo", "clippy", "--locked", "--offline", "-p", "featherweight-external-embedding-check",
+    run(["cargo", "clippy", "--locked", "--offline", *consumer_args,
          "--all-targets", "--", "-D", "warnings"], stage, env=env)
-    for features in [[], ["--no-default-features"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"]]:
+    for features in [[], ["--no-default-features"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"], ["--no-default-features", "--features", "profiles"]]:
         run(["cargo", "build", "--locked", "--offline", "-p", "featherweight-guest",
              "--target", "wasm32-unknown-unknown", *features], stage, env=env)
     run(["cargo", "doc", "--locked", "--offline", "--no-deps", "-p", "featherweight-runtime",
-         "-p", "structfs-handles", "-p", "structfs-service", "-p", "structfs-state"], stage, env={**env, "RUSTDOCFLAGS": "-D warnings"})
+         "-p", "structfs-handles", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles"], stage, env={**env, "RUSTDOCFLAGS": "-D warnings"})
 print("Featherweight package embedding gate passed; nothing published.")

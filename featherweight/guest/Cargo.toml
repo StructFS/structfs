@@ -14,6 +14,7 @@ default = ["reference-guest"]
 reference-guest = []
 value-codecs = ["dep:structfs-serde-store"]
 state = ["value-codecs", "dep:structfs-state"]
+profiles = ["value-codecs", "dep:structfs-profiles"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -24,3 +25,4 @@ serde_json = { workspace = true }
 structfs-serde-store = { workspace = true, optional = true }
 
 structfs-state = { workspace = true, default-features = false, optional = true }
+structfs-profiles = { workspace = true, default-features = false, optional = true }

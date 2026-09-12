@@ -1,0 +1,19 @@
+[package]
+name = "structfs-reactive-screen-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+featherweight-runtime = { version = "0.2.0", path = "../../../featherweight/runtime" }
+structfs-core-store = { version = "0.2.0", path = "../../../packages/core-store", features = ["async"] }
+structfs-handles = { version = "0.2.0", path = "../../../packages/handles" }
+structfs-serde-store = { version = "0.2.0", path = "../../../packages/serde-store" }
+structfs-service = { version = "0.2.0", path = "../../../packages/service" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+structfs-state = { version = "0.2.0", path = "../../../packages/state" }
+structfs-profiles = { version = "0.2.0", path = "../../../packages/profiles" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

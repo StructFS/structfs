@@ -21,6 +21,18 @@ pub mod sdk {
         Codec(structfs_serde_store::Error),
     }
 
+    /// Side-effect-free capability discovery; declarations do not grant authority.
+    #[cfg(feature = "profiles")]
+    pub fn profiles(
+        root: &structfs_serde_store::Path,
+        codec: &structfs_serde_store::ValueCodec,
+    ) -> Result<Vec<structfs_profiles::Declaration>, ValueError> {
+        let path = root.join(&structfs_serde_store::Path::parse("meta/profiles").unwrap());
+        let value = read_value(&path.to_string(), codec)?
+            .ok_or_else(|| ValueError::Host("profile discovery unavailable".into()))?;
+        structfs_serde_store::from_value(value).map_err(ValueError::Codec)
+    }
+
     /// Decode with an explicitly selected profile matching the guest manifest.
     #[cfg(feature = "value-codecs")]
     pub fn read_value(
@@ -233,3 +245,6 @@ mod reference {
 /// Typed revisioned-state client for the guest ABI.
 #[cfg(feature = "state")]
 pub mod state;
+
+#[cfg(feature = "profiles")]
+pub use structfs_profiles as profiles;

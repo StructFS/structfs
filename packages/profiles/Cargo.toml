@@ -1,0 +1,22 @@
+[package]
+name = "structfs-profiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned capability profiles and headless interactive sessions for StructFS"
+readme = "README.md"
+[features]
+default = ["host"]
+host = ["dep:structfs-service", "dep:structfs-handles", "dep:tokio", "dep:uuid"]
+[dependencies]
+serde.workspace = true
+structfs-core-store.workspace = true
+structfs-state = { workspace = true, default-features = false }
+structfs-serde-store.workspace = true
+structfs-service = { workspace = true, optional = true }
+structfs-handles = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync", "time"], optional = true }
+uuid = { workspace = true, optional = true }
+[dev-dependencies]
+serde_json.workspace = true

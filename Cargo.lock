@@ -796,6 +796,7 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
+ "structfs-profiles",
  "structfs-serde-store",
  "structfs-state",
 ]
@@ -2443,6 +2444,7 @@ dependencies = [
  "structfs-core-store",
  "structfs-http",
  "structfs-json-store",
+ "structfs-profiles",
  "structfs-serde-store",
  "structfs-service",
  "structfs-state",
@@ -2530,6 +2532,21 @@ name = "structfs-path-validation"
 version = "0.2.0"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "structfs-profiles"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "structfs-core-store",
+ "structfs-handles",
+ "structfs-serde-store",
+ "structfs-service",
+ "structfs-state",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

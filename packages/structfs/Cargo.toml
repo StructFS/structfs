@@ -18,6 +18,8 @@ structfs-json-store = { workspace = true, optional = true }
 structfs-http = { workspace = true, optional = true }
 structfs-sys = { workspace = true, optional = true }
 
+structfs-profiles = { workspace = true, features = ["host"], optional = true }
+
 [features]
 default = []
 serde = ["dep:structfs-serde-store"]
@@ -27,4 +29,5 @@ sys = ["dep:structfs-sys"]
 async = ["structfs-core-store/async", "structfs-serde-store?/async"]
 service = ["dep:structfs-service", "async"]
 state = ["dep:structfs-state", "service", "serde"]
-full = ["serde", "json", "http", "sys", "async", "service", "state"]
+profiles = ["dep:structfs-profiles", "service"]
+full = ["serde", "json", "http", "sys", "async", "service", "state", "profiles"]

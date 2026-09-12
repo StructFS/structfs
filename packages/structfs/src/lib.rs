@@ -141,3 +141,6 @@ pub use structfs_service as service;
 /// Revisioned state, snapshots, and bounded observation.
 #[cfg(feature = "state")]
 pub use structfs_state as state;
+
+#[cfg(feature = "profiles")]
+pub use structfs_profiles as profiles;

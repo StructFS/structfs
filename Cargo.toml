@@ -10,6 +10,7 @@ members = [
     "packages/handles",
     "packages/service",
     "packages/state",
+    "packages/profiles",
     "packages/http",
     "packages/repl",
     "packages/sys",
@@ -39,6 +40,7 @@ default-members = [
     "packages/handles",
     "packages/service",
     "packages/state",
+    "packages/profiles",
     "packages/http",
     "packages/repl",
     "packages/sys",
@@ -67,6 +69,7 @@ structfs-serde-store = { version = "0.2.0", path = "packages/serde-store" }
 namecode = { version = "0.1.1", path = "namecode" }
 
 # Workspace crates - store implementations
+structfs-profiles = { version = "0.2.0", path = "packages/profiles", default-features = false }
 structfs-json-store = { version = "0.2.0", path = "packages/json_store" }
 structfs-service = { version = "0.2.0", path = "packages/service" }
 structfs-state = { version = "0.2.0", path = "packages/state", default-features = false }
