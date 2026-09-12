@@ -1,4 +1,6 @@
-//! Independently versioned capability contracts. Discovery never invokes effects.
+//! Optional, independently versioned store contracts above StructFS core.
+//! Stores implement their semantics; the runtime does not supply them.
+//! Profile discovery never invokes effects.
 use serde::{Deserialize, Serialize};
 pub use structfs_state::Token;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,12 +103,17 @@ pub struct OperationStatus {
     pub joined: bool,
     pub result_bytes: usize,
 }
+/// Levels in the optional configuration-store acknowledgment convention.
+/// This is not a universal taxonomy of store durability guarantees.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Durability {
     Memory,
     FileSynced,
 }
+/// A store-produced acknowledgment for this optional profile, not a core write
+/// result or runtime persistence mechanism. Other stores may acknowledge durable
+/// writes without this payload or a separate save operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommitAck {
     pub token: Token,
@@ -114,6 +121,7 @@ pub struct CommitAck {
     pub durability: Durability,
 }
 impl CommitAck {
+    /// Check this schema's field consistency; does not verify persistence.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.persisted != matches!(self.durability, Durability::FileSynced) {
             return Err("inconsistent persistence acknowledgment");

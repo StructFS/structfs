@@ -74,8 +74,11 @@ mount names are `config`, `services/clock`, `services/entropy`,
 
 ## Capability service schemas
 
-Providers declare which profile they implement. Missing capabilities fail with
-PermissionDenied at namespace routing; a granted provider uses typed errors for
+Stores may opt into the profiles below and declare those they implement. These
+are store-level contracts, not requirements of StructFS core. Store implementations
+own their consistency, durability and functional semantics; the runtime carries
+operations and results while enforcing its routing and lifecycle boundaries.
+Missing capabilities fail with PermissionDenied at namespace routing; a granted provider uses typed errors for
 unsupported operations. No provider silently substitutes invented clock or
 entropy values. Deterministic providers are explicit grants.
 
@@ -145,7 +148,7 @@ provide a universal snapshot/restore or debugger ABI.
 
 [Application capability profiles v1](14-capability-profiles.md) defines
 `meta/profiles` discovery, state, operation handles, binary streams, interactive
-sessions, explicit configuration persistence acknowledgments, and fixture-only
+sessions, an optional configuration-store acknowledgment convention, and fixture-only
 process grants. These are ordinary granted providers, not additional `iso/`
 branches or core-Wasm imports. Rust and portable guest schemas are in
 `structfs-profiles`; reusable state is in `structfs-state`.

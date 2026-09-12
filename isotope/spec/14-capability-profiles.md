@@ -5,6 +5,20 @@ Rust schemas live in `structfs-profiles`; the state schema lives in `structfs-st
 All payloads use StructFS Value v1. Profile versions are positive integers, not
 crate versions. This release implements version 1.
 
+## Scope: optional store contracts
+
+StructFS core defines paths, values/records, read/write results and errors, and
+composition. The stores implementing functionality provide all higher-level
+semantics: consistency, transactions, durability, observation, streams, operations,
+configuration workflows and process policy. Implementing StructFS does not require
+implementing any profile in this document.
+
+These profiles are optional, reusable contracts for stores that choose to implement
+them. Requirements below apply within the declared profile, not to arbitrary stores
+or to the StructFS core. A store can expose a different documented contract without
+adopting these schemas or paths. Isotope and Featherweight provide routing,
+execution and lifecycle machinery; they do not strengthen a store's guarantees.
+
 ## Discovery
 
 A granted provider may expose pure, read-only `meta/profiles`:
@@ -31,7 +45,9 @@ an opaque epoch and u64 revision. Old epochs and expired cursors are typed fault
 resynchronization obtains a new snapshot. Batch mutations publish atomically under
 an optional expected token. Empty/repeated events are occurrences, not value-diff
 notifications. Projection is synchronous, bounded, immutable application data.
-Snapshots and successful commits imply no disk persistence.
+The in-memory reference store supplies no disk persistence. The state profile alone
+makes no durability promise; another store implementing it may guarantee durable
+commits through its own documented acknowledgment and recovery contract.
 
 ## Operation: `structfs.operation`
 
@@ -112,18 +128,33 @@ model alone does not certify browser worker residency or DOM rendering.
 
 ## Configuration: `structfs.configuration`
 
-Configuration persistence is an explicit application commit operation, separate
-from state mutation, observation and snapshotting. Its acknowledgment contains
-`token`, `persisted`, `durability`. `memory` implies persisted=false;
-`file_synced` implies persisted=true after the provider's file sync succeeds.
-Applications must reject inconsistent acknowledgments. The schema describes these
-levels; it does not implement a production configuration store.
+A configuration store defines what successful reads and writes mean, including
+validation, consistency, persistence and recovery. A durable store may make ordinary
+write success its durable acknowledgment. StructFS does not require a separate save
+operation, a draft state layer, or a persistence acknowledgment Value. Separating
+editing from saving is an optional workflow implemented by the chosen stores and
+application.
 
-The fixture journal validates duplicate operation IDs against identical content,
-appends and syncs before acknowledging, then publishes observer events. Lost event
-delivery does not undo a durable commit. Its recovery assumes complete records;
-torn-write recovery, atomic file replacement, directory sync and multi-writer
-transactions require a production adapter and additional durability levels.
+The `structfs.configuration` v1 schema is one optional store-level acknowledgment
+convention, used by the fixture. `CommitAck` contains `token`, `persisted` and
+`durability`: `memory` pairs with persisted=false; `file_synced` pairs with
+persisted=true after the store's file sync succeeds. Consumers of this convention
+must reject inconsistent combinations. These are the levels represented by this
+particular schema, not a universal durability taxonomy. Other stores can define
+transactional, replicated or other guarantees through their own contracts.
+
+The store produces and enforces its acknowledgment. The runtime transports the
+result or error without inventing a stronger durability guarantee, retrying effects
+automatically, or treating cancellation as rollback. The schema validator checks
+field consistency; it neither performs persistence nor verifies that it occurred.
+
+In the conversation fixture, an in-memory configuration snapshot and the journal
+are separate stores. The journal validates duplicate operation IDs against identical
+content, appends and syncs before acknowledging; the application then publishes
+observer events. Lost event delivery does not undo that store commit. Recovery
+assumes complete records. Torn-write recovery, atomic replacement, directory sync
+and concurrent transactions belong to a production store's implementation and
+contract; they do not require changes to the core or runtime.
 
 ## Process: `structfs.process`
 

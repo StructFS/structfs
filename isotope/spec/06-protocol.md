@@ -12,6 +12,14 @@ command; deletion is a provider operation. Some compatibility stores retain a
 historical delete-on-null convention and must document it. Writes may return a
 new handle path, which is significant and must pass namespace confinement checks.
 
+Higher-level semantics belong to the stores implementing them. Core read/write
+success carries the meaning documented by that store; the core does not prescribe
+transactions, persistence, event ordering, streaming or configuration workflows.
+A durable store may acknowledge persistence through ordinary write success.
+Optional store profiles standardize particular contracts without extending the
+core requirements for other stores. Routing and runtime execution preserve the
+store's semantics rather than supplying stronger guarantees.
+
 ## Value and serialization
 
 [StructFS Value v1](../../docs/specs/structfs-value-v1.md) is normative for values,

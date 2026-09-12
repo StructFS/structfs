@@ -7,10 +7,16 @@ The migration target combines Value v1, owned async services, Featherweight
 execution ownership, revisioned state, and independent application profiles.
 Ox retains its application reducers, renderers, ledger and authority policy.
 
+StructFS core remains the small path/value/record, read/write, error and composition
+contract. Stores implement all higher-level semantics; the profiles here are optional
+contracts for particular stores. Durability and recovery are store guarantees,
+not runtime features. Applications choose stores with the semantics they need.
+
 ## Shipped surface
 
 `structfs-profiles` adds portable declarations, interactive input/status, operation
-status, approval/process request schemas and validated durability acknowledgments.
+status, approval/process request schemas and an optional store acknowledgment
+schema with field-consistency validation.
 Its default `host` feature adds pure discovery, bounded headless sessions and owned
 operation handles. Disable defaults for guest schemas. The `structfs` facade adds
 an optional `profiles` feature, included in `full`.
@@ -39,7 +45,7 @@ remains; three application consumers add the following evidence.
 | --- | --- |
 | reactive-screen | Current-thread native reducer and actual core guest orchestration produce identical projections; equal labels under distinct mount prefixes; repeated input retained; queue rejection leaves sequence unchanged; pending commit before immediate effect; stale generation rejected despite ignored cancellation; expired-history resync; separate processed/rendered acknowledgments; credential-presence projection; closing one installation preserves its peer |
 | streaming-gateway | One prepared artifact reused in fresh instances; bounded fake upstream/response; slow reader and final-chunk EOF; admission and size rejection; trap/fuel failure; disconnect before and after open; lost open-result delivery; timeout refund; noncooperative work remains charged until joined; cleanup needs no guest final writes |
-| conversation-service | Persistent owned host service across fresh guest turns; operation-specific approvals; observer disconnect independent of turn; cancellation and service close join work; file-sync acknowledgment before event; duplicate-ID content contract across restart; old state epoch rejected; configuration snapshot does not imply persistence; fake process grants, duplex I/O, exit result, cancellation and join |
+| conversation-service | Persistent owned host service across fresh guest turns; operation-specific approvals; observer disconnect independent of turn; cancellation and service close join work; file-sync acknowledgment before event; duplicate-ID content contract across restart; old state epoch rejected; in-memory configuration snapshot does not persist to the separate journal; fake process grants, duplex I/O, exit result, cancellation and join |
 
 The screen uses one host reducer called through the same Service interface from
 native code or WAT. It does not compile a Horns renderer into Wasm. Credential
@@ -49,8 +55,13 @@ proxy adapters are not certified. It prints workload elapsed microseconds and pe
 guest linear-memory bytes separately. These are smoke observations, not statistical
 benchmarks, CPU time, total RSS or Wasmtime compiler memory.
 
-The journal uses append plus `sync_all`. Recovery assumes complete records; it does
-not certify torn-write recovery, directory durability, atomic replacement,
+The journal is one store implementation using append plus `sync_all`; its own
+acknowledgment establishes that ordering before the application publishes an event.
+The fixture's separate configuration save is a chosen workflow. A different store
+can acknowledge durable persistence on ordinary write success, without any separate
+save operation or `CommitAck` payload.
+
+The fixture journal assumes complete records on recovery. It does not certify torn-write recovery, directory durability, atomic replacement,
 multi-process concurrency or database transactions. The fake process neither spawns
 nor sandboxes an OS process. Ox's own remount, ledger, approval, gateway and worker
 tests remain required migration acceptance tests.
@@ -104,8 +115,9 @@ P1 should add the production adapters needed by Ox:
 
 1. Gateway upstream/response adapters with socket-level disconnect/deadline tests
    and measured admission, latency and memory behavior under load.
-2. Durable configuration/ledger adapters with crash recovery and explicit fsync,
-   directory-sync, duplicate-ID and transaction guarantees.
+2. Durable configuration/ledger stores with documented write-acknowledgment,
+   crash-recovery, duplicate-ID and transaction guarantees, enforced by each store.
+   Integrate them through existing read/write and optional profile contracts.
 3. A process provider with executable/environment/workspace grants, bounded stdio,
    exit/termination escalation, and platform-specific isolation tests.
 4. Browser/Horns presentation integration with worker residency and cross-engine

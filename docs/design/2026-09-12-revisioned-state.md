@@ -40,12 +40,16 @@ commit token and conservatively invalidate the parents of mutation paths. This
 covers array shifts and repeated command occurrences. Views project those paths
 to their own subtree and do not expose other tenants' path names or values.
 
-Durability is memory-only. A lost batch response can mean an already committed
+The reference store's durability is memory-only. Atomic batches and observation
+are semantics of this store protocol, not guarantees supplied by StructFS core.
+Other stores may implement the protocol with durable write acknowledgments and
+recovery guarantees of their own. A lost batch response can mean an already committed
 write. Neither native nor guest clients retry batches automatically. Cancellation
 after publication does not roll back effects. For application effects, read a
 generation from a snapshot and commit its result using that snapshot's expected
 token; a conflict forces revalidation before effect publication. Durable outboxes,
-idempotency receipts, and crash recovery remain application responsibilities.
+idempotency receipts and crash recovery require stores implementing those contracts;
+applications select and compose them. The runtime does not provide these guarantees.
 
 ## Wire surface
 

@@ -21,3 +21,10 @@ is a request; `joined` reports actual completion. Release clears retained result
 while noncooperative work stays charged until joined. The granting application
 registers the returned handle path. Callback working memory remains its provider's
 responsibility. See Isotope's application capability profiles specification.
+
+These are optional store contracts above StructFS core. Stores define and enforce
+their functional, consistency and durability semantics; the runtime transports
+operations and results. `CommitAck` is one store-level acknowledgment convention,
+not a required write result or a runtime persistence mechanism. Its validator checks
+field consistency, not persistence. A durable store may acknowledge through ordinary
+write success; a separate save workflow is optional.

@@ -146,6 +146,13 @@ these revisions. Ox references are evidence, not build dependencies.
 
 ## 4. Layering and application domains
 
+StructFS core supplies the small path/value/record, read/write, error and composition
+contract. Stores implement all semantics above it. Service profiles are optional
+contracts among stores and their consumers; they are not additions to the core
+contract. In particular, durability, recovery and transaction guarantees belong to
+the implementing store. Isotope and Featherweight preserve those guarantees across
+their execution boundaries without defining stronger ones.
+
 | Layer | Responsibility | Excluded responsibility |
 |---|---|---|
 | StructFS core | Value, Record, Path, errors, read/write traits, basic composition | UI types, task executor, application transactions |
@@ -622,7 +629,7 @@ must be discoverable without probing effectful application paths.
 | Operation handle | Start, bounded status/result, cancel, release, terminal state; ownership contract | Provider-specific idempotency and recovery integrations |
 | Binary stream | Reuse bounded duplex implementation; EOF/readiness/half-close/release conformance | Specialized zero-copy transport optimizations |
 | Interactive session | Versioned ordered input envelope, resize/paste/key/mouse/close, exclusive presentation ownership; headless reference adapter | Production terminal/DOM adapters, IME/accessibility extensions |
-| Configuration | State profile plus explicit commit/persistence acknowledgment and validation outcomes | General file-editing frontend and source-preserving tooling |
+| Configuration | Optional store acknowledgment schema and fixture demonstrating store-defined persistence/validation semantics | General file-editing frontend and source-preserving tooling |
 | Process execution | Publish profile requirements and fixture-backed fake provider: environment/workspace grants, streams, exit, cancel/join | Production OS adapters and platform-specific sandbox certification |
 | Network/filesystem | Preserve explicit grant boundaries and existing providers; document capability/ownership requirements | Universal listener manager, richer file service, filesystem durability profiles |
 
@@ -632,9 +639,12 @@ sequence and rendered state revision separately. Presentation is exclusive per
 host surface; closing one session cannot unregister another. View payloads are
 application schemas (Horns owns its View), not core IR variants.
 
-Configuration save returns whether the provider has acknowledged persistence,
-not merely whether a callback was scheduled. The durability level must be named.
-General state observation has no implicit fsync guarantee.
+A configuration store documents what write success acknowledges and enforces any
+promised durability and recovery semantics. Ordinary write success may acknowledge
+a durable commit. A separate save operation or structured persistence acknowledgment
+is an optional store/application convention, not a core requirement. The fixture
+uses a separate journal acknowledgment after file sync; its in-memory state snapshot
+does not imply that this separate store has persisted anything.
 
 Process cancellation must describe descendants/process-group handling and
 joining. Native adapters are trusted host code; their use does not create an OS
@@ -755,7 +765,9 @@ Measure actual workload latency/memory separately from synthetic session capacit
 
 Use a persistent service owner, fresh turn executions, a fake tool operation,
 approval wait, and a small durable test provider. Prove commit acknowledgment
-precedes published events; snapshot/config persistence has a separate boundary.
+precedes published events. In this fixture, editing in-memory configuration and
+saving to the journal are deliberately separate store operations; this is not a
+required configuration workflow.
 
 Required scenarios: observer disconnect does not cancel the turn; turn cancellation
 does cancel its tool; service shutdown joins both; approval requires matching
