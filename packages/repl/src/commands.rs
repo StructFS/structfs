@@ -330,8 +330,7 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
     if is_register_path(&path_str) {
         match ctx.read_register(&path_str) {
             Ok(Some(value)) => {
-                let json = value_to_json(value.clone());
-                let mut output = format_json(&json);
+                let mut output = format_ir_value(&value);
 
                 if let Value::String(s) = &value {
                     if s.starts_with('/') || s.contains('/') {
@@ -362,10 +361,7 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
     };
 
     match ctx.read(&path) {
-        Ok(Some(value)) => {
-            let json = value_to_json(value.clone());
-            CommandResult::ok_with_capture(format_json(&json), value)
-        }
+        Ok(Some(value)) => CommandResult::ok_with_capture(format_ir_value(&value), value),
         Ok(None) => CommandResult::ok_with_capture(
             format!(
                 "{}",
@@ -1242,10 +1238,7 @@ fn format_help_value(value: &Value, indent: usize) -> String {
             }
             output
         }
-        other => {
-            let json = value_to_json(other.clone());
-            format_json(&json)
-        }
+        other => format_ir_value(other),
     }
 }
 
@@ -1355,6 +1348,21 @@ fn format_json(value: &JsonValue) -> String {
         .replace("false", &format!("{}", Color::Yellow.paint("false")));
 
     result
+}
+
+// Display full IR values without interpreting Bytes as ordinary strings.
+fn format_ir_value(value: &Value) -> String {
+    match value_to_json(value.clone()) {
+        Ok(json) => format_json(&json),
+        Err(_) => match structfs_core_store::Codec::encode(
+            &structfs_serde_store::ValueJsonCodec,
+            value,
+            &structfs_core_store::Format::VALUE_JSON,
+        ) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(error) => format!("<value display failed: {error}>"),
+        },
+    }
 }
 
 #[cfg(test)]

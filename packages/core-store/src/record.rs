@@ -250,6 +250,7 @@ mod tests {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Integer(i) => serde_json::Value::Number((*i).into()),
+            Value::Unsigned(i) => serde_json::Value::Number((*i).into()),
             Value::Float(f) => serde_json::Number::from_f64(*f)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),

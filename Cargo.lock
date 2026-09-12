@@ -796,6 +796,8 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
+ "structfs-serde-store",
+ "structfs-state",
 ]
 
 [[package]]
@@ -814,6 +816,8 @@ dependencies = [
  "structfs-json-store",
  "structfs-ll-store",
  "structfs-serde-store",
+ "structfs-service",
+ "structfs-state",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -2440,6 +2444,8 @@ dependencies = [
  "structfs-http",
  "structfs-json-store",
  "structfs-serde-store",
+ "structfs-service",
+ "structfs-state",
  "structfs-sys",
 ]
 
@@ -2561,6 +2567,30 @@ dependencies = [
  "structfs-ll-store",
  "thiserror 2.0.17",
  "tokio",
+]
+
+[[package]]
+name = "structfs-service"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "structfs-core-store",
+ "structfs-handles",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "structfs-state"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "structfs-core-store",
+ "structfs-serde-store",
+ "structfs-service",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

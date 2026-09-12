@@ -85,3 +85,24 @@ snapshot ABI or debugger implementation is included. Spec 13 provides extension
 points and contracts for that work. Existing ambient `iso` convenience services
 remain a compatibility profile; newly granted network and configuration services
 belong outside the reserved prefix.
+
+## Proposed application-substrate release scope
+
+The [value IR and application substrate design](design/2026-09-11-application-substrate-and-value-ir.md)
+proposes additional contracts and priorities for Ox and Horns: direct Serde
+conversion, encoding fidelity, shared async routing, revisioned state and change
+observation, resource ownership, and three external application fixtures. These
+are proposed requirements, separate from the implemented gate results above.
+
+The value-layer portion is now implemented: see the
+[Value v1 implementation and migration report](specs/value-v1-implementation.md).
+The archive gate includes its core/Serde conformance tests, independent Python
+canonical encoder, external application-state fixture, and guest codec feature
+build. The [shared async service layer](design/2026-09-11-shared-async-services.md)
+now implements P0-B routing, scoped clients, and common call admission.
+
+P0-C is implemented in [owned services](design/2026-09-11-owned-services.md):
+owned registrations, provider supervision, bounded results/tails, and provider
+resources in Featherweight shutdown reports. Hosts must check `complete()` and
+retain the cleanup supervisor while any resources remain. Revisioned state and
+bounded observation are the next application-substrate priority (P0-D).

@@ -89,7 +89,8 @@ pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use metering::Metering;
 pub use namespace::{
-    async_host_store, host_store, GrantStore, HostStore, Namespace, Target, WiringTable,
+    async_host_store, host_store, service_host_store, GrantStore, HostStore, Namespace, Target,
+    WiringTable,
 };
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
 pub use runtime::{

@@ -14,19 +14,21 @@ use crate::{Error, Path, PathError};
 ///
 /// # Design Notes
 ///
-/// - Uses `BTreeMap` for deterministic ordering (important for hashing, comparison)
+/// - Uses `BTreeMap` for deterministic UTF-8 key ordering
 /// - Includes `Bytes` for binary data (unlike JSON, but like CBOR/MessagePack)
-/// - Uses `i64` for integers (sufficient for most use cases, matches many protocols)
+/// - Integers cover the union of i64 and u64; signedness is not semantic
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
-    /// Absence of a value. Distinct from "path doesn't exist".
+    /// A present null value. Distinct from "path doesn't exist".
     #[default]
     Null,
     /// Boolean value.
     Bool(bool),
     /// Signed 64-bit integer.
     Integer(i64),
+    /// Nonnegative integer storage; normalized values use this only above i64::MAX.
+    Unsigned(u64),
     /// 64-bit floating point.
     Float(f64),
     /// UTF-8 string.
@@ -40,6 +42,39 @@ pub enum Value {
 }
 
 impl Value {
+    /// Normalize signedness and NaNs recursively. Ordinary `PartialEq` is unchanged.
+    pub fn normalize(&mut self) {
+        match self {
+            Self::Unsigned(n) if *n <= i64::MAX as u64 => *self = Self::Integer(*n as i64),
+            Self::Float(f) if f.is_nan() => *f = f64::from_bits(0x7ff8_0000_0000_0000),
+            Self::Array(a) => a.iter_mut().for_each(Self::normalize),
+            Self::Map(m) => m.values_mut().for_each(Self::normalize),
+            _ => {}
+        }
+    }
+
+    /// Equality defined by StructFS Value v1, including NaN equality and signed zero.
+    pub fn semantic_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Integer(a), Self::Unsigned(b)) | (Self::Unsigned(b), Self::Integer(a)) => {
+                *a >= 0 && *a as u64 == *b
+            }
+            (Self::Float(a), Self::Float(b)) => {
+                (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()
+            }
+            (Self::Array(a), Self::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.semantic_eq(b))
+            }
+            (Self::Map(a), Self::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|((k, a), (l, b))| k == l && a.semantic_eq(b))
+            }
+            _ => self == other,
+        }
+    }
+
     /// Create a null value.
     pub fn null() -> Self {
         Value::Null
@@ -248,7 +283,21 @@ impl From<i32> for Value {
 
 impl From<f64> for Value {
     fn from(v: f64) -> Self {
-        Value::Float(v)
+        Value::Float(if v.is_nan() {
+            f64::from_bits(0x7ff8_0000_0000_0000)
+        } else {
+            v
+        })
+    }
+}
+
+impl From<u64> for Value {
+    fn from(v: u64) -> Self {
+        if v <= i64::MAX as u64 {
+            Self::Integer(v as i64)
+        } else {
+            Self::Unsigned(v)
+        }
     }
 }
 

@@ -12,6 +12,8 @@ categories = ["wasm", "api-bindings"]
 [features]
 default = ["reference-guest"]
 reference-guest = []
+value-codecs = ["dep:structfs-serde-store"]
+state = ["value-codecs", "dep:structfs-state"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -19,3 +21,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+structfs-serde-store = { workspace = true, optional = true }
+
+structfs-state = { workspace = true, default-features = false, optional = true }

@@ -16,7 +16,15 @@ guest touches is the `sdk` module:
   and `structfs_write(path, data) -> Result<String, String>`.
 
 Payload bytes are in the serialization the guest's `manifest()`
-declares (JSON, CBOR, or FlexBuffers on the reference runtime).
+declares (plain JSON, tagged StructFS Value JSON v1, CBOR, or FlexBuffers on the
+reference runtime).
+
+Enable the optional `value-codecs` feature for `sdk::read_value` and
+`sdk::write_value`. Pass a `structfs_serde_store::ValueCodec` with the profile and
+limits your host supports, and declare its format in your manifest. For example,
+`Profile::ValueJson` uses `application/vnd.structfs.value+json;version=1` and
+preserves bytes, full u64 values, and non-finite floats. The feature builds for
+`wasm32-unknown-unknown`; it does not change the reference guest's JSON contract.
 
 ## Building a block
 

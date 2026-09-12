@@ -196,7 +196,10 @@ impl ShellBlock {
 
     fn print_value(ns: &mut Namespace, value: &Value) {
         let json = structfs_serde_store::value_to_json(value.clone());
-        match serde_json::to_string_pretty(&json) {
+        match json.and_then(|json| {
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))
+        }) {
             Ok(text) => Self::print(ns, text),
             Err(_) => Self::print(ns, format!("{value:?}")),
         }

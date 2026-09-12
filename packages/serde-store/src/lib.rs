@@ -6,6 +6,23 @@
 //! - `JsonCodec`: A codec for JSON format
 //! - Value <-> serde conversions
 //!
+//! # Lossless values
+//!
+//! ```rust
+//! use structfs_serde_store::{Codec, Format, Value, ValueJsonCodec};
+//! let value = Value::Array(vec![Value::from(u64::MAX), Value::Bytes(vec![0, 255])]);
+//! let bytes = ValueJsonCodec.encode(&value, &Format::VALUE_JSON)?;
+//! let decoded = ValueJsonCodec.decode(&bytes, &Format::VALUE_JSON)?;
+//! assert!(value.semantic_eq(&decoded));
+//! # Ok::<(), structfs_serde_store::Error>(())
+//! ```
+//!
+//! Plain JSON rejects bytes and non-finite floats. Use [`ValueCodec`] to select
+//! a profile and [`Limits`] explicitly. [`to_value`] and [`from_value`] use the
+//! structural Serde mapping directly; ambiguous null-valued options require
+//! [`ExplicitOption`]. All codecs validate complete documents. Raw record
+//! forwarding does not imply validation; use [`transcode`] for that contract.
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -37,13 +54,23 @@
 
 pub use bytes::Bytes;
 
+mod cbor_profile;
 mod codec;
 mod convert;
+mod flex_profile;
+mod json_profile;
+mod limits;
 mod typed;
+mod value_serde;
 
-pub use codec::{CborCodec, FlexbuffersCodec, JsonCodec, MultiCodec};
+pub use codec::{
+    transcode, CborCodec, FlexbuffersCodec, JsonCodec, MultiCodec, Profile, ValueCodec,
+    ValueJsonCodec,
+};
 pub use convert::{from_value, json_to_value, to_value, value_to_json};
+pub use limits::{validate_value, Limits};
 pub use typed::{TypedReader, TypedWriter};
+pub use value_serde::{from_value_with_limits, to_value_with_limits, ExplicitOption};
 
 // Re-export core types for convenience
 pub use structfs_core_store::{

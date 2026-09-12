@@ -18,7 +18,7 @@ structfs-core-store = { workspace = true }
 structfs-ll-store = { workspace = true }
 bytes = "1.9"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 ciborium.workspace = true
 flexbuffers.workspace = true
 thiserror.workspace = true

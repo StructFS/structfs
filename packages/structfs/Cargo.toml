@@ -11,6 +11,8 @@ categories = ["data-structures", "rust-patterns"]
 
 [dependencies]
 structfs-core-store = { workspace = true }
+structfs-service = { workspace = true, optional = true }
+structfs-state = { workspace = true, features = ["service"], optional = true }
 structfs-serde-store = { workspace = true, optional = true }
 structfs-json-store = { workspace = true, optional = true }
 structfs-http = { workspace = true, optional = true }
@@ -23,4 +25,6 @@ json = ["serde", "dep:structfs-json-store"]
 http = ["serde", "dep:structfs-http"]
 sys = ["dep:structfs-sys"]
 async = ["structfs-core-store/async", "structfs-serde-store?/async"]
-full = ["serde", "json", "http", "sys", "async"]
+service = ["dep:structfs-service", "async"]
+state = ["dep:structfs-state", "service", "serde"]
+full = ["serde", "json", "http", "sys", "async", "service", "state"]

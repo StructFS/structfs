@@ -591,7 +591,7 @@ impl<F: StoreFactory> StoreContext<F> {
     /// Read and convert to JsonValue for display compatibility
     pub fn read_as_json(&mut self, path: &Path) -> Result<Option<serde_json::Value>, ContextError> {
         match self.read(path)? {
-            Some(value) => Ok(Some(value_to_json(value))),
+            Some(value) => Ok(Some(value_to_json(value)?)),
             None => Ok(None),
         }
     }

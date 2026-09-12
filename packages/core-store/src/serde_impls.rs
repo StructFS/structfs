@@ -65,6 +65,7 @@ impl Serialize for Value {
             Value::Null => serializer.serialize_unit(),
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Integer(i) => serializer.serialize_i64(*i),
+            Value::Unsigned(i) => serializer.serialize_u64(*i),
             Value::Float(f) => serializer.serialize_f64(*f),
             Value::String(s) => serializer.serialize_str(s),
             Value::Bytes(b) => serializer.serialize_bytes(b),
@@ -116,13 +117,11 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_u64<E: de::Error>(self, u: u64) -> Result<Value, E> {
-        i64::try_from(u)
-            .map(Value::Integer)
-            .map_err(|_| E::custom(format!("integer {} out of range for i64", u)))
+        Ok(Value::from(u))
     }
 
     fn visit_f64<E>(self, f: f64) -> Result<Value, E> {
-        Ok(Value::Float(f))
+        Ok(Value::from(f))
     }
 
     fn visit_str<E>(self, s: &str) -> Result<Value, E> {
@@ -142,7 +141,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        let mut arr = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        let mut arr = Vec::new();
         while let Some(item) = seq.next_element()? {
             arr.push(item);
         }
@@ -152,6 +151,9 @@ impl<'de> Visitor<'de> for ValueVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
         let mut map = BTreeMap::new();
         while let Some((k, v)) = access.next_entry::<String, Value>()? {
+            if map.contains_key(&k) {
+                return Err(de::Error::custom("duplicate map key"));
+            }
             map.insert(k, v);
         }
         Ok(Value::Map(map))
@@ -294,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn u64_overflow_rejected() {
+    fn u64_range_preserved() {
         let result: Result<Value, _> = serde_json::from_str("18446744073709551615");
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Value::Unsigned(u64::MAX));
     }
 
     #[test]

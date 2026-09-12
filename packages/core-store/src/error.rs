@@ -3,6 +3,48 @@
 use crate::format::Format;
 use crate::path::{Path, PathError};
 
+/// Stable semantic categories for value conversion and codec failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CodecErrorKind {
+    UnsupportedProfile,
+    UnsupportedVersion,
+    Syntax,
+    InvalidUnicode,
+    InvalidNode,
+    InvalidBase64,
+    DuplicateKey,
+    OutOfRange,
+    UnsupportedValue,
+    TypeMismatch,
+    AmbiguousOption,
+    Noncanonical,
+    ResourceLimit,
+    Io,
+}
+
+impl CodecErrorKind {
+    /// Stable machine-readable name from the v1 specification.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedProfile => "unsupported_profile",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::Syntax => "syntax",
+            Self::InvalidUnicode => "invalid_unicode",
+            Self::InvalidNode => "invalid_node",
+            Self::InvalidBase64 => "invalid_base64",
+            Self::DuplicateKey => "duplicate_key",
+            Self::OutOfRange => "out_of_range",
+            Self::UnsupportedValue => "unsupported_value",
+            Self::TypeMismatch => "type_mismatch",
+            Self::AmbiguousOption => "ambiguous_option",
+            Self::Noncanonical => "noncanonical",
+            Self::ResourceLimit => "resource_limit",
+            Self::Io => "io",
+        }
+    }
+}
+
 /// Whether a codec error occurred during encoding or decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecOperation {
@@ -39,6 +81,7 @@ pub enum Error {
 
     /// Codec error during encode/decode.
     Codec {
+        kind: CodecErrorKind,
         operation: CodecOperation,
         format: Format,
         message: String,
@@ -101,6 +144,7 @@ impl Error {
     /// Create a codec decode error.
     pub fn decode(format: Format, message: impl Into<String>) -> Self {
         Error::Codec {
+            kind: CodecErrorKind::Syntax,
             operation: CodecOperation::Decode,
             format,
             message: message.into(),
@@ -110,6 +154,7 @@ impl Error {
     /// Create a codec encode error.
     pub fn encode(format: Format, message: impl Into<String>) -> Self {
         Error::Codec {
+            kind: CodecErrorKind::UnsupportedValue,
             operation: CodecOperation::Encode,
             format,
             message: message.into(),
@@ -183,6 +228,7 @@ impl std::fmt::Display for Error {
                 operation,
                 format,
                 message,
+                ..
             } => {
                 write!(f, "{} failed for format {}: {}", operation, format, message)
             }
@@ -397,6 +443,7 @@ mod tests {
     #[test]
     fn codec_error_with_operation() {
         let e = Error::Codec {
+            kind: CodecErrorKind::Syntax,
             operation: CodecOperation::Decode,
             format: Format::JSON,
             message: "test".to_string(),

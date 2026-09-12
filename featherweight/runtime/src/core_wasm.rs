@@ -1166,6 +1166,16 @@ mod tests {
             (Format::JSON, Value::from("hello over json")),
             (Format::CBOR, Value::Bytes(vec![0, 159, 146, 150])),
             (Format::FLEXBUFFERS, Value::Bytes(vec![255, 0, 7])),
+            (
+                Format::VALUE_JSON,
+                Value::Array(vec![
+                    Value::Unsigned(u64::MAX),
+                    Value::Bytes(vec![0, 255]),
+                    Value::Null,
+                    Value::Float(-0.0),
+                    Value::Float(f64::NAN),
+                ]),
+            ),
         ];
         for (format, value) in cases {
             let mut store = MemoryStore::new();
@@ -1189,7 +1199,10 @@ mod tests {
 
             let mut after = shared.clone();
             let output = after.read(&path!("output")).unwrap().unwrap();
-            assert_eq!(output.as_value(), Some(&value), "mangled by {format}");
+            assert!(
+                output.as_value().unwrap().semantic_eq(&value),
+                "mangled by {format}"
+            );
         }
     }
 

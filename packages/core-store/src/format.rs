@@ -19,6 +19,11 @@ impl Format {
     /// JSON format (`application/json`)
     pub const JSON: Format = Format(Cow::Borrowed("application/json"));
 
+    /// StructFS Value v1 tagged JSON (proposed media identifier).
+    pub const VALUE_JSON: Format = Format(Cow::Borrowed(
+        "application/vnd.structfs.value+json;version=1",
+    ));
+
     /// Protocol Buffers (`application/protobuf`)
     pub const PROTOBUF: Format = Format(Cow::Borrowed("application/protobuf"));
 

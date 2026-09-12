@@ -212,7 +212,7 @@ fn cmd_write(args: &str, session: &mut Session) -> String {
     // InMemoryStore requires parents to be present, so we create
     // empty maps for any missing ancestors.
     // Skip this for ctx/mounts/* paths — MountStore handles those internally.
-    let is_mount_path = path.len() >= 3 && path[0] == "ctx" && path[1] == "mounts";
+    let is_mount_path = path.len() >= 3 && &path[0] == "ctx" && &path[1] == "mounts";
 
     if !is_mount_path && path.len() > 1 {
         for i in 1..path.len() {
@@ -321,7 +321,7 @@ fn resolve_deref(path_str: &str, session: &Session) -> Result<String, String> {
 
 fn format_value(val: &Value) -> String {
     let json = value_to_json(val.clone());
-    serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", val))
+    json.ok().and_then(|json| serde_json::to_string_pretty(&json).ok()).unwrap_or_else(|| format!("{:?}", val))
 }
 
 fn format_record(record: &Record) -> String {

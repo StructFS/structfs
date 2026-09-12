@@ -70,7 +70,10 @@ pub trait AsyncTypedReader: AsyncReader {
         from: &Path,
         codec: &(dyn Codec + Sync),
     ) -> Result<Option<serde_json::Value>, Error> {
-        self.read_as_async(from, codec).await
+        self.read_as_async::<structfs_core_store::Value>(from, codec)
+            .await?
+            .map(crate::value_to_json)
+            .transpose()
     }
 }
 

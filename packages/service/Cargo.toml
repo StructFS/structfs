@@ -1,0 +1,19 @@
+[package]
+name = "structfs-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scoped async service routing, provider adapters, and shared call admission for StructFS"
+readme = "README.md"
+
+[dependencies]
+structfs-core-store = { workspace = true, features = ["async"] }
+structfs-handles = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+async-trait.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time", "macros"] }

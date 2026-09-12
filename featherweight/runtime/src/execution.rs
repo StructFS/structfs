@@ -19,6 +19,9 @@ impl ExecutionScope {
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
+    pub(crate) fn cancellation(&self) -> CancelToken {
+        self.cancel.clone()
+    }
     pub fn deadline(&self) -> Instant {
         self.deadline
     }

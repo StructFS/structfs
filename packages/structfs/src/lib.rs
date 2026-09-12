@@ -73,8 +73,9 @@ pub use structfs_core_store::{
 pub mod serde {
     //! Serde integration: typed access and codecs.
     pub use structfs_serde_store::{
-        from_value, json_to_value, to_value, value_to_json, JsonCodec, MultiCodec, TypedReader,
-        TypedWriter,
+        from_value, from_value_with_limits, json_to_value, to_value, to_value_with_limits,
+        value_to_json, ExplicitOption, JsonCodec, Limits, MultiCodec, Profile, TypedReader,
+        TypedWriter, ValueCodec, ValueJsonCodec,
     };
 
     #[cfg(feature = "async")]
@@ -83,8 +84,9 @@ pub mod serde {
 
 #[cfg(feature = "serde")]
 pub use structfs_serde_store::{
-    from_value, json_to_value, to_value, value_to_json, JsonCodec, MultiCodec, TypedReader,
-    TypedWriter,
+    from_value, from_value_with_limits, json_to_value, to_value, to_value_with_limits,
+    value_to_json, ExplicitOption, JsonCodec, Limits, MultiCodec, Profile, TypedReader,
+    TypedWriter, ValueCodec, ValueJsonCodec,
 };
 
 #[cfg(all(feature = "serde", feature = "async"))]
@@ -131,3 +133,11 @@ pub mod sys {
 
 #[cfg(feature = "sys")]
 pub use structfs_sys::SysStore;
+
+/// Native async service routing and provider adapters.
+#[cfg(feature = "service")]
+pub use structfs_service as service;
+
+/// Revisioned state, snapshots, and bounded observation.
+#[cfg(feature = "state")]
+pub use structfs_state as state;

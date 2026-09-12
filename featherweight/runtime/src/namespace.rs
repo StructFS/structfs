@@ -27,6 +27,8 @@ pub(crate) struct SessionWitness {
 /// A shared host-side store (config, imports).
 #[derive(Clone)]
 pub enum HostStore {
+    /// Context-aware native service, dispatched by the shared router.
+    Service(Arc<dyn structfs_service::Service>),
     /// Synchronous providers execute on the blocking pool per operation.
     Sync(Shared<Box<dyn Store>>),
     /// Detached providers release their lock before awaiting I/O.
@@ -45,6 +47,16 @@ impl HostStore {
         let from = from.clone();
         Box::pin(async move {
             match self {
+                Self::Service(service) => match service
+                    .call(
+                        structfs_service::CallContext::default(),
+                        structfs_service::Operation::Read(from),
+                    )
+                    .await?
+                {
+                    structfs_service::Response::Read(r) => Ok(r),
+                    _ => Err(Error::store("service", "read", "response kind mismatch")),
+                },
                 Self::Sync(store) => {
                     let mut store = store.clone();
                     crate::turnstile::blocking(move || store.read(&from))
@@ -58,17 +70,7 @@ impl HostStore {
                         .read_detached(&from);
                     future.await
                 }
-                Self::Grant(grant) => {
-                    let rel = grant.base.join(&from);
-                    match &grant.target {
-                        Target::Block(cell) => grant
-                            .ctx
-                            .call_read(cell, rel)
-                            .await
-                            .map(|v| v.map(Record::parsed)),
-                        Target::Store(store) => store.read_async(&rel).await,
-                    }
-                }
+                Self::Grant(grant) => grant.client().read(&from).await,
             }
         })
     }
@@ -81,6 +83,16 @@ impl HostStore {
         let to = to.clone();
         Box::pin(async move {
             match self {
+                Self::Service(service) => match service
+                    .call(
+                        structfs_service::CallContext::default(),
+                        structfs_service::Operation::Write(to, data),
+                    )
+                    .await?
+                {
+                    structfs_service::Response::Written(p) => Ok(p),
+                    _ => Err(Error::store("service", "write", "response kind mismatch")),
+                },
                 Self::Sync(store) => {
                     let mut store = store.clone();
                     crate::turnstile::blocking(move || store.write(&to, data))
@@ -94,25 +106,7 @@ impl HostStore {
                         .write_detached(&to, data);
                     future.await
                 }
-                Self::Grant(grant) => {
-                    let rel = grant.base.join(&to);
-                    let result = match &grant.target {
-                        Target::Block(cell) => {
-                            grant
-                                .ctx
-                                .call_write(
-                                    cell,
-                                    rel,
-                                    data.into_value(&structfs_core_store::NoCodec)?,
-                                )
-                                .await?
-                        }
-                        Target::Store(store) => store.write_async(&rel, data).await?,
-                    };
-                    result.strip_prefix(&grant.base).ok_or_else(|| {
-                        Error::store("grant", "write", "target returned path outside the grant")
-                    })
-                }
+                Self::Grant(grant) => grant.client().write(&to, data).await,
             }
         })
     }
@@ -147,6 +141,123 @@ pub fn host_store(store: impl Store + 'static) -> HostStore {
     HostStore::Sync(Shared::new(Box::new(store) as Box<dyn Store>))
 }
 
+/// Register a native service without implementing a Wasm driver.
+pub fn service_host_store(service: Arc<dyn structfs_service::Service>) -> HostStore {
+    HostStore::Service(service)
+}
+
+struct RoutedTarget {
+    execution: Arc<RtCtx>,
+    admission: Arc<RtCtx>,
+    key: crate::block::BlockId,
+    target: Target,
+}
+impl structfs_service::Admission for RoutedTarget {
+    fn acquire(
+        &self,
+        path: &Path,
+        data: Option<&Record>,
+    ) -> Result<structfs_service::Lease, Error> {
+        self.admission.admit_route(&self.key, path, data)
+    }
+}
+impl structfs_service::Service for RoutedTarget {
+    fn call(
+        &self,
+        context: structfs_service::CallContext,
+        operation: structfs_service::Operation,
+    ) -> structfs_core_store::DetachedFuture<structfs_service::Response> {
+        use structfs_service::{Operation, Response};
+        let target = self.target.clone();
+        let ctx = self.execution.clone();
+        Box::pin(async move {
+            let _lease = context.lease();
+            match target {
+                Target::Block(cell) => match operation {
+                    Operation::Read(p) => crate::protocol::decode_read_response(
+                        ctx.call_admitted(&cell, "read", p, Value::Null, context.lease())
+                            .await?,
+                    )
+                    .map(|r| Response::Read(r.map(Record::parsed))),
+                    Operation::Write(p, r) => crate::protocol::decode_write_response(
+                        ctx.call_admitted(
+                            &cell,
+                            "write",
+                            p,
+                            r.into_value(&structfs_core_store::NoCodec)?,
+                            context.lease(),
+                        )
+                        .await?,
+                    )
+                    .map(Response::Written),
+                },
+                Target::Store(HostStore::Sync(mut store)) => {
+                    crate::turnstile::blocking(move || {
+                        context.ensure_active()?;
+                        let _context = context;
+                        match operation {
+                            Operation::Read(p) => store.read(&p).map(Response::Read),
+                            Operation::Write(p, d) => store.write(&p, d).map(Response::Written),
+                        }
+                    })
+                    .await
+                    .map_err(|e| Error::store("service", "blocking", e.to_string()))?
+                }
+                Target::Store(HostStore::Async(store)) => match operation {
+                    Operation::Read(p) => {
+                        let f = store
+                            .lock()
+                            .map_err(|_| {
+                                Error::store("service", "dispatch", "provider lock poisoned")
+                            })?
+                            .read_detached(&p);
+                        f.await.map(Response::Read)
+                    }
+                    Operation::Write(p, d) => {
+                        let f = store
+                            .lock()
+                            .map_err(|_| {
+                                Error::store("service", "dispatch", "provider lock poisoned")
+                            })?
+                            .write_detached(&p, d);
+                        f.await.map(Response::Written)
+                    }
+                },
+                Target::Store(HostStore::Service(service)) => {
+                    service.call(context, operation).await
+                }
+                Target::Store(HostStore::Grant(_)) => {
+                    Err(Error::store("service", "dispatch", "unflattened grant"))
+                }
+            }
+        })
+    }
+}
+fn routed_mount(
+    admission: Arc<RtCtx>,
+    prefix: Path,
+    mut base: Path,
+    mut target: Target,
+) -> structfs_service::Mount {
+    let mut execution = admission.clone();
+    while let Target::Store(HostStore::Grant(grant)) = &target {
+        base = grant.base.join(&base);
+        execution = grant.ctx.clone();
+        target = grant.target.clone();
+    }
+    let key = match &target {
+        Target::Block(cell) => cell.admission_id.clone(),
+        _ => crate::block::BlockId::new(),
+    };
+    let target = Arc::new(RoutedTarget {
+        execution,
+        admission,
+        key,
+        target,
+    });
+    structfs_service::Mount::new(prefix, base, target.clone(), target)
+}
+
 /// A wiring target: another block (via the server protocol) or a
 /// host-side store.
 #[derive(Clone)]
@@ -159,32 +270,19 @@ pub enum Target {
 
 /// Longest-prefix, component-wise wiring table.
 pub struct WiringTable {
-    /// Entries sorted longest-prefix-first, so the first component-wise
-    /// match wins (mount shadowing per spec 03).
-    entries: Vec<(Path, Target)>,
+    entries: structfs_service::RouteTable<Target>,
 }
-
 impl WiringTable {
-    /// Build a table; entries are sorted longest-prefix-first.
-    pub fn new(mut entries: Vec<(Path, Target)>) -> Self {
-        entries.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
-        Self { entries }
-    }
-
-    /// Resolve a path to `(target, relative path, mount prefix)`.
-    /// Component-wise: `services/cache` does not match `services/cache_x`.
-    pub fn resolve<'t>(&'t self, path: &Path) -> Option<(&'t Target, Path, &'t Path)> {
-        for (prefix, target) in &self.entries {
-            if let Some(rel) = path.strip_prefix(prefix) {
-                return Some((target, rel, prefix));
-            }
+    pub fn new(entries: Vec<(Path, Target)>) -> Self {
+        Self {
+            entries: structfs_service::RouteTable::new(entries),
         }
-        None
     }
-
-    /// The wired mount prefixes (for namespace listings).
+    pub fn resolve<'t>(&'t self, path: &Path) -> Option<(&'t Target, Path, &'t Path)> {
+        self.entries.resolve(path)
+    }
     pub fn prefixes(&self) -> impl Iterator<Item = &Path> {
-        self.entries.iter().map(|(p, _)| p)
+        self.entries.prefixes()
     }
 }
 
@@ -206,41 +304,26 @@ impl GrantStore {
     }
 }
 
-impl Reader for GrantStore {
-    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let rel = self.base.join(from);
-        match &self.target {
-            Target::Block(cell) => {
-                let cell = cell.clone();
-                self.ctx
-                    .block_on(self.ctx.call_read(&cell, rel))
-                    .map(|v| v.map(Record::parsed))
-            }
-            Target::Store(store) => store.clone().read(&rel),
-        }
+impl GrantStore {
+    fn client(&self) -> structfs_service::Client {
+        structfs_service::Router::new(vec![routed_mount(
+            self.ctx.clone(),
+            Path::parse("").unwrap(),
+            self.base.clone(),
+            self.target.clone(),
+        )])
+        .expect("one grant")
+        .client()
     }
 }
-
+impl Reader for GrantStore {
+    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+        self.ctx.block_on(self.client().read(from))
+    }
+}
 impl Writer for GrantStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        let rel = self.base.join(to);
-        let result = match &self.target {
-            Target::Block(cell) => {
-                let cell = cell.clone();
-                let value = data.into_value(&structfs_core_store::NoCodec)?;
-                self.ctx.block_on(self.ctx.call_write(&cell, rel, value))?
-            }
-            Target::Store(store) => store.clone().write(&rel, data)?,
-        };
-        // Result paths are expressed relative to the grant, never
-        // revealing the base (the confinement rule Rooted also follows).
-        result.strip_prefix(&self.base).ok_or_else(|| {
-            Error::store(
-                "grant",
-                "write",
-                format!("target returned path outside the grant: {}", result),
-            )
-        })
+        self.ctx.block_on(self.client().write(to, data))
     }
 }
 
@@ -250,6 +333,7 @@ pub struct Namespace {
     ctx: Arc<RtCtx>,
     iso: Arc<IsoSurface>,
     wiring: Arc<WiringTable>,
+    routed: structfs_service::Client,
     cell: Arc<BlockCell>,
     /// Transcripts (spec 12): every operation through this namespace is
     /// recorded to, or answered from, the block's transcript.
@@ -265,14 +349,31 @@ impl Namespace {
         ctx: Arc<RtCtx>,
         iso: Arc<IsoSurface>,
         wiring: Arc<WiringTable>,
+        provider_owner: structfs_service::OwnerHandle,
         cell: Arc<BlockCell>,
         transcript: Option<BlockTranscript>,
         session: Option<SessionWitness>,
     ) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        let mounts = wiring
+            .entries
+            .entries()
+            .filter(|(p, _)| seen.insert((*p).clone()))
+            .map(|(p, t)| {
+                let mut mount =
+                    routed_mount(ctx.clone(), p.clone(), Path::parse("").unwrap(), t.clone());
+                mount.service = provider_owner.service(mount.service);
+                mount
+            })
+            .collect();
+        let routed = structfs_service::Router::new(mounts)
+            .expect("deduplicated wiring")
+            .client();
         Self {
             ctx,
             iso,
             wiring,
+            routed,
             cell,
             transcript,
             session,
@@ -302,6 +403,15 @@ impl Namespace {
                 "not a response path in this block",
             )),
         }
+    }
+
+    fn route_context(&self) -> structfs_service::CallContext {
+        let mut context = structfs_service::CallContext::default();
+        if let Some(scope) = self.ctx.execution_scope() {
+            context.deadline = Some(scope.deadline());
+            context.cancellation = scope.cancellation();
+        }
+        context
     }
 
     fn root_listing(&self) -> Value {
@@ -349,22 +459,10 @@ impl Namespace {
             let rel = from.slice(1, from.len());
             return self.iso.read(&rel).await;
         }
-        match self.wiring.resolve(from) {
-            Some((Target::Block(cell), rel, _prefix)) => {
-                let cell = cell.clone();
-                self.ctx
-                    .call_read(&cell, rel)
-                    .await
-                    .map(|v| v.map(Record::parsed))
-            }
-            Some((Target::Store(store), rel, _prefix)) => store.read_async(&rel).await,
-            // Unwired paths are denied (spec 03): a capability system
-            // must not leak absence vs denial.
-            None => Err(Error::permission_denied(format!(
-                "path is not wired into this namespace: {}",
-                from
-            ))),
-        }
+        self.routed
+            .with_context(self.route_context())
+            .read(from)
+            .await
     }
 
     async fn write_live(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
@@ -377,24 +475,10 @@ impl Namespace {
             let result = self.iso.write(&rel, value).await?;
             return Ok(Path::parse("iso").unwrap().join(&result));
         }
-        match self.wiring.resolve(to) {
-            Some((Target::Block(cell), rel, prefix)) => {
-                let cell = cell.clone();
-                let value = data.into_value(&structfs_core_store::NoCodec)?;
-                let result = self.ctx.call_write(&cell, rel, value).await?;
-                // Result paths are expressed in the caller's namespace.
-                Ok(prefix.join(&result))
-            }
-            Some((Target::Store(store), rel, prefix)) => {
-                let result = store.write_async(&rel, data).await?;
-                Ok(prefix.join(&result))
-            }
-            // Unwired writes are a capability failure (spec 03: "write → error").
-            None => Err(Error::permission_denied(format!(
-                "path is not wired into this namespace: {}",
-                to
-            ))),
-        }
+        self.routed
+            .with_context(self.route_context())
+            .write(to, data)
+            .await
     }
 }
 

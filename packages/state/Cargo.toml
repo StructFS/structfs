@@ -1,0 +1,23 @@
+[package]
+name = "structfs-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Revisioned tree state, atomic batches, and bounded observation for StructFS"
+readme = "README.md"
+
+[features]
+default = ["service"]
+service = ["dep:structfs-service", "dep:tokio", "dep:uuid"]
+
+[dependencies]
+structfs-core-store.workspace = true
+structfs-serde-store.workspace = true
+serde.workspace = true
+structfs-service = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync", "time"], optional = true }
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

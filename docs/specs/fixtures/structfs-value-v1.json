@@ -1,0 +1,475 @@
+{
+  "specification": "structfs-value/1",
+  "fixture_version": 1,
+  "description": "Exact document strings are UTF-8 after JSON unescaping; no newline is implied. canonical_value is the tagged JSON C1 representation of the decoded value. Every accepted tagged case succeeds in canonical-validation mode iff input equals canonical; otherwise that mode returns noncanonical.",
+  "tagged_json": {
+    "accepted": [
+      {
+        "name": "null",
+        "input": "[\"structfs-value\",1,[\"null\"]]",
+        "canonical": "[\"structfs-value\",1,[\"null\"]]"
+      },
+      {
+        "name": "false",
+        "input": "[\"structfs-value\",1,[\"bool\",false]]",
+        "canonical": "[\"structfs-value\",1,[\"bool\",false]]"
+      },
+      {
+        "name": "true",
+        "input": "[\"structfs-value\",1,[\"bool\",true]]",
+        "canonical": "[\"structfs-value\",1,[\"bool\",true]]"
+      },
+      {
+        "name": "integer_min",
+        "input": "[\"structfs-value\",1,[\"int\",\"-9223372036854775808\"]]",
+        "canonical": "[\"structfs-value\",1,[\"int\",\"-9223372036854775808\"]]"
+      },
+      {
+        "name": "integer_zero",
+        "input": "[\"structfs-value\",1,[\"int\",\"0\"]]",
+        "canonical": "[\"structfs-value\",1,[\"int\",\"0\"]]"
+      },
+      {
+        "name": "signed_max",
+        "input": "[\"structfs-value\",1,[\"int\",\"9223372036854775807\"]]",
+        "canonical": "[\"structfs-value\",1,[\"int\",\"9223372036854775807\"]]"
+      },
+      {
+        "name": "unsigned_transition",
+        "input": "[\"structfs-value\",1,[\"int\",\"9223372036854775808\"]]",
+        "canonical": "[\"structfs-value\",1,[\"int\",\"9223372036854775808\"]]"
+      },
+      {
+        "name": "integer_max",
+        "input": "[\"structfs-value\",1,[\"int\",\"18446744073709551615\"]]",
+        "canonical": "[\"structfs-value\",1,[\"int\",\"18446744073709551615\"]]"
+      },
+      {
+        "name": "float_positive_zero",
+        "input": "[\"structfs-value\",1,[\"float\",\"0000000000000000\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"0000000000000000\"]]"
+      },
+      {
+        "name": "float_negative_zero",
+        "input": "[\"structfs-value\",1,[\"float\",\"8000000000000000\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"8000000000000000\"]]"
+      },
+      {
+        "name": "float_one",
+        "input": "[\"structfs-value\",1,[\"float\",\"3ff0000000000000\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"3ff0000000000000\"]]"
+      },
+      {
+        "name": "float_subnormal",
+        "input": "[\"structfs-value\",1,[\"float\",\"0000000000000001\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"0000000000000001\"]]"
+      },
+      {
+        "name": "float_max_finite",
+        "input": "[\"structfs-value\",1,[\"float\",\"7fefffffffffffff\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"7fefffffffffffff\"]]"
+      },
+      {
+        "name": "float_positive_infinity",
+        "input": "[\"structfs-value\",1,[\"float\",\"7ff0000000000000\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"7ff0000000000000\"]]"
+      },
+      {
+        "name": "float_negative_infinity",
+        "input": "[\"structfs-value\",1,[\"float\",\"fff0000000000000\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"fff0000000000000\"]]"
+      },
+      {
+        "name": "float_nan",
+        "input": "[\"structfs-value\",1,[\"float\",\"7ff8000000000000\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"7ff8000000000000\"]]"
+      },
+      {
+        "name": "empty_string",
+        "input": "[\"structfs-value\",1,[\"string\",\"\"]]",
+        "canonical": "[\"structfs-value\",1,[\"string\",\"\"]]"
+      },
+      {
+        "name": "escapes",
+        "input": "[\"structfs-value\",1,[\"string\",\"\\u0000\\u000a\\u0009\\u000d\\u0008\\u000c\\\"\\\\/é  \"]]",
+        "canonical": "[\"structfs-value\",1,[\"string\",\"\\u0000\\u000a\\u0009\\u000d\\u0008\\u000c\\\"\\\\/é  \"]]"
+      },
+      {
+        "name": "empty_bytes",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"\"]]",
+        "canonical": "[\"structfs-value\",1,[\"bytes\",\"\"]]"
+      },
+      {
+        "name": "bytes",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"AP8=\"]]",
+        "canonical": "[\"structfs-value\",1,[\"bytes\",\"AP8=\"]]"
+      },
+      {
+        "name": "empty_array",
+        "input": "[\"structfs-value\",1,[\"array\",[]]]",
+        "canonical": "[\"structfs-value\",1,[\"array\",[]]]"
+      },
+      {
+        "name": "empty_map",
+        "input": "[\"structfs-value\",1,[\"map\",[]]]",
+        "canonical": "[\"structfs-value\",1,[\"map\",[]]]"
+      },
+      {
+        "name": "nul_key",
+        "input": "[\"structfs-value\",1,[\"map\",[[\"a\\u0000b\",[\"null\"]]]]]",
+        "canonical": "[\"structfs-value\",1,[\"map\",[[\"a\\u0000b\",[\"null\"]]]]]"
+      },
+      {
+        "name": "kind_distinction",
+        "input": "[\"structfs-value\",1,[\"array\",[[\"int\",\"1\"],[\"float\",\"3ff0000000000000\"],[\"bytes\",\"AA==\"],[\"array\",[[\"int\",\"0\"]]],[\"string\",\"AA==\"]]]]",
+        "canonical": "[\"structfs-value\",1,[\"array\",[[\"int\",\"1\"],[\"float\",\"3ff0000000000000\"],[\"bytes\",\"AA==\"],[\"array\",[[\"int\",\"0\"]]],[\"string\",\"AA==\"]]]]"
+      },
+      {
+        "name": "whitespace",
+        "input": " \n[\"structfs-value\", 1, [\"null\"]]\t",
+        "canonical": "[\"structfs-value\",1,[\"null\"]]"
+      },
+      {
+        "name": "escaped_tag",
+        "input": "[\"structfs-\\u0076alue\",1,[\"\\u006eull\"]]",
+        "canonical": "[\"structfs-value\",1,[\"null\"]]"
+      },
+      {
+        "name": "alternate_nan",
+        "input": "[\"structfs-value\",1,[\"float\",\"fff0000000000001\"]]",
+        "canonical": "[\"structfs-value\",1,[\"float\",\"7ff8000000000000\"]]"
+      },
+      {
+        "name": "escaped_string",
+        "input": "[\"structfs-value\",1,[\"string\",\"\\u00e9\\n\\/\"]]",
+        "canonical": "[\"structfs-value\",1,[\"string\",\"é\\u000a/\"]]"
+      },
+      {
+        "name": "surrogate_pair",
+        "input": "[\"structfs-value\",1,[\"string\",\"\\ud800\\udc00\"]]",
+        "canonical": "[\"structfs-value\",1,[\"string\",\"𐀀\"]]"
+      },
+      {
+        "name": "utf8_key_order",
+        "input": "[\"structfs-value\",1,[\"map\",[[\"𐀀\",[\"null\"]],[\"\",[\"null\"]],[\"é\",[\"null\"]],[\"é\",[\"null\"]]]]]",
+        "canonical": "[\"structfs-value\",1,[\"map\",[[\"é\",[\"null\"]],[\"é\",[\"null\"]],[\"\",[\"null\"]],[\"𐀀\",[\"null\"]]]]]"
+      }
+    ],
+    "rejected": [
+      {
+        "name": "unknown_version",
+        "input": "[\"structfs-value\",2,[\"null\"]]",
+        "error": "unsupported_version"
+      },
+      {
+        "name": "fraction_version",
+        "input": "[\"structfs-value\",1.0,[\"null\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "string_version",
+        "input": "[\"structfs-value\",\"1\",[\"null\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "unknown_tag",
+        "input": "[\"structfs-value\",1,[\"uuid\",\"x\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "extra_arity",
+        "input": "[\"structfs-value\",1,[\"null\",null]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "bare_null",
+        "input": "[\"structfs-value\",1,null]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "object_node",
+        "input": "[\"structfs-value\",1,{}]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "bool_number",
+        "input": "[\"structfs-value\",1,[\"bool\",1]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "int_number",
+        "input": "[\"structfs-value\",1,[\"int\",1]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "integer_spelling_-0",
+        "input": "[\"structfs-value\",1,[\"int\",\"-0\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "integer_spelling_01",
+        "input": "[\"structfs-value\",1,[\"int\",\"01\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "integer_spelling_+1",
+        "input": "[\"structfs-value\",1,[\"int\",\"+1\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "integer_spelling_ 1",
+        "input": "[\"structfs-value\",1,[\"int\",\" 1\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "integer_spelling_١",
+        "input": "[\"structfs-value\",1,[\"int\",\"١\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "integer_overflow",
+        "input": "[\"structfs-value\",1,[\"int\",\"18446744073709551616\"]]",
+        "error": "out_of_range"
+      },
+      {
+        "name": "integer_underflow",
+        "input": "[\"structfs-value\",1,[\"int\",\"-9223372036854775809\"]]",
+        "error": "out_of_range"
+      },
+      {
+        "name": "uppercase_float",
+        "input": "[\"structfs-value\",1,[\"float\",\"7FF8000000000000\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "short_float",
+        "input": "[\"structfs-value\",1,[\"float\",\"0\"]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "base64_0",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"AA\"]]",
+        "error": "invalid_base64"
+      },
+      {
+        "name": "base64_1",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"AB==\"]]",
+        "error": "invalid_base64"
+      },
+      {
+        "name": "base64_2",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"AA===\"]]",
+        "error": "invalid_base64"
+      },
+      {
+        "name": "base64_3",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"AA==\\n\"]]",
+        "error": "invalid_base64"
+      },
+      {
+        "name": "base64_4",
+        "input": "[\"structfs-value\",1,[\"bytes\",\"_w==\"]]",
+        "error": "invalid_base64"
+      },
+      {
+        "name": "duplicate_key",
+        "input": "[\"structfs-value\",1,[\"map\",[[\"a\",[\"null\"]],[\"a\",[\"bool\",true]]]]]",
+        "error": "duplicate_key"
+      },
+      {
+        "name": "escaped_duplicate",
+        "input": "[\"structfs-value\",1,[\"map\",[[\"a\",[\"null\"]],[\"\\u0061\",[\"null\"]]]]]",
+        "error": "duplicate_key"
+      },
+      {
+        "name": "nonstring_key",
+        "input": "[\"structfs-value\",1,[\"map\",[[1,[\"null\"]]]]]",
+        "error": "invalid_node"
+      },
+      {
+        "name": "unpaired_surrogate",
+        "input": "[\"structfs-value\",1,[\"string\",\"\\ud800\"]]",
+        "error": "invalid_unicode"
+      },
+      {
+        "name": "trailing_document",
+        "input": "[\"structfs-value\",1,[\"null\"]]null",
+        "error": "syntax"
+      },
+      {
+        "name": "bom",
+        "input": "﻿[\"structfs-value\",1,[\"null\"]]",
+        "error": "syntax"
+      },
+      {
+        "name": "truncated",
+        "input": "[\"structfs-value\",1,[\"null\"]",
+        "error": "syntax"
+      }
+    ],
+    "rejected_octets": [
+      {
+        "name": "invalid_utf8",
+        "input_hex": "ff",
+        "error": "invalid_unicode"
+      }
+    ]
+  },
+  "plain_json": {
+    "accepted": [
+      {
+        "name": "integer_max",
+        "input": "18446744073709551615",
+        "canonical_value": "[\"structfs-value\",1,[\"int\",\"18446744073709551615\"]]"
+      },
+      {
+        "name": "negative_integer_zero",
+        "input": "-0",
+        "canonical_value": "[\"structfs-value\",1,[\"int\",\"0\"]]"
+      },
+      {
+        "name": "negative_float_zero",
+        "input": "-0.0",
+        "canonical_value": "[\"structfs-value\",1,[\"float\",\"8000000000000000\"]]"
+      },
+      {
+        "name": "exponent_float",
+        "input": "1e0",
+        "canonical_value": "[\"structfs-value\",1,[\"float\",\"3ff0000000000000\"]]"
+      },
+      {
+        "name": "negative_underflow",
+        "input": "-1e-999",
+        "canonical_value": "[\"structfs-value\",1,[\"float\",\"8000000000000000\"]]"
+      },
+      {
+        "name": "ordinary_envelope",
+        "input": "[\"structfs-value\",1,[\"null\"]]",
+        "canonical_value": "[\"structfs-value\",1,[\"array\",[[\"string\",\"structfs-value\"],[\"int\",\"1\"],[\"array\",[[\"string\",\"null\"]]]]]]"
+      }
+    ],
+    "rejected": [
+      {
+        "name": "integer_overflow",
+        "input": "18446744073709551616",
+        "error": "out_of_range"
+      },
+      {
+        "name": "float_overflow",
+        "input": "1e999",
+        "error": "out_of_range"
+      },
+      {
+        "name": "duplicate",
+        "input": "{\"a\":null,\"\\u0061\":true}",
+        "error": "duplicate_key"
+      }
+    ]
+  },
+  "cbor": {
+    "accepted": [
+      {
+        "name": "null",
+        "input_hex": "f6",
+        "canonical_value": "[\"structfs-value\",1,[\"null\"]]",
+        "writer_hex": "f6"
+      },
+      {
+        "name": "negative_one",
+        "input_hex": "20",
+        "canonical_value": "[\"structfs-value\",1,[\"int\",\"-1\"]]",
+        "writer_hex": "20"
+      },
+      {
+        "name": "integer_min",
+        "input_hex": "3b7fffffffffffffff",
+        "canonical_value": "[\"structfs-value\",1,[\"int\",\"-9223372036854775808\"]]",
+        "writer_hex": "3b7fffffffffffffff"
+      },
+      {
+        "name": "integer_max",
+        "input_hex": "1bffffffffffffffff",
+        "canonical_value": "[\"structfs-value\",1,[\"int\",\"18446744073709551615\"]]",
+        "writer_hex": "1bffffffffffffffff"
+      },
+      {
+        "name": "wide_integer",
+        "input_hex": "1800",
+        "canonical_value": "[\"structfs-value\",1,[\"int\",\"0\"]]",
+        "writer_hex": "00"
+      },
+      {
+        "name": "half_negative_zero",
+        "input_hex": "f98000",
+        "canonical_value": "[\"structfs-value\",1,[\"float\",\"8000000000000000\"]]",
+        "writer_hex": "fb8000000000000000"
+      },
+      {
+        "name": "half_nan",
+        "input_hex": "f97e01",
+        "canonical_value": "[\"structfs-value\",1,[\"float\",\"7ff8000000000000\"]]",
+        "writer_hex": "fb7ff8000000000000"
+      },
+      {
+        "name": "bytes",
+        "input_hex": "4200ff",
+        "canonical_value": "[\"structfs-value\",1,[\"bytes\",\"AP8=\"]]",
+        "writer_hex": "4200ff"
+      },
+      {
+        "name": "nul_key",
+        "input_hex": "a16100f6",
+        "canonical_value": "[\"structfs-value\",1,[\"map\",[[\"\\u0000\",[\"null\"]]]]]",
+        "writer_hex": "a16100f6"
+      },
+      {
+        "name": "map",
+        "input_hex": "a16161f6",
+        "canonical_value": "[\"structfs-value\",1,[\"map\",[[\"a\",[\"null\"]]]]]",
+        "writer_hex": "a16161f6"
+      }
+    ],
+    "rejected": [
+      {
+        "name": "negative_overflow",
+        "input_hex": "3b8000000000000000",
+        "error": "out_of_range"
+      },
+      {
+        "name": "tag",
+        "input_hex": "c0f6",
+        "error": "unsupported_value"
+      },
+      {
+        "name": "undefined",
+        "input_hex": "f7",
+        "error": "unsupported_value"
+      },
+      {
+        "name": "indefinite_array",
+        "input_hex": "9fff",
+        "error": "unsupported_value"
+      },
+      {
+        "name": "nonstring_key",
+        "input_hex": "a100f6",
+        "error": "unsupported_value"
+      },
+      {
+        "name": "duplicate",
+        "input_hex": "a26161f66161f5",
+        "error": "duplicate_key"
+      },
+      {
+        "name": "trailing",
+        "input_hex": "f6f6",
+        "error": "syntax"
+      },
+      {
+        "name": "truncated",
+        "input_hex": "1bff",
+        "error": "syntax"
+      }
+    ]
+  }
+}

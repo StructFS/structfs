@@ -689,7 +689,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
                     .map_err(|e| Error::store("http_client", "write", e))?
             } else {
                 // Not an HttpRequest, POST to root with the value as body
-                let json_value = structfs_serde_store::value_to_json(value);
+                let json_value = structfs_serde_store::value_to_json(value)?;
                 let request = HttpRequest {
                     method: crate::types::Method::POST,
                     path: String::new(),
@@ -703,7 +703,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
             }
         } else {
             // POST to the path
-            let json_value = structfs_serde_store::value_to_json(value);
+            let json_value = structfs_serde_store::value_to_json(value)?;
             let request = HttpRequest {
                 method: crate::types::Method::POST,
                 path: to.to_string(),

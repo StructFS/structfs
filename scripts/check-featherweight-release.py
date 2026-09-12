@@ -75,12 +75,16 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     # lookup failure during built-in batch verification on Cargo 1.96.
     run(["cargo", "check", "--offline", "--workspace", "--all-targets"], stage, env=env)
     run(["cargo", "test", "--offline", "-p", "featherweight-external-embedding-check",
-         "-p", "featherweight-runtime", "-p", "structfs-handles"], stage, env=env)
+         "-p", "featherweight-runtime", "-p", "structfs-handles",
+         "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state"], stage, env=env)
+    import sys
+    run([sys.executable, str(stage / dirs["structfs-serde-store"] /
+         "tests/reference_value_v1.py")], stage, env=env)
     run(["cargo", "clippy", "--locked", "--offline", "-p", "featherweight-external-embedding-check",
          "--all-targets", "--", "-D", "warnings"], stage, env=env)
-    for features in [[], ["--no-default-features"]]:
+    for features in [[], ["--no-default-features"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"]]:
         run(["cargo", "build", "--locked", "--offline", "-p", "featherweight-guest",
              "--target", "wasm32-unknown-unknown", *features], stage, env=env)
     run(["cargo", "doc", "--locked", "--offline", "--no-deps", "-p", "featherweight-runtime",
-         "-p", "structfs-handles"], stage, env={**env, "RUSTDOCFLAGS": "-D warnings"})
+         "-p", "structfs-handles", "-p", "structfs-service", "-p", "structfs-state"], stage, env={**env, "RUSTDOCFLAGS": "-D warnings"})
 print("Featherweight package embedding gate passed; nothing published.")

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use structfs_core_store::{Error, Format, MemoryStore, Path, ReadOnly, Value};
+use structfs_core_store::{Error, Format, MemoryStore, Path, ReadOnly, Record, Value};
 use structfs_serde_store::MultiCodec;
 
 use crate::assembly::{AssemblyDef, WireTarget};
@@ -202,6 +202,7 @@ pub(crate) struct BlockRuntime {
     pub(crate) cell: Arc<BlockCell>,
     driver: Driver,
     wiring: Arc<WiringTable>,
+    provider_owner: structfs_service::OwnerHandle,
     /// Sibling cells in the same assembly, for fail-fast propagation.
     siblings: Vec<Arc<BlockCell>>,
     env: Arc<BTreeMap<String, String>>,
@@ -226,6 +227,8 @@ pub type StdioProvider = dyn Fn(&str) -> Option<Arc<dyn Stdio>> + Send + Sync;
 /// per-operation deadline.
 pub(crate) struct RtCtx {
     handle: tokio::runtime::Handle,
+    cleanup: Arc<structfs_service::CleanupSupervisor>,
+    provider_limits: Mutex<structfs_service::OwnerLimits>,
     // Interior mutability: RtCtx sits behind Arcs (including a Weak from
     // new_cyclic), so builder-style configuration cannot use get_mut.
     timeout: Mutex<Duration>,
@@ -313,17 +316,65 @@ impl RtCtx {
         path: Path,
         data: Value,
     ) -> std::result::Result<Value, Error> {
+        self.call_live_charged(cell, op, path, data, None).await
+    }
+
+    pub(crate) async fn call_admitted(
+        self: &Arc<Self>,
+        cell: &Arc<BlockCell>,
+        op: &'static str,
+        path: Path,
+        data: Value,
+        lease: structfs_service::Lease,
+    ) -> std::result::Result<Value, Error> {
+        match self.execution_scope() {
+            Some(scope) => {
+                scope
+                    .run(self.call_live_charged(cell, op, path, data, Some(lease)))
+                    .await
+            }
+            None => {
+                self.call_live_charged(cell, op, path, data, Some(lease))
+                    .await
+            }
+        }
+    }
+
+    pub(crate) fn admit_route(
+        &self,
+        key: &BlockId,
+        path: &Path,
+        data: Option<&Record>,
+    ) -> std::result::Result<structfs_service::Lease, Error> {
+        self.call_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .acquire_record(key, path, data)
+    }
+
+    async fn call_live_charged(
+        self: &Arc<Self>,
+        cell: &Arc<BlockCell>,
+        op: &'static str,
+        path: Path,
+        data: Value,
+        prepaid: Option<structfs_service::Lease>,
+    ) -> std::result::Result<Value, Error> {
         // A caller cannot tell what's behind the path: dead blocks are
         // "temporarily unavailable", nothing more.
         if cell.state().is_terminal() {
             return Err(Error::overloaded("store temporarily unavailable"));
         }
-        let charge = self
-            .call_budget
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .acquire(&cell.admission_id, &path, &data)?;
+        let charge = match prepaid {
+            Some(lease) => lease,
+            None => self
+                .call_budget
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .acquire(&cell.admission_id, &path, &data)?,
+        };
         self.ensure_started(cell)
             .map_err(|e| Error::store("runtime", "start", e.to_string()))?;
 
@@ -529,6 +580,7 @@ impl RtCtx {
                     ctx.clone(),
                     iso,
                     block.wiring.clone(),
+                    block.provider_owner.clone(),
                     block.cell.clone(),
                     transcript,
                     session,
@@ -646,15 +698,18 @@ pub struct ShutdownReport {
     /// Registrations whose execution tasks have not been joined. Retain host
     /// reservations until a subsequent shutdown reports an empty list.
     pub remaining: Vec<BlockId>,
+    /// Owned provider work and cleanup that may outlive guest execution.
+    pub providers: Vec<structfs_service::CloseReport>,
 }
 impl ShutdownReport {
     pub fn complete(&self) -> bool {
-        self.remaining.is_empty()
+        self.remaining.is_empty() && self.providers.iter().all(|p| p.is_quiescent())
     }
 }
 
 pub struct AssemblyInstance {
     shutdown_lock: tokio::sync::Mutex<()>,
+    provider_owner: structfs_service::Owner,
     /// The assembly's name from its definition.
     pub name: String,
     ctx: Arc<RtCtx>,
@@ -812,6 +867,20 @@ impl AssemblyInstance {
         cells
     }
 
+    /// Native provider lifetime for this instance. Handles opened by a provider
+    /// must register cleanup here before delivery, or use an explicit service owner.
+    pub fn provider_owner(&self) -> structfs_service::OwnerHandle {
+        self.provider_owner.handle()
+    }
+
+    fn provider_owners(&self) -> Vec<structfs_service::OwnerHandle> {
+        let mut owners = vec![self.provider_owner.handle()];
+        for child in &self.children {
+            owners.extend(child.provider_owners());
+        }
+        owners
+    }
+
     /// Synchronously request graceful shutdown of every block. Parked
     /// mailbox reads unblock immediately; use [`AssemblyInstance::shutdown`]
     /// to also wait and escalate.
@@ -840,6 +909,10 @@ impl AssemblyInstance {
                 cell.request_shutdown(ShutdownMode::Immediate);
             }
         }
+        let owners = self.provider_owners();
+        for owner in &owners {
+            owner.cancel();
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         for cell in &cells {
             let block = self.ctx.lock_blocks().get(&cell.id).cloned();
@@ -858,8 +931,17 @@ impl AssemblyInstance {
                 }
             }
         }
+        let mut providers = Vec::new();
+        for owner in owners {
+            providers.push(
+                owner
+                    .close(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                    .await,
+            );
+        }
         let blocks = self.ctx.lock_blocks();
         ShutdownReport {
+            providers,
             remaining: cells
                 .iter()
                 .filter(|cell| blocks.contains_key(&cell.id))
@@ -947,6 +1029,17 @@ impl RuntimeInner {
             }
         }
 
+        let provider_owner = self
+            .ctx
+            .cleanup
+            .owner(
+                *self
+                    .ctx
+                    .provider_limits
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
+            .map_err(|e| RuntimeError::assembly(e.to_string()))?;
         let mut cells: BTreeMap<String, Arc<BlockCell>> = BTreeMap::new();
         let mut drivers: BTreeMap<String, Driver> = BTreeMap::new();
         let mut keys: BTreeMap<String, String> = BTreeMap::new();
@@ -1078,6 +1171,7 @@ impl RuntimeInner {
                     cell: cell.clone(),
                     driver,
                     wiring: Arc::new(WiringTable::new(entries)),
+                    provider_owner: provider_owner.handle(),
                     siblings: siblings.clone(),
                     env: Arc::new(block_def.env.clone()),
                     args: Arc::new(block_def.args.clone()),
@@ -1092,6 +1186,7 @@ impl RuntimeInner {
 
         let instance = Arc::new(AssemblyInstance {
             shutdown_lock: tokio::sync::Mutex::new(()),
+            provider_owner,
             name: def.name.clone(),
             ctx: self.ctx.clone(),
             cells,
@@ -1138,6 +1233,14 @@ impl Runtime {
     pub fn with_handle(handle: tokio::runtime::Handle) -> Self {
         let inner = Arc::new_cyclic(|weak: &Weak<RuntimeInner>| RuntimeInner {
             ctx: Arc::new(RtCtx {
+                cleanup: Arc::new(structfs_service::CleanupSupervisor::with_handle(
+                    65536,
+                    handle.clone(),
+                )),
+                provider_limits: Mutex::new(structfs_service::OwnerLimits {
+                    resources: 65536,
+                    ..Default::default()
+                }),
                 handle,
                 timeout: Mutex::new(Duration::from_secs(30)),
                 call_budget: Mutex::new(crate::admission::CallBudget::new(Default::default())),
@@ -1158,6 +1261,23 @@ impl Runtime {
             prepared: Mutex::new(HashMap::new()),
         });
         Self { inner }
+    }
+
+    /// Retain this supervisor through host shutdown to observe provider cleanup
+    /// even when an instance or its shutdown future is dropped.
+    pub fn cleanup_supervisor(&self) -> Arc<structfs_service::CleanupSupervisor> {
+        self.inner.ctx.cleanup.clone()
+    }
+
+    /// Bounds owned provider resources for subsequently instantiated assemblies.
+    pub fn with_provider_limits(self, limits: structfs_service::OwnerLimits) -> Self {
+        *self
+            .inner
+            .ctx
+            .provider_limits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = limits;
+        self
     }
 
     /// Register host-resolved core code under an assembly artifact identifier.
@@ -1414,9 +1534,10 @@ fn wasm_format(manifest_bytes: &[u8], declared: &str) -> Result<Format> {
         "application/json" => Ok(Format::JSON),
         "application/cbor" => Ok(Format::CBOR),
         "application/x-flexbuffers" => Ok(Format::FLEXBUFFERS),
+        "application/vnd.structfs.value+json;version=1" => Ok(Format::VALUE_JSON),
         other => Err(RuntimeError::Manifest(format!(
             "unsupported serialization '{other}' (supported: application/json, \
-             application/cbor, application/x-flexbuffers)"
+             application/cbor, application/x-flexbuffers, application/vnd.structfs.value+json;version=1)"
         ))),
     }
 }
@@ -1431,6 +1552,10 @@ mod tests {
             ("application/json", Format::JSON),
             ("application/cbor", Format::CBOR),
             ("application/x-flexbuffers", Format::FLEXBUFFERS),
+            (
+                "application/vnd.structfs.value+json;version=1",
+                Format::VALUE_JSON,
+            ),
         ] {
             let manifest = format!(r#"{{"serialization": "{declared}"}}"#);
             assert_eq!(

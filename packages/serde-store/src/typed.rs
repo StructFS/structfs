@@ -3,7 +3,7 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use structfs_core_store::{Codec, Error, Format, Path, Reader, Record, Writer};
+use structfs_core_store::{Codec, Error, Format, Path, Reader, Record, Value, Writer};
 
 use crate::convert::{from_value, to_value};
 
@@ -59,14 +59,16 @@ pub trait TypedReader: Reader {
         from: &Path,
         codec: &dyn Codec,
     ) -> Result<Option<serde_json::Value>, Error> {
-        self.read_as(from, codec)
+        self.read_as::<Value>(from, codec)?
+            .map(crate::value_to_json)
+            .transpose()
     }
 
     /// Codec-free typed read.
     ///
     /// Most stores return `Record::Parsed` values, where a codec argument is
     /// meaningless; this method deserializes them directly via serde. Raw
-    /// JSON records are parsed with serde_json; other raw formats are an
+    /// JSON records are parsed with the bounded JSON profile; other raw formats are an
     /// `UnsupportedFormat` error — use [`TypedReader::read_as`] with a codec
     /// for those.
     ///
@@ -79,11 +81,10 @@ pub trait TypedReader: Reader {
         };
         match record {
             Record::Parsed(value) => Ok(Some(from_value(value)?)),
-            Record::Raw { bytes, format, .. } if format == Format::JSON => {
-                serde_json::from_slice(&bytes)
-                    .map(Some)
-                    .map_err(|e| Error::decode(Format::JSON, e.to_string()))
-            }
+            Record::Raw { bytes, format, .. } if format == Format::JSON => crate::JsonCodec
+                .decode(&bytes, &format)
+                .and_then(from_value)
+                .map(Some),
             Record::Raw { format, .. } => Err(Error::UnsupportedFormat(format)),
             _ => Err(Error::store(
                 "typed_reader",

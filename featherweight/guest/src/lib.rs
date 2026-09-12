@@ -13,6 +13,45 @@
 
 /// The core-binding SDK: the entire ABI surface for a Rust guest.
 pub mod sdk {
+    /// Local value errors retain their category; the v1 ABI carries host diagnostics.
+    #[cfg(feature = "value-codecs")]
+    #[derive(Debug)]
+    pub enum ValueError {
+        Host(String),
+        Codec(structfs_serde_store::Error),
+    }
+
+    /// Decode with an explicitly selected profile matching the guest manifest.
+    #[cfg(feature = "value-codecs")]
+    pub fn read_value(
+        path: &str,
+        codec: &structfs_serde_store::ValueCodec,
+    ) -> Result<Option<structfs_serde_store::Value>, ValueError> {
+        use structfs_serde_store::Codec;
+        structfs_read(path)
+            .map_err(ValueError::Host)?
+            .map(|b| {
+                codec
+                    .decode(&b.into(), &codec.profile.format())
+                    .map_err(ValueError::Codec)
+            })
+            .transpose()
+    }
+
+    /// Encode with the declared profile before invoking the host import.
+    #[cfg(feature = "value-codecs")]
+    pub fn write_value(
+        path: &str,
+        value: &structfs_serde_store::Value,
+        codec: &structfs_serde_store::ValueCodec,
+    ) -> Result<String, ValueError> {
+        use structfs_serde_store::Codec;
+        let bytes = codec
+            .encode(value, &codec.profile.format())
+            .map_err(ValueError::Codec)?;
+        structfs_write(path, &bytes).map_err(ValueError::Host)
+    }
+
     /// The ret record (spec 11): `{ptr, len}`, little-endian u32s.
     #[repr(C)]
     pub struct Ret {
@@ -190,3 +229,7 @@ mod reference {
         }
     }
 }
+
+/// Typed revisioned-state client for the guest ABI.
+#[cfg(feature = "state")]
+pub mod state;

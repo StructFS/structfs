@@ -1,122 +1,142 @@
-//! JSON codec implementation.
-
+//! Versioned, bounded value codecs.
+use crate::{limits::Failure, Limits};
 use bytes::Bytes;
-use structfs_core_store::{Codec, Error, Format, Value};
+use structfs_core_store::{Codec, CodecErrorKind, CodecOperation, Error, Format, Value};
 
-use crate::convert::{json_to_value, value_to_json};
-
-/// A codec that handles JSON encoding/decoding.
-///
-/// This is the default codec for most use cases. It converts between
-/// `Value` and JSON bytes.
-///
-/// # Example
-///
-/// ```rust
-/// use structfs_serde_store::JsonCodec;
-/// use structfs_core_store::{Codec, Format, Value};
-/// use bytes::Bytes;
-///
-/// let codec = JsonCodec;
-/// let value = Value::from("hello");
-///
-/// let bytes = codec.encode(&value, &Format::JSON).unwrap();
-/// let decoded = codec.decode(&bytes, &Format::JSON).unwrap();
-///
-/// assert_eq!(decoded, value);
-/// ```
-#[derive(Debug, Clone, Copy, Default)]
-pub struct JsonCodec;
-
-impl Codec for JsonCodec {
-    fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
-        if !self.supports(format) {
-            return Err(Error::UnsupportedFormat(format.clone()));
+/// Explicitly selected StructFS v1 codec contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    ValueJson,
+    Json,
+    Cbor,
+    Flexbuffers,
+}
+impl Profile {
+    pub fn identifier(self) -> &'static str {
+        match self {
+            Self::ValueJson => "structfs-value-json/1",
+            Self::Json => "structfs-json/1",
+            Self::Cbor => "structfs-cbor/1",
+            Self::Flexbuffers => "structfs-flexbuffers/1",
         }
-
-        let json: serde_json::Value = serde_json::from_slice(bytes)
-            .map_err(|e| Error::decode(format.clone(), e.to_string()))?;
-
-        Ok(json_to_value(json))
     }
-
-    fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
-        if !self.supports(format) {
-            return Err(Error::UnsupportedFormat(format.clone()));
+    pub fn format(self) -> Format {
+        match self {
+            Self::ValueJson => Format::VALUE_JSON,
+            Self::Json => Format::JSON,
+            Self::Cbor => Format::CBOR,
+            Self::Flexbuffers => Format::FLEXBUFFERS,
         }
-
-        let json = value_to_json(value.clone());
-        let bytes =
-            serde_json::to_vec(&json).map_err(|e| Error::encode(format.clone(), e.to_string()))?;
-
-        Ok(Bytes::from(bytes))
     }
-
-    fn supports(&self, format: &Format) -> bool {
-        format == &Format::JSON
+}
+/// A codec with caller-configured finite limits. Canonical validation applies only
+/// to tagged JSON and compares the complete supplied document, including whitespace.
+#[derive(Debug, Clone)]
+pub struct ValueCodec {
+    pub profile: Profile,
+    pub limits: Limits,
+    pub require_canonical: bool,
+}
+impl ValueCodec {
+    pub fn new(profile: Profile) -> Self {
+        Self {
+            profile,
+            limits: Limits::default(),
+            require_canonical: false,
+        }
+    }
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+    pub fn canonical(mut self) -> Self {
+        self.require_canonical = true;
+        self
     }
 }
 
-/// A codec for CBOR (`Format::CBOR`).
-///
-/// `Value` serializes structurally, so the mapping is natural — and
-/// unlike JSON, `Value::Bytes` crosses as a CBOR byte string and comes
-/// back as `Value::Bytes`, not an array of numbers.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CborCodec;
-
-impl Codec for CborCodec {
-    fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
-        if !self.supports(format) {
-            return Err(Error::UnsupportedFormat(format.clone()));
-        }
-        ciborium::from_reader(bytes.as_ref())
-            .map_err(|e| Error::decode(format.clone(), e.to_string()))
-    }
-
-    fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
-        if !self.supports(format) {
-            return Err(Error::UnsupportedFormat(format.clone()));
-        }
-        let mut buffer = Vec::new();
-        ciborium::into_writer(value, &mut buffer)
-            .map_err(|e| Error::encode(format.clone(), e.to_string()))?;
-        Ok(Bytes::from(buffer))
-    }
-
-    fn supports(&self, format: &Format) -> bool {
-        format == &Format::CBOR
-    }
+/// Validate and transcode a document, even when both profiles are the same.
+/// Raw byte forwarding is deliberately a different operation.
+pub fn transcode(bytes: &Bytes, source: &ValueCodec, target: &ValueCodec) -> Result<Bytes, Error> {
+    let value = source.decode(bytes, &source.profile.format())?;
+    target.encode(&value, &target.profile.format())
 }
-
-/// A codec for FlexBuffers (`Format::FLEXBUFFERS`).
-///
-/// Like CBOR, the encoding is self-describing and byte-faithful:
-/// `Value::Bytes` crosses as a blob and round-trips exactly.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FlexbuffersCodec;
-
-impl Codec for FlexbuffersCodec {
+impl Codec for ValueCodec {
+    fn supports(&self, format: &Format) -> bool {
+        *format == self.profile.format()
+    }
     fn decode(&self, bytes: &Bytes, format: &Format) -> Result<Value, Error> {
         if !self.supports(format) {
             return Err(Error::UnsupportedFormat(format.clone()));
         }
-        flexbuffers::from_slice(bytes).map_err(|e| Error::decode(format.clone(), e.to_string()))
+        let result = (|| {
+            if self.require_canonical && self.profile != Profile::ValueJson {
+                return Err(Failure(CodecErrorKind::UnsupportedProfile));
+            }
+            let v = match self.profile {
+                Profile::ValueJson => crate::json_profile::decode(bytes, &self.limits, true),
+                Profile::Json => crate::json_profile::decode(bytes, &self.limits, false),
+                Profile::Cbor => crate::cbor_profile::decode(bytes, &self.limits),
+                Profile::Flexbuffers => crate::flex_profile::decode(bytes, &self.limits),
+            }?;
+            if self.require_canonical
+                && crate::json_profile::encode(&v, &self.limits, true)?.as_slice() != bytes.as_ref()
+            {
+                return Err(Failure(CodecErrorKind::Noncanonical));
+            }
+            Ok(v)
+        })();
+        result.map_err(|e: Failure| e.core(format, CodecOperation::Decode, &self.limits))
     }
-
     fn encode(&self, value: &Value, format: &Format) -> Result<Bytes, Error> {
         if !self.supports(format) {
             return Err(Error::UnsupportedFormat(format.clone()));
         }
-        flexbuffers::to_vec(value)
+        let result = match self.profile {
+            Profile::ValueJson => crate::json_profile::encode(value, &self.limits, true),
+            Profile::Json => crate::json_profile::encode(value, &self.limits, false),
+            Profile::Cbor => crate::cbor_profile::encode(value, &self.limits),
+            Profile::Flexbuffers => crate::flex_profile::encode(value, &self.limits),
+        };
+        result
             .map(Bytes::from)
-            .map_err(|e| Error::encode(format.clone(), e.to_string()))
-    }
-
-    fn supports(&self, format: &Format) -> bool {
-        format == &Format::FLEXBUFFERS
+            .map_err(|e| e.core(format, CodecOperation::Encode, &self.limits))
     }
 }
+macro_rules! default_codec {
+    ($name:ident,$profile:ident,$doc:literal) => {
+        #[doc=$doc]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct $name;
+        impl Codec for $name {
+            fn supports(&self, f: &Format) -> bool {
+                ValueCodec::new(Profile::$profile).supports(f)
+            }
+            fn decode(&self, b: &Bytes, f: &Format) -> Result<Value, Error> {
+                ValueCodec::new(Profile::$profile).decode(b, f)
+            }
+            fn encode(&self, v: &Value, f: &Format) -> Result<Bytes, Error> {
+                ValueCodec::new(Profile::$profile).encode(v, f)
+            }
+        }
+    };
+}
+default_codec!(
+    JsonCodec,
+    Json,
+    "Strict plain JSON with default limits; bytes and non-finite floats fail."
+);
+default_codec!(
+    ValueJsonCodec,
+    ValueJson,
+    "Lossless canonical StructFS Value JSON v1 with default limits."
+);
+default_codec!(CborCodec, Cbor, "StructFS CBOR v1 with default limits.");
+default_codec!(
+    FlexbuffersCodec,
+    Flexbuffers,
+    "StructFS FlexBuffers v1 with default limits; NUL map keys fail."
+);
 
 /// A codec that combines multiple codecs.
 ///
@@ -143,13 +163,13 @@ impl MultiCodec {
         mc
     }
 
-    /// The standard transports, all equivalent-tier: JSON, CBOR, and
-    /// FlexBuffers, routed by format.
+    /// The v1 transports, routed by explicit format. Each has its documented subset.
     pub fn standard() -> Self {
         let mut mc = Self::new();
         mc.add(JsonCodec);
         mc.add(CborCodec);
         mc.add(FlexbuffersCodec);
+        mc.add(ValueJsonCodec);
         mc
     }
 }

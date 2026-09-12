@@ -1,75 +1,33 @@
-//! Conversions between Value and serde types.
+//! Checked conversion to/from a plain JSON DOM. Original token spellings and
+//! duplicate keys are already lost in a DOM; use JsonCodec on untrusted wire input.
+pub use crate::value_serde::{from_value, to_value};
+use crate::{Codec, JsonCodec};
+use structfs_core_store::{Error, Format, Value};
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use structfs_core_store::{Error, Value};
-
-/// Convert a Value to a Rust type via serde.
-pub fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, Error> {
-    // Convert Value to serde_json::Value first, then deserialize
-    let json = value_to_json(value);
-    serde_json::from_value(json)
-        .map_err(|e| Error::decode(structfs_core_store::Format::VALUE, e.to_string()))
+/// Convert to plain JSON, rejecting bytes and non-finite floats.
+pub fn value_to_json(value: Value) -> Result<serde_json::Value, Error> {
+    let bytes = JsonCodec.encode(&value, &Format::JSON)?;
+    serde_json::from_slice(&bytes).map_err(|e| Error::decode(Format::JSON, e.to_string()))
 }
-
-/// Convert a Rust type to a Value via serde.
-pub fn to_value<T: Serialize>(data: &T) -> Result<Value, Error> {
-    // Serialize to serde_json::Value first, then convert to Value
-    let json = serde_json::to_value(data)
-        .map_err(|e| Error::encode(structfs_core_store::Format::VALUE, e.to_string()))?;
-    Ok(json_to_value(json))
-}
-
-/// Convert our Value to serde_json::Value.
-pub fn value_to_json(value: Value) -> serde_json::Value {
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(b),
-        Value::Integer(i) => serde_json::Value::Number(i.into()),
-        Value::Float(f) => serde_json::Number::from_f64(f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::String(s) => serde_json::Value::String(s),
-        Value::Bytes(b) => {
-            // JSON doesn't have bytes, so we base64 encode
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&b);
-            serde_json::Value::String(encoded)
-        }
-        Value::Array(arr) => serde_json::Value::Array(arr.into_iter().map(value_to_json).collect()),
-        Value::Map(map) => serde_json::Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, value_to_json(v)))
-                .collect(),
-        ),
-        // Value is #[non_exhaustive]; an unknown variant has no JSON
-        // representation, so fall back to null (same policy as NaN floats).
-        _ => serde_json::Value::Null,
-    }
-}
-
-/// Convert serde_json::Value to our Value.
+/// Import an already parsed JSON DOM, preserving its exact supported numbers.
 pub fn json_to_value(json: serde_json::Value) -> Value {
     match json {
         serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::Bool(v) => Value::Bool(v),
+        serde_json::Value::String(v) => Value::String(v),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
+            } else if let Some(u) = n.as_u64() {
+                Value::from(u)
             } else {
-                // Fallback for very large numbers
-                Value::String(n.to_string())
+                Value::from(n.as_f64().expect("finite JSON number"))
             }
         }
-        serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Array(arr) => Value::Array(arr.into_iter().map(json_to_value).collect()),
-        serde_json::Value::Object(map) => Value::Map(
-            map.into_iter()
-                .map(|(k, v)| (k, json_to_value(v)))
-                .collect(),
-        ),
+        serde_json::Value::Array(a) => Value::Array(a.into_iter().map(json_to_value).collect()),
+        serde_json::Value::Object(m) => {
+            Value::Map(m.into_iter().map(|(k, v)| (k, json_to_value(v))).collect())
+        }
     }
 }
 
@@ -131,25 +89,25 @@ mod tests {
             Value::Integer(3),
         ]);
 
-        let json = value_to_json(value);
+        let json = value_to_json(value).unwrap();
         assert_eq!(json, serde_json::json!([1, 2, 3]));
     }
 
     #[test]
     fn value_to_json_null() {
         let value = Value::Null;
-        let json = value_to_json(value);
+        let json = value_to_json(value).unwrap();
         assert_eq!(json, serde_json::Value::Null);
     }
 
     #[test]
     fn value_to_json_bool() {
         assert_eq!(
-            value_to_json(Value::Bool(true)),
+            value_to_json(Value::Bool(true)).unwrap(),
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            value_to_json(Value::Bool(false)),
+            value_to_json(Value::Bool(false)).unwrap(),
             serde_json::Value::Bool(false)
         );
     }
@@ -157,21 +115,21 @@ mod tests {
     #[test]
     fn value_to_json_string() {
         let value = Value::String("hello world".to_string());
-        let json = value_to_json(value);
+        let json = value_to_json(value).unwrap();
         assert_eq!(json, serde_json::Value::String("hello world".to_string()));
     }
 
     #[test]
     fn value_to_json_integer() {
         let value = Value::Integer(12345);
-        let json = value_to_json(value);
+        let json = value_to_json(value).unwrap();
         assert_eq!(json, serde_json::json!(12345));
     }
 
     #[test]
     fn value_to_json_float() {
         let value = Value::Float(1.23456);
-        let json = value_to_json(value);
+        let json = value_to_json(value).unwrap();
         if let serde_json::Value::Number(n) = json {
             assert!((n.as_f64().unwrap() - 1.23456).abs() < 0.00001);
         } else {
@@ -180,27 +138,9 @@ mod tests {
     }
 
     #[test]
-    fn value_to_json_nan_becomes_null() {
-        let value = Value::Float(f64::NAN);
-        let json = value_to_json(value);
-        assert_eq!(json, serde_json::Value::Null);
-    }
-
-    #[test]
-    fn value_to_json_bytes() {
-        let value = Value::Bytes(vec![1, 2, 3, 4]);
-        let json = value_to_json(value);
-
-        // Should be base64 encoded
-        if let serde_json::Value::String(s) = json {
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&s)
-                .unwrap();
-            assert_eq!(decoded, vec![1, 2, 3, 4]);
-        } else {
-            panic!("expected string");
-        }
+    fn value_to_json_rejects_lossy_values() {
+        assert!(value_to_json(Value::Float(f64::NAN)).is_err());
+        assert!(value_to_json(Value::Bytes(vec![1, 2, 3])).is_err());
     }
 
     #[test]
@@ -210,7 +150,7 @@ mod tests {
         map.insert("key".to_string(), Value::String("value".to_string()));
         map.insert("num".to_string(), Value::Integer(42));
 
-        let json = value_to_json(Value::Map(map));
+        let json = value_to_json(Value::Map(map)).unwrap();
         assert_eq!(json, serde_json::json!({"key": "value", "num": 42}));
     }
 
