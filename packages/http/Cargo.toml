@@ -2,10 +2,11 @@
 name = "structfs-http"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "HTTP client stores for StructFS"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "http", "client", "broker"]
 categories = ["web-programming::http-client"]
 

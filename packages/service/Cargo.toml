@@ -2,6 +2,7 @@
 name = "structfs-service"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Scoped async service routing, provider adapters, and shared call admission for StructFS"

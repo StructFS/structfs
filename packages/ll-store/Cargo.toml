@@ -2,10 +2,11 @@
 name = "structfs-ll-store"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Low-level StructFS store traits - pure bytes, no semantics"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "bytes", "read-write", "traits"]
 categories = ["data-structures"]
 

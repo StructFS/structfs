@@ -2,10 +2,11 @@
 name = "structfs-serde-store"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Serde integration for StructFS stores - typed access"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "serde", "typed", "codec"]
 categories = ["data-structures", "encoding"]
 

@@ -2,10 +2,11 @@
 name = "structfs-sys"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "OS primitives exposed through StructFS paths"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "os", "filesystem", "env", "time"]
 categories = ["os"]
 

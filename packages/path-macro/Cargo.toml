@@ -2,10 +2,11 @@
 name = "structfs-path-macro"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Compile-time validated path! macro for StructFS"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["path", "macro", "identifier", "uax31"]
 categories = ["data-structures", "development-tools::procedural-macro-helpers"]
 

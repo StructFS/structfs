@@ -2,6 +2,7 @@
 name = "featherweight"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Featherweight Isotope runtime CLI: run assemblies and the demo shell"

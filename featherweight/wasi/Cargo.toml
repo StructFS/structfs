@@ -2,6 +2,7 @@
 name = "featherweight-wasi"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "WASI-over-Isotope shim core: the syscall surface implemented over the Block ABI (isotope/spec/10-wasi-tower.md)"

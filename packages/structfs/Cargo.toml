@@ -2,10 +2,11 @@
 name = "structfs"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "A uniform interface for accessing data through read/write operations on paths"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "path", "read-write", "mount", "structured-data"]
 categories = ["data-structures", "rust-patterns"]
 
@@ -31,3 +32,10 @@ service = ["dep:structfs-service", "async"]
 state = ["dep:structfs-state", "service", "serde"]
 profiles = ["dep:structfs-profiles", "service"]
 full = ["serde", "json", "http", "sys", "async", "service", "state", "profiles"]
+
+[[example]]
+name = "quickstart"
+required-features = ["json"]
+
+[package.metadata.docs.rs]
+all-features = true

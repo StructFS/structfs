@@ -737,7 +737,7 @@ impl<E: HttpExecutor> Writer for HttpClientStore<E> {
 /// Async HTTP broker store (new architecture).
 ///
 /// A synchronous facade over a `HandleStore` running
-/// [`HttpBrokerProtocol`]: the `outstanding/{id}` scaffolding — id
+/// `HttpBrokerProtocol`: the `outstanding/{id}` scaffolding — id
 /// minting, the no-overwrite rule, Null-write release with cancellation,
 /// listing — comes from `structfs-handles`. Requests execute on
 /// background threads; `response/wait` is a parked read (no

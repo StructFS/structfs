@@ -2,6 +2,7 @@
 name = "featherweight-guest"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Guest SDK and reference block for the core-wasm Block ABI binding (isotope/spec/11)"

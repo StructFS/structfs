@@ -2,10 +2,11 @@
 name = "structfs-core-store"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core StructFS store traits - Record, Value, Path, Format"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["store", "path", "read-write", "structured-data"]
 categories = ["data-structures", "rust-patterns"]
 

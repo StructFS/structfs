@@ -2,6 +2,7 @@
 name = "featherweight-component"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "WIT component-model binding adapter: run wasm components as Isotope blocks"

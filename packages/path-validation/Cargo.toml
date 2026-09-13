@@ -2,10 +2,11 @@
 name = "structfs-path-validation"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared path component validation rules for StructFS"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["path", "validation", "identifier", "uax31"]
 categories = ["data-structures"]
 

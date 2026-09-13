@@ -28,6 +28,9 @@
 //! | `http`  | `HttpBrokerStore`, `HttpClientStore` (implies `serde`) |
 //! | `sys`   | `SysStore` — env, time, random, proc, fs |
 //! | `async` | Async trait variants |
+//! | `service` | Shared async routing and owned providers |
+//! | `state` | Revisioned state and bounded observation |
+//! | `profiles` | Optional interactive and operation contracts |
 //! | `full`  | All of the above |
 
 // ── Core: always available ──────────────────────────────────────────
