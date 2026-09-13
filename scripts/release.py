@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Plan, validate and publish workspace releases. Python 3.9+, no dependencies."""
 import argparse
+from collections import deque
+from email.utils import parsedate_to_datetime
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -105,6 +108,62 @@ def wait_for_version(name, version, timeout):
         time.sleep(min(5, max(0, deadline - time.monotonic())))
 
 
+def verify_source(head):
+    if run("git", "rev-parse", "HEAD", capture=True).strip() != head:
+        raise ValueError("HEAD changed during release verification")
+    if run("git", "status", "--porcelain", capture=True).strip():
+        raise ValueError("working tree changed during release verification")
+
+
+def publish_once(name):
+    command = ("cargo", "publish", "--locked", "-p", name)
+    output = deque(maxlen=200)
+    with subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT) as process:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output.append(line)
+        code = process.wait()
+    if code:
+        raise subprocess.CalledProcessError(code, command, output="".join(output))
+
+
+def rate_limit_delay(output):
+    # Cargo exposes the registry's retry date in its error text, not headers.
+    # Retry only an explicit HTTP rejection with a recognized UTC date.
+    if not re.search(r"status 429\b", output):
+        return None
+    match = re.search(r"Please try again after ([A-Za-z]{3}, \d{1,2} "
+                      r"[A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT)", output)
+    if not match:
+        return None
+    try:
+        retry_at = parsedate_to_datetime(match[1]).timestamp()
+    except (ValueError, OverflowError):
+        return None
+    return max(1, retry_at - time.time() + 2)
+
+
+def publish_with_retry(name, head):
+    for attempt in range(4):
+        verify_source(head)
+        try:
+            publish_once(name)
+            return
+        except subprocess.CalledProcessError as error:
+            delay = rate_limit_delay(error.output or "")
+            if delay is None or delay > 3600 or attempt == 3:
+                raise
+            deadline = time.monotonic() + delay
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                print(f"Rate limited: retrying {name} in {remaining:.0f}s "
+                      f"(retry {attempt + 1}/3; Ctrl-C to stop).", flush=True)
+                time.sleep(min(30, remaining))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
@@ -160,13 +219,10 @@ def main():
         print("Dry run complete: registry checked and release gates passed. Nothing published or tagged."
               if not args.skip_gates else "Registry preflight complete; gates explicitly skipped. Nothing published or tagged.")
         return
-    if run("git", "rev-parse", "HEAD", capture=True).strip() != head:
-        raise ValueError("HEAD changed during release verification")
-    if run("git", "status", "--porcelain", capture=True).strip():
-        raise ValueError("working tree changed during release verification")
+    verify_source(head)
     for package, tag, tag_exists in pending:
         # Cargo validates dependency availability and verifies the package again.
-        run("cargo", "publish", "--locked", "-p", package["name"])
+        publish_with_retry(package["name"], head)
         wait_for_version(package["name"], package["version"], args.propagation_delay)
         if not tag_exists:
             run("git", "tag", "-a", tag, "-m", f"{package['name']} v{package['version']}")

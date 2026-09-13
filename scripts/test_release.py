@@ -79,6 +79,56 @@ class ReleaseTests(unittest.TestCase):
             self.assertFalse(any(call.args[:2] in [("cargo", "publish"), ("git", "tag")]
                                  for call in run.call_args_list))
 
+    def test_rate_limit_retry_date(self):
+        message = ("status 429 Too Many Requests: Please try again after "
+                   "Sun, 13 Sep 2026 04:10:31 GMT")
+        retry_at = release.parsedate_to_datetime("Sun, 13 Sep 2026 04:10:31 GMT").timestamp()
+        with patch("release.time.time", return_value=retry_at - 8):
+            self.assertEqual(release.rate_limit_delay(message), 10)
+            self.assertIsNone(release.rate_limit_delay(message.replace("429", "500")))
+            self.assertIsNone(release.rate_limit_delay("status 429 without a retry date"))
+
+    def test_publish_retries_only_recognized_rate_limits(self):
+        error = release.subprocess.CalledProcessError(101, ["cargo", "publish"], output="limited")
+        with patch("release.publish_once", side_effect=[error, None]) as publish, \
+                patch("release.verify_source") as verify, \
+                patch("release.rate_limit_delay", return_value=1), \
+                patch("release.time.monotonic", side_effect=[0, 0, 1]), \
+                patch("release.time.sleep") as sleep:
+            release.publish_with_retry("example", "abc")
+            self.assertEqual(publish.call_count, 2)
+            self.assertEqual(verify.call_count, 2)
+            sleep.assert_called_once_with(1)
+        for delay in [None, 3601]:
+            with patch("release.publish_once", side_effect=error) as publish, \
+                    patch("release.verify_source"), \
+                    patch("release.rate_limit_delay", return_value=delay), \
+                    patch("release.time.sleep") as sleep:
+                with self.assertRaises(release.subprocess.CalledProcessError):
+                    release.publish_with_retry("example", "abc")
+                self.assertEqual(publish.call_count, 1)
+                sleep.assert_not_called()
+
+    def test_publish_retry_exhaustion(self):
+        error = release.subprocess.CalledProcessError(101, ["cargo", "publish"], output="limited")
+        with patch("release.publish_once", side_effect=error) as publish, \
+                patch("release.verify_source"), \
+                patch("release.rate_limit_delay", return_value=1), \
+                patch("release.time.monotonic", side_effect=[0, 1, 0, 1, 0, 1]):
+            with self.assertRaises(release.subprocess.CalledProcessError):
+                release.publish_with_retry("example", "abc")
+            self.assertEqual(publish.call_count, 4)
+
+    def test_changed_source_prevents_retry(self):
+        error = release.subprocess.CalledProcessError(101, ["cargo", "publish"], output="limited")
+        with patch("release.publish_once", side_effect=error) as publish, \
+                patch("release.verify_source", side_effect=[None, ValueError("HEAD changed")]), \
+                patch("release.rate_limit_delay", return_value=1), \
+                patch("release.time.monotonic", side_effect=[0, 1]):
+            with self.assertRaisesRegex(ValueError, "HEAD changed"):
+                release.publish_with_retry("example", "abc")
+            self.assertEqual(publish.call_count, 1)
+
     def test_registry_polling(self):
         with patch("release.registry_versions", side_effect=[{}, {"0.2.0": {"yanked": False}}]), \
                 patch("release.time.sleep"):

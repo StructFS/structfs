@@ -81,6 +81,15 @@ order, waits for the exact version to become visible, then creates its annotated
 crate tag. `--propagation-delay` is the maximum visibility wait in seconds, not a
 blind sleep. The driver does not push tags or publish websites.
 
+When crates.io rejects an upload with HTTP 429 and a recognized "Please try
+again after" UTC date, the driver waits until that date (plus two seconds), then
+retries the same crate. It prints progress every 30 seconds and checks that HEAD
+and the working tree are unchanged before each attempt. Retries are limited to
+three per crate and one hour per wait. Unknown retry formats, longer waits and
+other failures still abort; ambiguous upload failures are not retried automatically.
+Ctrl-C stops a wait; rerun the release later to resume from registry state.
+See [crates.io rate limits](https://crates.io/docs/rate-limits).
+
 On partial failure, rerun preflight: already published exact versions are skipped;
 yanked versions stop the release. If upload succeeded but tag creation did not,
 verify the uploaded source commit and create the missing tag manually. Never infer
