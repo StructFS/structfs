@@ -71,7 +71,7 @@ impl Codec for ValueCodec {
         }
         let result = (|| {
             if self.require_canonical && self.profile != Profile::ValueJson {
-                return Err(Failure(CodecErrorKind::UnsupportedProfile));
+                return Err(Failure::new(CodecErrorKind::UnsupportedProfile));
             }
             let v = match self.profile {
                 Profile::ValueJson => crate::json_profile::decode(bytes, &self.limits, true),
@@ -82,7 +82,7 @@ impl Codec for ValueCodec {
             if self.require_canonical
                 && crate::json_profile::encode(&v, &self.limits, true)?.as_slice() != bytes.as_ref()
             {
-                return Err(Failure(CodecErrorKind::Noncanonical));
+                return Err(Failure::new(CodecErrorKind::Noncanonical));
             }
             Ok(v)
         })();

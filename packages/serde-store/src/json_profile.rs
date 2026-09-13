@@ -38,14 +38,14 @@ impl<'a> Parser<'a, '_> {
         let start = self.pos;
         self.take(b'"')?;
         loop {
-            let b = *self.input.get(self.pos).ok_or(Failure(K::Syntax))?;
+            let b = *self.input.get(self.pos).ok_or(Failure::new(K::Syntax))?;
             self.pos += 1;
             if b == b'"' {
                 break;
             }
             ensure(b >= 32, K::Syntax)?;
             if b == b'\\' {
-                let b = *self.input.get(self.pos).ok_or(Failure(K::Syntax))?;
+                let b = *self.input.get(self.pos).ok_or(Failure::new(K::Syntax))?;
                 self.pos += 1;
                 if b == b'u' {
                     for _ in 0..4 {
@@ -64,7 +64,8 @@ impl<'a> Parser<'a, '_> {
             }
         }
         self.budget.allocate((self.pos - start).saturating_mul(2))?;
-        serde_json::from_slice(&self.input[start..self.pos]).map_err(|_| Failure(K::InvalidUnicode))
+        serde_json::from_slice(&self.input[start..self.pos])
+            .map_err(|_| Failure::new(K::InvalidUnicode))
     }
     fn value(&mut self, depth: usize) -> Result<Json<'a>> {
         // A hard stack ceiling is independent of caller-configured semantic depth.
@@ -85,7 +86,7 @@ impl<'a> Parser<'a, '_> {
             .input
             .get(self.pos)
             .copied()
-            .ok_or(Failure(K::Syntax))?
+            .ok_or(Failure::new(K::Syntax))?
         {
             b'n' => {
                 self.literal(b"null")?;
@@ -182,7 +183,7 @@ impl<'a> Parser<'a, '_> {
                     std::str::from_utf8(&self.input[start..self.pos]).unwrap(),
                 ))
             }
-            _ => Err(Failure(K::Syntax)),
+            _ => Err(Failure::new(K::Syntax)),
         }
     }
     fn digits(&mut self) {
@@ -203,11 +204,11 @@ fn integer(s: &str) -> Result<Value> {
     if s.starts_with('-') {
         s.parse::<i64>()
             .map(Value::Integer)
-            .map_err(|_| Failure(K::OutOfRange))
+            .map_err(|_| Failure::new(K::OutOfRange))
     } else {
         s.parse::<u64>()
             .map(Value::from)
-            .map_err(|_| Failure(K::OutOfRange))
+            .map_err(|_| Failure::new(K::OutOfRange))
     }
 }
 fn plain(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
@@ -217,7 +218,7 @@ fn plain(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
         Json::Bool(x) => Value::Bool(x),
         Json::Number(s) => {
             if s.contains(['.', 'e', 'E']) {
-                let f = s.parse::<f64>().map_err(|_| Failure(K::OutOfRange))?;
+                let f = s.parse::<f64>().map_err(|_| Failure::new(K::OutOfRange))?;
                 ensure(f.is_finite(), K::OutOfRange)?;
                 Value::from(f)
             } else {
@@ -253,33 +254,33 @@ fn array(j: Json<'_>) -> Result<Vec<Json<'_>>> {
     if let Json::Array(a) = j {
         Ok(a)
     } else {
-        Err(Failure(K::InvalidNode))
+        Err(Failure::new(K::InvalidNode))
     }
 }
 fn string(j: Json<'_>) -> Result<String> {
     if let Json::String(s) = j {
         Ok(s)
     } else {
-        Err(Failure(K::InvalidNode))
+        Err(Failure::new(K::InvalidNode))
     }
 }
 fn tagged(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
     b.node(depth)?;
     let a = array(j)?;
     let mut iter = a.into_iter();
-    let tag = string(iter.next().ok_or(Failure(K::InvalidNode))?)?;
+    let tag = string(iter.next().ok_or(Failure::new(K::InvalidNode))?)?;
     if tag == "null" {
         ensure(iter.next().is_none(), K::InvalidNode)?;
         return Ok(Value::Null);
     }
-    let x = iter.next().ok_or(Failure(K::InvalidNode))?;
+    let x = iter.next().ok_or(Failure::new(K::InvalidNode))?;
     ensure(iter.next().is_none(), K::InvalidNode)?;
     Ok(match tag.as_str() {
         "bool" => {
             if let Json::Bool(v) = x {
                 Value::Bool(v)
             } else {
-                return Err(Failure(K::InvalidNode));
+                return Err(Failure::new(K::InvalidNode));
             }
         }
         "int" => {
@@ -303,7 +304,7 @@ fn tagged(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
                 K::InvalidNode,
             )?;
             Value::from(f64::from_bits(
-                u64::from_str_radix(&s, 16).map_err(|_| Failure(K::InvalidNode))?,
+                u64::from_str_radix(&s, 16).map_err(|_| Failure::new(K::InvalidNode))?,
             ))
         }
         "string" => {
@@ -320,7 +321,9 @@ fn tagged(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
                     .count()
                     .min(s.len() / 4 * 3);
             b.payload(n, true)?;
-            let bytes = STANDARD.decode(s).map_err(|_| Failure(K::InvalidBase64))?;
+            let bytes = STANDARD
+                .decode(s)
+                .map_err(|_| Failure::new(K::InvalidBase64))?;
             Value::Bytes(bytes)
         }
         "array" => {
@@ -348,12 +351,12 @@ fn tagged(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
             }
             Value::Map(m)
         }
-        _ => return Err(Failure(K::InvalidNode)),
+        _ => return Err(Failure::new(K::InvalidNode)),
     })
 }
 pub(crate) fn decode(input: &[u8], limits: &Limits, is_tagged: bool) -> Result<Value> {
     ensure(input.len() <= limits.max_input_bytes, K::ResourceLimit)?;
-    std::str::from_utf8(input).map_err(|_| Failure(K::InvalidUnicode))?;
+    std::str::from_utf8(input).map_err(|_| Failure::new(K::InvalidUnicode))?;
     let mut p = Parser {
         input,
         pos: 0,
@@ -375,7 +378,7 @@ pub(crate) fn decode(input: &[u8], limits: &Limits, is_tagged: bool) -> Result<V
         K::InvalidNode,
     )?;
     let Json::Number(version) = e.next().unwrap() else {
-        return Err(Failure(K::InvalidNode));
+        return Err(Failure::new(K::InvalidNode));
     };
     ensure(!version.contains(['.', 'e', 'E']), K::InvalidNode)?;
     ensure(version == "1", K::UnsupportedVersion)?;
@@ -400,7 +403,7 @@ impl<'a> Output<'a> {
             .bytes
             .len()
             .checked_add(s.len())
-            .ok_or(Failure(K::ResourceLimit))?;
+            .ok_or(Failure::new(K::ResourceLimit))?;
         ensure(
             n <= self.limits.max_output_bytes
                 && n <= self.limits.max_allocation_bytes
@@ -438,7 +441,7 @@ impl<'a> Output<'a> {
                 Value::Bytes(_) => "bytes",
                 Value::Array(_) => "array",
                 Value::Map(_) => "map",
-                _ => return Err(Failure(K::UnsupportedValue)),
+                _ => return Err(Failure::new(K::UnsupportedValue)),
             })?;
             if !v.is_null() {
                 self.put(b",")?;
@@ -481,7 +484,7 @@ impl<'a> Output<'a> {
                     ensure(x.is_finite(), K::UnsupportedValue)?;
                     self.put(
                         serde_json::to_string(x)
-                            .map_err(|_| Failure(K::UnsupportedValue))?
+                            .map_err(|_| Failure::new(K::UnsupportedValue))?
                             .as_bytes(),
                     )?
                 }
@@ -524,7 +527,7 @@ impl<'a> Output<'a> {
                 }
                 self.put(if tagged { b"]" } else { b"}" })?;
             }
-            _ => return Err(Failure(K::UnsupportedValue)),
+            _ => return Err(Failure::new(K::UnsupportedValue)),
         }
         if tagged {
             self.put(b"]")?;

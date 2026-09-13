@@ -87,9 +87,9 @@ impl<'a, 'b> ser::Serializer for Serializer<'a, 'b> {
     }
     fn serialize_i128(self, v: i128) -> Result<Value> {
         if v < 0 {
-            self.serialize_i64(v.try_into().map_err(|_| Failure(K::OutOfRange))?)
+            self.serialize_i64(v.try_into().map_err(|_| Failure::new(K::OutOfRange))?)
         } else {
-            self.serialize_u64(v.try_into().map_err(|_| Failure(K::OutOfRange))?)
+            self.serialize_u64(v.try_into().map_err(|_| Failure::new(K::OutOfRange))?)
         }
     }
     fn serialize_u8(self, v: u8) -> Result<Value> {
@@ -105,7 +105,7 @@ impl<'a, 'b> ser::Serializer for Serializer<'a, 'b> {
         self.scalar(Value::from(v))
     }
     fn serialize_u128(self, v: u128) -> Result<Value> {
-        self.serialize_u64(v.try_into().map_err(|_| Failure(K::OutOfRange))?)
+        self.serialize_u64(v.try_into().map_err(|_| Failure::new(K::OutOfRange))?)
     }
     fn serialize_f32(self, v: f32) -> Result<Value> {
         self.serialize_f64(v.into())
@@ -232,7 +232,7 @@ impl<'a, 'b> ser::Serializer for Serializer<'a, 'b> {
             text: String::new(),
             max,
         };
-        write!(&mut out, "{value}").map_err(|_| Failure(K::ResourceLimit))?;
+        write!(&mut out, "{value}").map_err(|_| Failure::new(K::ResourceLimit))?;
         self.serialize_str(&out.text)
     }
 }
@@ -260,11 +260,13 @@ struct Compound<'a, 'b> {
 impl Compound<'_, '_> {
     fn element<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<()> {
         self.serializer.budget.entries(self.array.len() + 1)?;
-        let value = v.serialize(Serializer {
-            budget: self.serializer.budget,
-            depth: self.serializer.depth + 1,
-            key: false,
-        })?;
+        let value = v
+            .serialize(Serializer {
+                budget: self.serializer.budget,
+                depth: self.serializer.depth + 1,
+                key: false,
+            })
+            .map_err(|e| e.at(format_args!("[{}]", self.array.len())))?;
         self.array.push(value);
         Ok(())
     }
@@ -300,7 +302,7 @@ impl ser::SerializeMap for Compound<'_, '_> {
             key: true,
         })?;
         let Value::String(key) = key else {
-            return Err(Failure(K::UnsupportedValue));
+            return Err(Failure::new(K::UnsupportedValue));
         };
         self.serializer
             .budget
@@ -310,12 +312,14 @@ impl ser::SerializeMap for Compound<'_, '_> {
         Ok(())
     }
     fn serialize_value<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<()> {
-        let k = self.key.take().ok_or(Failure(K::TypeMismatch))?;
-        let v = v.serialize(Serializer {
-            budget: self.serializer.budget,
-            depth: self.serializer.depth + 1,
-            key: false,
-        })?;
+        let k = self.key.take().ok_or(Failure::new(K::TypeMismatch))?;
+        let v = v
+            .serialize(Serializer {
+                budget: self.serializer.budget,
+                depth: self.serializer.depth + 1,
+                key: false,
+            })
+            .map_err(|e| e.at(format_args!("[{k:?}]")))?;
         self.map.insert(k, v);
         Ok(())
     }
@@ -369,9 +373,9 @@ macro_rules! integer {
             let n = match self.0 {
                 Value::Integer(n) => *n as i128,
                 Value::Unsigned(n) => *n as i128,
-                _ => return Err(Failure(K::TypeMismatch)),
+                _ => return Err(Failure::new(K::TypeMismatch)),
             };
-            v.$visit(<$ty>::try_from(n).map_err(|_| Failure(K::OutOfRange))?)
+            v.$visit(<$ty>::try_from(n).map_err(|_| Failure::new(K::OutOfRange))?)
         }
     };
 }
@@ -393,7 +397,7 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
             Value::Bytes(x) => v.visit_borrowed_bytes(x),
             Value::Array(_) => self.deserialize_seq(v),
             Value::Map(_) => self.deserialize_map(v),
-            _ => Err(Failure(K::UnsupportedValue)),
+            _ => Err(Failure::new(K::UnsupportedValue)),
         }
     }
     integer!(deserialize_i8, visit_i8, i8);
@@ -410,19 +414,19 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
         if let Value::Bool(x) = self.0 {
             v.visit_bool(*x)
         } else {
-            Err(Failure(K::TypeMismatch))
+            Err(Failure::new(K::TypeMismatch))
         }
     }
     fn deserialize_f64<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
         if let Value::Float(_) = self.0 {
             self.deserialize_any(v)
         } else {
-            Err(Failure(K::TypeMismatch))
+            Err(Failure::new(K::TypeMismatch))
         }
     }
     fn deserialize_f32<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
         let Value::Float(x) = self.0 else {
-            return Err(Failure(K::TypeMismatch));
+            return Err(Failure::new(K::TypeMismatch));
         };
         if x.is_nan() {
             return v.visit_f32(f32::from_bits(0x7fc00000));
@@ -435,7 +439,7 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
         if let Value::String(x) = self.0 {
             v.visit_borrowed_str(x)
         } else {
-            Err(Failure(K::TypeMismatch))
+            Err(Failure::new(K::TypeMismatch))
         }
     }
     fn deserialize_string<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
@@ -443,10 +447,10 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
     }
     fn deserialize_char<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
         let Value::String(x) = self.0 else {
-            return Err(Failure(K::TypeMismatch));
+            return Err(Failure::new(K::TypeMismatch));
         };
         let mut c = x.chars();
-        let first = c.next().ok_or(Failure(K::TypeMismatch))?;
+        let first = c.next().ok_or(Failure::new(K::TypeMismatch))?;
         ensure(c.next().is_none(), K::TypeMismatch)?;
         v.visit_char(first)
     }
@@ -454,7 +458,7 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
         if let Value::Bytes(x) = self.0 {
             v.visit_borrowed_bytes(x)
         } else {
-            Err(Failure(K::TypeMismatch))
+            Err(Failure::new(K::TypeMismatch))
         }
     }
     fn deserialize_byte_buf<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
@@ -487,9 +491,9 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
     }
     fn deserialize_seq<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
         let Value::Array(a) = self.0 else {
-            return Err(Failure(K::TypeMismatch));
+            return Err(Failure::new(K::TypeMismatch));
         };
-        let mut access = Sequence(a.iter());
+        let mut access = Sequence(a.iter(), 0);
         let result = v.visit_seq(&mut access)?;
         ensure(access.0.len() == 0, K::TypeMismatch)?;
         Ok(result)
@@ -511,7 +515,7 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
     }
     fn deserialize_map<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
         let Value::Map(m) = self.0 else {
-            return Err(Failure(K::TypeMismatch));
+            return Err(Failure::new(K::TypeMismatch));
         };
         let mut access = Mapping {
             iter: m.iter(),
@@ -544,7 +548,7 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
                 let (k, v) = m.first_key_value().unwrap();
                 (k.as_str(), Some(v))
             }
-            _ => return Err(Failure(K::TypeMismatch)),
+            _ => return Err(Failure::new(K::TypeMismatch)),
         };
         v.visit_enum(Enum { name, payload })
     }
@@ -558,13 +562,18 @@ impl<'de> de::Deserializer<'de> for Deserializer<'de> {
         true
     }
 }
-struct Sequence<'a>(std::slice::Iter<'a, Value>);
+struct Sequence<'a>(std::slice::Iter<'a, Value>, usize);
 impl<'de> de::SeqAccess<'de> for Sequence<'de> {
     type Error = Failure;
     fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, s: T) -> Result<Option<T::Value>> {
+        let index = self.1;
+        self.1 += 1;
         self.0
             .next()
-            .map(|v| s.deserialize(Deserializer(v)))
+            .map(|v| {
+                s.deserialize(Deserializer(v))
+                    .map_err(|e| e.at(format_args!("[{index}]")))
+            })
             .transpose()
     }
     fn size_hint(&self) -> Option<usize> {
@@ -573,14 +582,14 @@ impl<'de> de::SeqAccess<'de> for Sequence<'de> {
 }
 struct Mapping<'a> {
     iter: std::collections::btree_map::Iter<'a, String, Value>,
-    pending: Option<&'a Value>,
+    pending: Option<(&'a str, &'a Value)>,
 }
 impl<'de> de::MapAccess<'de> for Mapping<'de> {
     type Error = Failure;
     fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, s: T) -> Result<Option<T::Value>> {
         ensure(self.pending.is_none(), K::TypeMismatch)?;
         if let Some((k, v)) = self.iter.next() {
-            self.pending = Some(v);
+            self.pending = Some((k, v));
             s.deserialize(de::value::BorrowedStrDeserializer::<Failure>::new(k))
                 .map(Some)
         } else {
@@ -588,9 +597,9 @@ impl<'de> de::MapAccess<'de> for Mapping<'de> {
         }
     }
     fn next_value_seed<T: de::DeserializeSeed<'de>>(&mut self, s: T) -> Result<T::Value> {
-        s.deserialize(Deserializer(
-            self.pending.take().ok_or(Failure(K::TypeMismatch))?,
-        ))
+        let (key, value) = self.pending.take().ok_or(Failure::new(K::TypeMismatch))?;
+        s.deserialize(Deserializer(value))
+            .map_err(|e| e.at(format_args!("[{key:?}]")))
     }
     fn size_hint(&self) -> Option<usize> {
         Some(self.iter.len())
@@ -616,11 +625,13 @@ impl<'de> de::VariantAccess<'de> for Enum<'de> {
         ensure(self.payload.is_none(), K::TypeMismatch)
     }
     fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(self, s: T) -> Result<T::Value> {
-        s.deserialize(Deserializer(self.payload.ok_or(Failure(K::TypeMismatch))?))
+        s.deserialize(Deserializer(
+            self.payload.ok_or(Failure::new(K::TypeMismatch))?,
+        ))
     }
     fn tuple_variant<V: de::Visitor<'de>>(self, n: usize, v: V) -> Result<V::Value> {
         de::Deserializer::deserialize_tuple(
-            Deserializer(self.payload.ok_or(Failure(K::TypeMismatch))?),
+            Deserializer(self.payload.ok_or(Failure::new(K::TypeMismatch))?),
             n,
             v,
         )
@@ -631,7 +642,7 @@ impl<'de> de::VariantAccess<'de> for Enum<'de> {
         v: V,
     ) -> Result<V::Value> {
         de::Deserializer::deserialize_map(
-            Deserializer(self.payload.ok_or(Failure(K::TypeMismatch))?),
+            Deserializer(self.payload.ok_or(Failure::new(K::TypeMismatch))?),
             v,
         )
     }

@@ -9,8 +9,11 @@ struct Decoder<'a, 'b> {
 }
 impl<'a> Decoder<'a, '_> {
     fn read(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(Failure(K::Syntax))?;
-        let b = self.bytes.get(self.pos..end).ok_or(Failure(K::Syntax))?;
+        let end = self.pos.checked_add(n).ok_or(Failure::new(K::Syntax))?;
+        let b = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(Failure::new(K::Syntax))?;
         self.pos = end;
         Ok(b)
     }
@@ -18,7 +21,7 @@ impl<'a> Decoder<'a, '_> {
         let b = self.read(1)?[0];
         let ai = b & 31;
         if ai == 31 {
-            return Err(Failure(K::UnsupportedValue));
+            return Err(Failure::new(K::UnsupportedValue));
         }
         let n = match ai {
             0..=23 => ai as u64,
@@ -29,15 +32,15 @@ impl<'a> Decoder<'a, '_> {
                 }
                 n
             }
-            _ => return Err(Failure(K::Syntax)),
+            _ => return Err(Failure::new(K::Syntax)),
         };
         Ok((b >> 5, ai, n))
     }
     fn text(&mut self, n: u64) -> Result<String> {
-        let n = usize::try_from(n).map_err(|_| Failure(K::ResourceLimit))?;
+        let n = usize::try_from(n).map_err(|_| Failure::new(K::ResourceLimit))?;
         self.budget.payload(n, false)?;
         Ok(std::str::from_utf8(self.read(n)?)
-            .map_err(|_| Failure(K::InvalidUnicode))?
+            .map_err(|_| Failure::new(K::InvalidUnicode))?
             .into())
     }
     fn value(&mut self, depth: usize) -> Result<Value> {
@@ -51,13 +54,13 @@ impl<'a> Decoder<'a, '_> {
                 Value::Integer(-1 - (n as i64))
             }
             2 => {
-                let n = usize::try_from(n).map_err(|_| Failure(K::ResourceLimit))?;
+                let n = usize::try_from(n).map_err(|_| Failure::new(K::ResourceLimit))?;
                 self.budget.payload(n, true)?;
                 Value::Bytes(self.read(n)?.into())
             }
             3 => Value::String(self.text(n)?),
             4 | 5 => {
-                let len = usize::try_from(n).map_err(|_| Failure(K::ResourceLimit))?;
+                let len = usize::try_from(n).map_err(|_| Failure::new(K::ResourceLimit))?;
                 self.budget.entries(len)?;
                 if major == 4 {
                     let mut a = Vec::new();
@@ -85,10 +88,10 @@ impl<'a> Decoder<'a, '_> {
                 25 => Value::from(half(n as u16)),
                 26 => Value::from(f32::from_bits(n as u32) as f64),
                 27 => Value::from(f64::from_bits(n)),
-                24 if n < 32 => return Err(Failure(K::Syntax)),
-                _ => return Err(Failure(K::UnsupportedValue)),
+                24 if n < 32 => return Err(Failure::new(K::Syntax)),
+                _ => return Err(Failure::new(K::UnsupportedValue)),
             },
-            _ => return Err(Failure(K::UnsupportedValue)),
+            _ => return Err(Failure::new(K::UnsupportedValue)),
         })
     }
 }
@@ -192,7 +195,7 @@ fn value(v: &Value, out: &mut Output<'_>) -> Result<()> {
             }
             Ok(())
         }
-        _ => Err(Failure(K::UnsupportedValue)),
+        _ => Err(Failure::new(K::UnsupportedValue)),
     }
 }
 pub(crate) fn encode(v: &Value, limits: &Limits) -> Result<Vec<u8>> {

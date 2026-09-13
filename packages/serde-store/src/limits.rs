@@ -16,6 +16,9 @@ pub struct Limits {
     pub max_payload_bytes: usize,
     pub max_allocation_bytes: usize,
     pub max_work: usize,
+    /// Output diagnostic byte cap. Custom Serde messages are captured with a
+    /// hard 1024-byte ceiling and locations with a 256-byte ceiling. Truncation
+    /// preserves UTF-8; locations use at most a quarter of this output budget.
     pub max_diagnostic_bytes: usize,
 }
 impl Default for Limits {
@@ -36,31 +39,106 @@ impl Default for Limits {
     }
 }
 
+// Serde's Error::custom has no access to caller limits. Capture at most this
+// hard ceiling during formatting, then apply the caller's smaller output cap.
+const DIAGNOSTIC_CAPTURE_BYTES: usize = 1024;
+
 #[derive(Debug)]
-pub(crate) struct Failure(pub Kind);
+pub(crate) struct Failure {
+    kind: Kind,
+    message: String,
+    location: String,
+}
 pub(crate) type Result<T> = std::result::Result<T, Failure>;
+
+fn bounded(value: impl fmt::Display, max: usize) -> String {
+    use fmt::Write;
+    struct Output {
+        text: String,
+        max: usize,
+    }
+    impl fmt::Write for Output {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            let mut n = text.len().min(self.max - self.text.len());
+            while !text.is_char_boundary(n) {
+                n -= 1;
+            }
+            self.text.push_str(&text[..n]);
+            if n < text.len() {
+                Err(fmt::Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let mut output = Output {
+        text: String::new(),
+        max,
+    };
+    let _ = write!(output, "{value}");
+    output.text
+}
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.0)
+        if !self.location.is_empty() {
+            write!(f, "{}: ", self.location)?;
+        }
+        if self.message.is_empty() {
+            write!(f, "{:?}", self.kind)
+        } else {
+            f.write_str(&self.message)
+        }
     }
 }
 impl std::error::Error for Failure {}
 impl serde::ser::Error for Failure {
-    fn custom<T: fmt::Display>(_: T) -> Self {
-        Self(Kind::TypeMismatch)
+    fn custom<T: fmt::Display>(message: T) -> Self {
+        Self::diagnostic(message)
     }
 }
 impl serde::de::Error for Failure {
-    fn custom<T: fmt::Display>(_: T) -> Self {
-        Self(Kind::TypeMismatch)
+    fn custom<T: fmt::Display>(message: T) -> Self {
+        Self::diagnostic(message)
     }
 }
 impl Failure {
-    pub(crate) fn core(self, format: &Format, operation: CodecOperation, limits: &Limits) -> Error {
-        let mut message = format!("{:?}", self.0);
-        message.truncate(limits.max_diagnostic_bytes.min(message.len()));
+    pub(crate) fn new(kind: Kind) -> Self {
+        Self {
+            kind,
+            message: String::new(),
+            location: String::new(),
+        }
+    }
+    fn diagnostic(message: impl fmt::Display) -> Self {
+        Self {
+            kind: Kind::TypeMismatch,
+            message: bounded(message, DIAGNOSTIC_CAPTURE_BYTES),
+            location: String::new(),
+        }
+    }
+    pub(crate) fn at(mut self, component: impl fmt::Display) -> Self {
+        self.location = bounded(format_args!("{component}{}", self.location), 256);
+        self
+    }
+    pub(crate) fn core(
+        mut self,
+        format: &Format,
+        operation: CodecOperation,
+        limits: &Limits,
+    ) -> Error {
+        // Reserve room for the actual diagnostic even with a very long location.
+        let location = bounded(&self.location, limits.max_diagnostic_bytes / 4);
+        self.location.clear();
+        let message = if location.is_empty() {
+            bounded(format_args!("{}", self), limits.max_diagnostic_bytes)
+        } else {
+            bounded(
+                format_args!("{location}: {}", self),
+                limits.max_diagnostic_bytes,
+            )
+        };
         Error::Codec {
-            kind: self.0,
+            kind: self.kind,
             operation,
             format: format.clone(),
             message,
@@ -71,7 +149,7 @@ pub(crate) fn ensure(ok: bool, kind: Kind) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(Failure(kind))
+        Err(Failure::new(kind))
     }
 }
 pub(crate) struct Budget<'a> {
@@ -82,7 +160,9 @@ pub(crate) struct Budget<'a> {
     work: usize,
 }
 fn add(counter: &mut usize, n: usize, max: usize) -> Result<()> {
-    *counter = counter.checked_add(n).ok_or(Failure(Kind::ResourceLimit))?;
+    *counter = counter
+        .checked_add(n)
+        .ok_or(Failure::new(Kind::ResourceLimit))?;
     ensure(*counter <= max, Kind::ResourceLimit)
 }
 impl<'a> Budget<'a> {

@@ -8,8 +8,8 @@ struct Decoder<'a, 'b> {
 impl<'a> Decoder<'a, '_> {
     fn range(&self, p: usize, n: usize) -> Result<&'a [u8]> {
         self.bytes
-            .get(p..p.checked_add(n).ok_or(Failure(K::Syntax))?)
-            .ok_or(Failure(K::Syntax))
+            .get(p..p.checked_add(n).ok_or(Failure::new(K::Syntax))?)
+            .ok_or(Failure::new(K::Syntax))
     }
     fn uint(&self, p: usize, w: usize) -> Result<u64> {
         ensure(matches!(w, 1 | 2 | 4 | 8), K::Syntax)?;
@@ -20,30 +20,30 @@ impl<'a> Decoder<'a, '_> {
     fn size(&self, p: usize, w: usize) -> Result<usize> {
         self.uint(p, w)?
             .try_into()
-            .map_err(|_| Failure(K::ResourceLimit))
+            .map_err(|_| Failure::new(K::ResourceLimit))
     }
     fn back(&self, p: usize, n: usize) -> Result<usize> {
-        p.checked_sub(n).ok_or(Failure(K::Syntax))
+        p.checked_sub(n).ok_or(Failure::new(K::Syntax))
     }
     fn offset(&self, p: usize, w: usize) -> Result<usize> {
         let n = self.size(p, w)?;
         self.back(p, n)
     }
     fn key(&mut self, p: usize, end: usize) -> Result<String> {
-        let rest = self.bytes.get(p..end).ok_or(Failure(K::Syntax))?;
+        let rest = self.bytes.get(p..end).ok_or(Failure::new(K::Syntax))?;
         let max = self.budget.limits.max_string_bytes;
         let n = rest
             .iter()
             .take(max.saturating_add(1))
             .position(|b| *b == 0)
-            .ok_or(Failure(if rest.len() > max {
+            .ok_or(Failure::new(if rest.len() > max {
                 K::ResourceLimit
             } else {
                 K::Syntax
             }))?;
         self.budget.payload(n, false)?;
         Ok(std::str::from_utf8(&rest[..n])
-            .map_err(|_| Failure(K::InvalidUnicode))?
+            .map_err(|_| Failure::new(K::InvalidUnicode))?
             .into())
     }
     fn value(&mut self, p: usize, parent: usize, packed: u8, depth: usize) -> Result<Value> {
@@ -99,12 +99,12 @@ impl<'a> Decoder<'a, '_> {
                     Value::Bytes(b.into())
                 } else {
                     ensure(
-                        self.range(addr.checked_add(n).ok_or(Failure(K::Syntax))?, 1)? == [0],
+                        self.range(addr.checked_add(n).ok_or(Failure::new(K::Syntax))?, 1)? == [0],
                         K::Syntax,
                     )?;
                     Value::String(
                         std::str::from_utf8(b)
-                            .map_err(|_| Failure(K::InvalidUnicode))?
+                            .map_err(|_| Failure::new(K::InvalidUnicode))?
                             .into(),
                     )
                 }
@@ -117,9 +117,9 @@ impl<'a> Decoder<'a, '_> {
                     self.size(self.back(addr, w)?, w)?
                 };
                 self.budget.entries(len)?;
-                let span = len.checked_mul(w).ok_or(Failure(K::Syntax))?;
+                let span = len.checked_mul(w).ok_or(Failure::new(K::Syntax))?;
                 self.range(addr, span)?;
-                let types = addr.checked_add(span).ok_or(Failure(K::Syntax))?;
+                let types = addr.checked_add(span).ok_or(Failure::new(K::Syntax))?;
                 ensure(
                     types
                         .checked_add(if matches!(t, 9 | 10) { len } else { 0 })
@@ -144,7 +144,7 @@ impl<'a> Decoder<'a, '_> {
                     let kw = self.size(meta + w, w)?;
                     ensure(matches!(kw, 1 | 2 | 4 | 8), K::Syntax)?;
                     ensure(self.size(self.back(keys, kw)?, kw)? == len, K::Syntax)?;
-                    let key_span = len.checked_mul(kw).ok_or(Failure(K::Syntax))?;
+                    let key_span = len.checked_mul(kw).ok_or(Failure::new(K::Syntax))?;
                     ensure(
                         keys.checked_add(key_span).is_some_and(|end| end <= meta),
                         K::Syntax,
@@ -194,7 +194,7 @@ pub(crate) fn decode(bytes: &[u8], limits: &Limits) -> Result<Value> {
     };
     d.budget.work(n)?;
     d.value(
-        (n - 2).checked_sub(w).ok_or(Failure(K::Syntax))?,
+        (n - 2).checked_sub(w).ok_or(Failure::new(K::Syntax))?,
         w,
         bytes[n - 2],
         0,
@@ -228,7 +228,7 @@ pub(crate) fn encode(v: &Value, limits: &Limits) -> Result<Vec<u8>> {
     check(v, &mut b)?;
     let mut normalized = v.clone();
     normalized.normalize();
-    let bytes = flexbuffers::to_vec(&normalized).map_err(|_| Failure(K::UnsupportedValue))?;
+    let bytes = flexbuffers::to_vec(&normalized).map_err(|_| Failure::new(K::UnsupportedValue))?;
     ensure(bytes.len() <= limits.max_output_bytes, K::ResourceLimit)?;
     Ok(bytes)
 }
