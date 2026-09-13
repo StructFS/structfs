@@ -8,11 +8,16 @@ read/write interface.
 
 ## Library quickstart
 
-Candidate dependency (available after the coordinated release):
+Published baseline: **0.2.0**. This checkout targets **0.3.0 (unreleased)**;
+see the [0.3 migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md)
+and [platform matrix](https://github.com/StructFS/structfs/blob/main/docs/platforms.md).
+
+The published quickstart uses:
 
 ```toml
 [dependencies]
 structfs = { version = "0.2.0", features = ["json"] }
+structfs-core-store = "0.2.0" # required by the path! expansion
 ```
 
 ```rust

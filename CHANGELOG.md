@@ -1,10 +1,40 @@
 # Changelog
 
-## 0.2.0 — candidate, not published
+## 0.3.0 — unreleased
+
+### Added
+
+- Detached typed reads/writes and detached ReadOnly, Rooted, Masked and Cascade
+  composition. `DetachedShared` retains fallback ownership without eager reads.
+- Opt-in component-array Serde adapters for Path and Option<Path>, and explicit
+  minimum-middle suffix patterns with documented Serde representations.
+- Independent browser/native consumer and an executable HTTP disconnect example
+  covering late allocation replies, aliased handles, joined cleanup, retained
+  capacity and nonzero guest exit; exercised against package archives.
+
+### Fixed
+
+- Path macro expressions require PathComponent; the public hidden constructor
+  validates in release builds as well as debug builds.
+- Assembly standard fields reject wrong types, unknown fields and unknown block
+  references. Only `x-` fields are ignored extensions; config payloads stay open.
+- Serde custom diagnostics retain bounded text and nested field/index locations
+  alongside the structured error category.
+- Workspace dependencies no longer inject a native Tokio executor into portable
+  code. HTTP's blocking feature and handles' SyncBridge feature are explicit.
+
+### Migration
+
+`PathPattern` has a new public variant. HTTP without default features now exposes
+portable types without native stores. See [0.3 migration](docs/migration-0.3.md)
+and [platform support](docs/platforms.md). No publication has been performed.
+
+## 0.2.0 — published
 
 This coordinated StructFS and Featherweight candidate implements the Isotope
 2026-09-12 specification snapshot, Value v1, and optional capability profiles v1.
-Registry verification must confirm that 0.2.0 is available before publication.
+The StructFS 0.2.0 entry was verified as published and not yanked in Cargo’s
+sparse registry index on 2026-09-13.
 Namecode remains independently versioned at 0.1.1.
 
 ### Added

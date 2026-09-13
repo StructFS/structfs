@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "featherweight-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1049,7 +1049,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "structfs-core-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-handles"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "structfs-core-store",
  "tokio",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-ll-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-path-macro"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1092,14 +1092,14 @@ dependencies = [
 
 [[package]]
 name = "structfs-path-validation"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "unicode-ident",
 ]
 
 [[package]]
 name = "structfs-profiles"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "structfs-core-store",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-serde-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bytes",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-state"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "structfs-core-store",

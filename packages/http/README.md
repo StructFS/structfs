@@ -97,3 +97,10 @@ response.is_server_error(); // 5xx
 ## Features
 
 - `blocking` (default): Synchronous HTTP client using reqwest
+
+## Portable types
+
+`default-features = false` exposes HTTP request/response/status types and portable
+errors. The default `blocking` feature adds native HTTP stores, ReqwestExecutor,
+and native executor dependencies. Keep it behind target-specific dependencies in
+browser-shared code. See the [platform matrix](../../docs/platforms.md).

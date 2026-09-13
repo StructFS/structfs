@@ -1,15 +1,15 @@
 # Coordinated release procedure
 
-StructFS and Featherweight currently target 0.2.0; Isotope accompanies them as
-specification snapshot 2026-09-12. Namecode is independently versioned. Treat these
-as candidate versions until exact registry lookup succeeds. A previously published
-incompatible 0.2.x contract requires a 0.3.0 release and synchronized dependency and
-documentation updates. Never overwrite an existing publication.
+StructFS and Featherweight currently target **0.3.0 (unreleased)**; Isotope's
+specification snapshot remains 2026-09-12. Namecode is independently versioned.
+Never overwrite an existing publication.
 
-Registry preflight on 2026-09-12 found the candidate versions unpublished and
-Namecode 0.1.1 already published. StructFS's registry history contains 0.1.0.
-Repeat preflight immediately before publication; this observation is not a lock
-on registry state.
+StructFS 0.2.0 was verified as published and not yanked on 2026-09-13 through
+[Cargo's sparse registry index](https://index.crates.io/st/ru/structfs). This
+supersedes the 2026-09-12 unpublished-candidate observation. Repeat exact-version
+preflight for every package immediately before publication; this observation is
+not a lock on registry state. The 0.3 line includes public enum and feature-surface
+changes and must not be published under the existing 0.2 contracts.
 
 See [local release evidence](release-validation-2026-09-12.md) for the completed
 checks, measured capacity workload and remaining environment-specific acceptance.
@@ -28,8 +28,9 @@ scripts/check-release.sh
 The plan is read-only and offline. The gate runs release-driver regressions,
 formatting (including external consumers), all-feature workspace tests and Clippy,
 strict workspace docs, isolated facade feature checks, and actual extracted-archive
-consumer verification. The archive gate checks guest feature modes and portable
-profiles. It never publishes or tags. On macOS the HTTP tests need ordinary
+consumer verification. The archive gate checks guest feature modes, portable profiles, the independent
+HTTP/handles browser consumer, detached regressions, release-mode path validation,
+and the real loopback disconnect lifecycle example. It never publishes or tags. On macOS the HTTP tests need ordinary
 SystemConfiguration access, so a restricted execution sandbox may prevent them
 from initializing.
 

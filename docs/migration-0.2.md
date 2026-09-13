@@ -1,8 +1,8 @@
-# Migrating to the coordinated 0.2.0 candidate
+# Migrating to 0.2.0
 
-0.2.0 is the candidate version in the manifests, not a statement of registry
-availability. If an existing 0.2.x release already exposes the older contracts,
-these breaking changes require a new incompatible version before publication.
+0.2.0 is published. This guide describes its contract changes; the current
+checkout targets unreleased 0.3.0. See [the 0.3 migration](migration-0.3.md)
+for subsequent changes and [platform support](platforms.md) for feature choices.
 
 ## Values and persisted data
 

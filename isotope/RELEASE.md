@@ -3,7 +3,8 @@
 Status: frozen candidate for review; not tagged or published.
 
 The normative source is `isotope/spec/`. This snapshot accompanies the StructFS
-and Featherweight 0.2.0 candidates. Isotope is a specification, not a Cargo package.
+and Featherweight 0.2.0 contracts. The implementation checkout now targets
+unreleased 0.3.0; see the project changelog. Isotope is a specification, not a Cargo package.
 Release it with the annotated tag `isotope/spec-2026-09-12` on the same reviewed
 commit as the implementing crates. Site builds copy the normative source; do not
 edit generated site chapters independently.
@@ -13,7 +14,7 @@ edit generated site chapters independently.
 | Contract | Candidate |
 | --- | --- |
 | Isotope specification snapshot | 2026-09-12 |
-| StructFS / Featherweight crates | 0.2.0, subject to exact registry preflight |
+| StructFS / Featherweight crates | 0.2.0 baseline; 0.3.0 implementation development |
 | StructFS Value and canonical tagged JSON | v1 |
 | Core-Wasm binding | Spec 11 in this snapshot; exactly `structfs.read` and `structfs.write` imports |
 | Optional capability profiles | v1, discovered per provider |

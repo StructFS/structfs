@@ -9,9 +9,9 @@ identifier grammar. Empty components, bare `_`, punctuation and slashes fail.
 Use core-store `PathComponent::encode` when arbitrary names must become valid
 components. There are no optional features.
 
-## Candidate and support
+## Development version and support
 
-Version 0.2.0 targets Rust 1.96+. See the [API documentation](https://docs.rs/structfs-path-validation)
+This checkout targets unreleased 0.3.0 and Rust 1.96+. See the [API documentation](https://docs.rs/structfs-path-validation)
 for compiled examples and full contracts.
 Read the [migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.2.md) before upgrading
 code or persisted data. The [release procedure](https://github.com/StructFS/structfs/blob/main/docs/releasing.md)
