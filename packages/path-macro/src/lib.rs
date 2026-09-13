@@ -38,6 +38,9 @@ use syn::{parse_macro_input, Expr, Lit, Token};
 ///   them first with `PathComponent::try_new` or `PathComponent::encode`.
 ///
 /// Returns a `structfs_core_store::Path`.
+///
+/// The expansion requires a direct dependency named `structfs-core-store`,
+/// including when this macro is imported through a facade or reexport.
 #[proc_macro]
 pub fn path(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input with Punctuated::<Expr, Token![,]>::parse_terminated);
@@ -86,20 +89,18 @@ pub fn path(input: TokenStream) -> TokenStream {
                 }
             },
             other => {
-                // Runtime expression — must be a PathComponent (pre-validated).
-                // We call .validated_str(), a method only PathComponent has, so
-                // bare String/&str produce a compile error. Borrows rather than
-                // consumes, so the same component can be reused across calls.
-                component_exprs.push(quote! {
-                    ::std::string::String::from((#other).validated_str())
-                });
+                // An explicit borrow enforces the validated type without consuming it.
+                component_exprs.push(quote! {{
+                    let component: &::structfs_core_store::PathComponent = &(#other);
+                    ::std::string::String::from(component.validated_str())
+                }});
             }
         }
     }
 
     // All components are validated: literals here at compile time,
     // PathComponent values at their construction site. The constructor
-    // re-checks with debug_assert as a safety net.
+    // also validates in release builds to protect direct callers.
     quote! {
         ::structfs_core_store::Path::from_validated_components(
             ::std::vec![#(#component_exprs),*]

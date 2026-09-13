@@ -121,13 +121,42 @@ fn parse_wire_line(line: &str) -> Result<WireDef> {
     })
 }
 
+fn validate_fields(map: &BTreeMap<String, Value>, allowed: &[&str], location: &str) -> Result<()> {
+    for field in map.keys() {
+        if !allowed.contains(&field.as_str()) && !field.starts_with("x-") {
+            return Err(RuntimeError::assembly(format!(
+                "{location}.{field}: unknown field (extensions must start with x-)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl AssemblyDef {
     /// Parse a definition from its canonical `Value` form.
+    /// Standard sections and block fields are strict; unknown fields are errors.
+    /// Fields prefixed `x-` at these two levels are ignored extension metadata.
+    /// Values inside each block's `config` are unrestricted application data.
     pub fn from_value(value: &Value) -> Result<Self> {
         let map = match value {
             Value::Map(map) => map,
             _ => return Err(RuntimeError::assembly("definition must be a map")),
         };
+
+        // Standard fields are strict. Only explicitly namespaced extensions
+        // may be ignored; block config payloads remain application-defined.
+        validate_fields(
+            map,
+            &[
+                "assembly", "version", "blocks", "public", "wiring", "imports", "config", "failure",
+            ],
+            "assembly",
+        )?;
+        for field in ["imports", "config", "failure"] {
+            if map.get(field).is_some_and(|v| !matches!(v, Value::Map(_))) {
+                return Err(RuntimeError::assembly(format!("{field} must be a map")));
+            }
+        }
 
         let name = expect_string(
             map.get("assembly")
@@ -147,6 +176,53 @@ impl AssemblyDef {
                         // Short form: artifact string, JSON serialization.
                         Value::String(artifact) => BlockDef::short(artifact.clone()),
                         Value::Map(fields) => {
+                            let location = format!("blocks.{block_name}");
+                            validate_fields(
+                                fields,
+                                &[
+                                    "wasm",
+                                    "artifact",
+                                    "serialization",
+                                    "hash",
+                                    "env",
+                                    "args",
+                                    "stdio",
+                                    "spawn",
+                                ],
+                                &location,
+                            )?;
+                            for (field, valid, expected) in [
+                                (
+                                    "env",
+                                    fields.get("env").is_none_or(|v| matches!(v, Value::Map(_))),
+                                    "a map",
+                                ),
+                                (
+                                    "args",
+                                    fields
+                                        .get("args")
+                                        .is_none_or(|v| matches!(v, Value::Array(_))),
+                                    "an array",
+                                ),
+                                (
+                                    "spawn",
+                                    fields
+                                        .get("spawn")
+                                        .is_none_or(|v| matches!(v, Value::Bool(_))),
+                                    "a boolean",
+                                ),
+                            ] {
+                                if !valid {
+                                    return Err(RuntimeError::assembly(format!(
+                                        "{location}.{field} must be {expected}"
+                                    )));
+                                }
+                            }
+                            if fields.contains_key("wasm") && fields.contains_key("artifact") {
+                                return Err(RuntimeError::assembly(format!(
+                                    "{location}: use either wasm or artifact, not both"
+                                )));
+                            }
                             let mut def = BlockDef::short(expect_string(
                                 fields
                                     .get("wasm")
@@ -263,6 +339,11 @@ impl AssemblyDef {
         let mut config = BTreeMap::new();
         if let Some(Value::Map(entries)) = map.get("config") {
             for (block_name, block_config) in entries {
+                if !blocks.contains_key(block_name) {
+                    return Err(RuntimeError::assembly(format!(
+                        "config.{block_name}: unknown block"
+                    )));
+                }
                 config.insert(block_name.clone(), block_config.clone());
             }
         }
@@ -270,7 +351,12 @@ impl AssemblyDef {
         let mut failure = BTreeMap::new();
         if let Some(Value::Map(entries)) = map.get("failure") {
             for (block_name, policy) in entries {
-                let policy = match expect_string(policy, "failure policy")?.as_str() {
+                if !blocks.contains_key(block_name) {
+                    return Err(RuntimeError::assembly(format!(
+                        "failure.{block_name}: unknown block"
+                    )));
+                }
+                let policy = match expect_string(policy, &format!("failure.{block_name}"))?.as_str() {
                     "fail-fast" => FailurePolicy::FailFast,
                     "isolate" => FailurePolicy::Isolate,
                     other => {
@@ -419,5 +505,59 @@ failure:
         )
         .unwrap_err();
         assert!(err.to_string().contains("undeclared import"));
+    }
+}
+
+#[cfg(test)]
+mod validation_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rejects_malformed_sections_and_references_in_json_and_yaml() {
+        for (field, value, diagnostic) in [
+            ("config", json!(false), "config"),
+            ("config", json!({"ghost": {}}), "config.ghost"),
+            ("failure", json!({"ghost": "isolate"}), "failure.ghost"),
+            ("failure", json!([]), "failure"),
+            ("imports", json!(null), "imports"),
+            ("wiring", json!({}), "wiring"),
+            ("confg", json!({}), "confg"),
+        ] {
+            let mut definition =
+                json!({"assembly":"example","blocks":{"a":"embedded:a"},"public":"a"});
+            definition[field] = value;
+            for source in [
+                definition.to_string(),
+                serde_yaml::to_string(&definition).unwrap(),
+            ] {
+                let error = AssemblyDef::from_str(&source).unwrap_err().to_string();
+                assert!(error.contains(diagnostic), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_block_fields() {
+        for (field, value) in [
+            ("env", json!(false)),
+            ("args", json!({})),
+            ("spawn", json!("false")),
+            ("spwan", json!(false)),
+        ] {
+            let mut definition =
+                json!({"assembly":"example","blocks":{"a":{"artifact":"embedded:a"}},"public":"a"});
+            definition["blocks"]["a"][field] = value;
+            let error = AssemblyDef::from_str(&definition.to_string())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("blocks.a.{field}")), "{error}");
+        }
+    }
+
+    #[test]
+    fn extensions_and_application_config_remain_open() {
+        AssemblyDef::from_str(&json!({"assembly":"example", "x-owner":false,
+            "blocks":{"a":{"artifact":"embedded:a","x-note":[]}}, "public":"a", "config":{"a":false}}).to_string()).unwrap();
     }
 }

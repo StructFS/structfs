@@ -135,22 +135,13 @@ impl Path {
         Path(ll_from_strings(components))
     }
 
-    /// Create a path from components that are already known to be valid.
+    /// Compatibility entry point used by the path macro.
     ///
-    /// This is the construction path used by the `path!` macro: literals are
-    /// validated at compile time and expressions are `PathComponent` values
-    /// validated at construction, so no runtime re-validation is needed.
-    /// Debug builds re-check as a safety net.
-    ///
-    /// Prefer `from_components`/`try_from_components` for strings whose
-    /// validity is not already guaranteed.
+    /// Validates in every build profile; panics on invalid components.
+    /// Prefer `try_from_components` for fallible construction.
     #[doc(hidden)]
     pub fn from_validated_components(components: Vec<String>) -> Self {
-        #[cfg(debug_assertions)]
-        for (i, component) in components.iter().enumerate() {
-            Self::validate_component(component, i).expect("invalid pre-validated component");
-        }
-        Path(ll_from_strings(components))
+        Self::from_components(components)
     }
 
     /// Try to create a path from components, validating each.
@@ -856,5 +847,27 @@ mod tests {
         assert_eq!(Path::validate(p.clone().into_ll()).unwrap(), p);
         // The trusted constructor agrees on already-valid input.
         assert_eq!(Path::from_ll_unchecked(p.clone().into_ll()), p);
+    }
+}
+
+#[cfg(test)]
+mod construction_boundary_tests {
+    #[test]
+    #[should_panic(expected = "invalid component")]
+    fn hidden_constructor_preserves_validation_in_release() {
+        super::Path::from_validated_components(vec!["bad-name".into()]);
+    }
+
+    #[test]
+    fn macro_borrows_and_evaluates_components_once() {
+        let component = super::PathComponent::try_new("valid").unwrap();
+        let mut calls = 0;
+        let first = crate::path!("safe", {
+            calls += 1;
+            super::PathComponent::try_new("valid").unwrap()
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(first, crate::path!("safe", component));
+        assert_eq!(component.as_str(), "valid");
     }
 }

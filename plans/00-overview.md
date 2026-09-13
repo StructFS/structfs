@@ -4,4 +4,5 @@ Core principle: **Everything is a store.**
 
 ## Status
 
-All planned work complete. No remaining tasks.
+The initial plan is complete. Active follow-up work is tracked in
+[Consumer contract completion](01-consumer-contracts.md).
