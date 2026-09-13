@@ -27,7 +27,8 @@ use crate::Path;
 /// assert!(ps.matches(&path!("gate/accounts/personal/provider")));
 /// assert!(!ps.matches(&path!("gate/accounts/personal/model")));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PathPattern {
     /// Matches exactly one path.
     Exact(Path),
@@ -37,6 +38,14 @@ pub enum PathPattern {
     /// with at least the suffix's components after the prefix. The middle
     /// may be empty: `prefix_suffix(a, c)` matches `a/c` and `a/b/c`.
     PrefixSuffix(Path, Path),
+    /// Explicit minimum number of components between prefix and suffix.
+    /// Serde: `{"prefix_suffix_min_middle":{"prefix":"accounts",
+    /// "suffix":"provider","min_middle":1}}`.
+    PrefixSuffixMinMiddle {
+        prefix: Path,
+        suffix: Path,
+        min_middle: usize,
+    },
 }
 
 impl PathPattern {
@@ -55,11 +64,31 @@ impl PathPattern {
         PathPattern::PrefixSuffix(prefix, suffix)
     }
 
+    /// Match with an explicit minimum middle length. Zero retains the
+    /// `prefix_suffix` behavior; one requires at least one intervening component.
+    /// The existing constructor and its Serde tuple retain zero-middle semantics.
+    pub fn prefix_suffix_with_min_middle(prefix: Path, suffix: Path, min_middle: usize) -> Self {
+        Self::PrefixSuffixMinMiddle {
+            prefix,
+            suffix,
+            min_middle,
+        }
+    }
+
     /// Check whether a path matches this pattern (component-wise).
     pub fn matches(&self, path: &Path) -> bool {
         match self {
             PathPattern::Exact(p) => p == path,
             PathPattern::Prefix(prefix) => path.has_prefix(prefix),
+            PathPattern::PrefixSuffixMinMiddle {
+                prefix,
+                suffix,
+                min_middle,
+            } => path.strip_prefix(prefix).is_some_and(|rest| {
+                rest.len() >= suffix.len()
+                    && rest.len() - suffix.len() >= *min_middle
+                    && rest.slice(rest.len() - suffix.len(), rest.len()) == *suffix
+            }),
             PathPattern::PrefixSuffix(prefix, suffix) => match path.strip_prefix(prefix) {
                 Some(rest) => {
                     rest.len() >= suffix.len()
@@ -117,5 +146,41 @@ mod tests {
         let p = PathPattern::prefix_suffix(path!("a"), path!("key"));
         assert!(!p.matches(&path!("a/x/key_other")));
         assert!(p.matches(&path!("a/x/key")));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::path;
+    #[test]
+    fn explicit_policy_and_serde_preserve_watch_boundaries() {
+        let pattern =
+            PathPattern::prefix_suffix_with_min_middle(path!("accounts"), path!("provider"), 1);
+        let json = r#"{"prefix_suffix_min_middle":{"prefix":"accounts","suffix":"provider","min_middle":1}}"#;
+        assert_eq!(serde_json::to_string(&pattern).unwrap(), json);
+        assert_eq!(serde_json::from_str::<PathPattern>(json).unwrap(), pattern);
+        assert!(!pattern.matches(&path!("accounts/provider")));
+        assert!(pattern.matches(&path!("accounts/alice/provider")));
+        assert!(pattern.matches(&path!("accounts/a/b/provider")));
+        assert!(!pattern.matches(&path!("accounts/a/provider_other")));
+        let old = PathPattern::prefix_suffix(path!("accounts"), path!("provider"));
+        assert!(old.matches(&path!("accounts/provider")));
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"prefix_suffix":["accounts","provider"]}"#
+        );
+        assert!(
+            !PathPattern::prefix_suffix_with_min_middle(path!(""), path!(""), usize::MAX)
+                .matches(&path!("a"))
+        );
+        assert!(
+            !PathPattern::prefix_suffix_with_min_middle(path!("a"), path!("a/b"), 0)
+                .matches(&path!("a/b"))
+        );
+        assert!(
+            PathPattern::prefix_suffix_with_min_middle(path!(""), path!(""), 1)
+                .matches(&path!("a"))
+        );
     }
 }

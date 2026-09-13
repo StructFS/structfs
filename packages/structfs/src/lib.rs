@@ -36,12 +36,15 @@
 // ── Core: always available ──────────────────────────────────────────
 
 pub use structfs_core_store::{
-    Bytes, Codec, CodecOperation, CoreToLL, Error, Format, LLError, LLPath, LLReader, LLStore,
-    LLToCore, LLWriter, LazyRecord, NoCodec, Path, PathError, PathTrie, Reader, Record, Reference,
-    Store, TypeDescriptor, TypeInfo, Value, Writer,
+    Bytes, Cascade, Codec, CodecOperation, CoreToLL, Error, Format, LLError, LLPath, LLReader,
+    LLStore, LLToCore, LLWriter, LazyRecord, Masked, NoCodec, Path, PathComponent, PathError,
+    PathPattern, PathTrie, ReadOnly, Reader, Record, Reference, Rooted, Shared, Store,
+    TypeDescriptor, TypeInfo, Value, Writer,
 };
 
 /// Path macro for constructing validated [`Path`] values from string literals.
+/// The expansion requires a direct `structfs-core-store` dependency, even when
+/// importing through this facade; runtime expressions must be `PathComponent`.
 ///
 /// ```rust
 /// use structfs::path;
@@ -60,14 +63,15 @@ pub use structfs_core_store::overlay_store::{
 };
 
 /// Path-keyed prefix trie.
-pub use structfs_core_store::path_trie;
+pub use structfs_core_store::{path_serde, path_trie};
 
 // ── Async core (feature = "async") ──────────────────────────────────
 
 #[cfg(feature = "async")]
 pub use structfs_core_store::{
     AsyncCoreToLL, AsyncLLReader, AsyncLLStore, AsyncLLToCore, AsyncLLWriter, AsyncReader,
-    AsyncStore, AsyncWriter, SyncToAsync, SyncToAsyncLL,
+    AsyncStore, AsyncWriter, DetachedFuture, DetachedReader, DetachedShared, DetachedStore,
+    DetachedWriter, SyncToAsync, SyncToAsyncLL,
 };
 
 // ── Serde integration (feature = "serde") ───────────────────────────
@@ -82,7 +86,9 @@ pub mod serde {
     };
 
     #[cfg(feature = "async")]
-    pub use structfs_serde_store::{AsyncTypedReader, AsyncTypedWriter};
+    pub use structfs_serde_store::{
+        AsyncTypedReader, AsyncTypedWriter, DetachedTypedReader, DetachedTypedWriter,
+    };
 }
 
 #[cfg(feature = "serde")]
@@ -93,7 +99,9 @@ pub use structfs_serde_store::{
 };
 
 #[cfg(all(feature = "serde", feature = "async"))]
-pub use structfs_serde_store::{AsyncTypedReader, AsyncTypedWriter};
+pub use structfs_serde_store::{
+    AsyncTypedReader, AsyncTypedWriter, DetachedTypedReader, DetachedTypedWriter,
+};
 
 // ── JSON store (feature = "json") ───────────────────────────────────
 

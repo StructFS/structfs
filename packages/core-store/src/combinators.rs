@@ -46,6 +46,11 @@ impl<S: Reader> Writer for ReadOnly<S> {
 /// A layered store: reads try the primary first, then fall back to the
 /// secondary; writes always go to the primary.
 ///
+/// With the `async` feature, detached reads require a `DetachedShared` fallback:
+/// `Cascade::new(primary, DetachedShared::new(fallback))`. This retains access
+/// to the same fallback until a primary miss, without starting it speculatively.
+/// Errors from the primary propagate without consulting the fallback.
+///
 /// This is layering (like an overlay filesystem), distinct from
 /// `OverlayStore`, which *routes* by path prefix. Typical use: runtime
 /// overrides cascading over immutable defaults.
@@ -500,3 +505,117 @@ mod tests {
         assert!(err.to_string().contains("outside root"));
     }
 }
+
+#[cfg(feature = "async")]
+mod detached {
+    use super::*;
+    use crate::{DetachedFuture, DetachedReader, DetachedWriter};
+
+    /// Shared access to a detached store. The lock covers only operation
+    /// construction and is released before polling the returned future.
+    /// Unlike `Shared`, this delegates to detached operations, not sync ones.
+    pub struct DetachedShared<S>(Arc<Mutex<S>>);
+
+    impl<S> DetachedShared<S> {
+        pub fn new(inner: S) -> Self {
+            Self(Arc::new(Mutex::new(inner)))
+        }
+    }
+    impl<S> Clone for DetachedShared<S> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
+    impl<S: DetachedReader> DetachedReader for DetachedShared<S> {
+        fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .read_detached(from)
+        }
+    }
+    impl<S: DetachedWriter> DetachedWriter for DetachedShared<S> {
+        fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .write_detached(to, data)
+        }
+    }
+
+    impl<S: DetachedReader> DetachedReader for ReadOnly<S> {
+        fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+            self.0.read_detached(from)
+        }
+    }
+    impl<S: Send> DetachedWriter for ReadOnly<S> {
+        fn write_detached(&mut self, to: &Path, _: Record) -> DetachedFuture<Path> {
+            let error = Error::permission_denied(format!("store is read-only (write to {to})"));
+            Box::pin(async move { Err(error) })
+        }
+    }
+    impl<S: DetachedReader> DetachedReader for Rooted<S> {
+        fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+            self.inner.read_detached(&self.root.join(from))
+        }
+    }
+    impl<S: DetachedWriter> DetachedWriter for Rooted<S> {
+        fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+            let operation = self.inner.write_detached(&self.root.join(to), data);
+            let root = self.root.clone();
+            Box::pin(async move {
+                let result = operation.await?;
+                result.strip_prefix(&root).ok_or_else(|| {
+                    Error::store(
+                        "rooted",
+                        "write",
+                        format!("inner store returned path outside root: {result}"),
+                    )
+                })
+            })
+        }
+    }
+    impl<S: DetachedReader> DetachedReader for Masked<S> {
+        fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+            let mask = self.is_masked(from).then(|| self.mask.clone());
+            let operation = self.inner.read_detached(from);
+            Box::pin(async move {
+                let record = operation.await?;
+                Ok(match mask {
+                    Some(mask) => record.map(|_| Record::parsed(mask)),
+                    None => record,
+                })
+            })
+        }
+    }
+    impl<S: DetachedWriter> DetachedWriter for Masked<S> {
+        fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+            self.inner.write_detached(to, data)
+        }
+    }
+    // The shared fallback is intentional: after awaiting a primary miss we
+    // must still access the SAME fallback, without borrowing the Cascade or
+    // speculatively constructing an effectful fallback operation.
+    impl<A: DetachedReader, B: DetachedReader + 'static> DetachedReader
+        for Cascade<A, DetachedShared<B>>
+    {
+        fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
+            let primary = self.primary.read_detached(from);
+            let mut fallback = self.fallback.clone();
+            let path = from.clone();
+            Box::pin(async move {
+                match primary.await? {
+                    Some(record) => Ok(Some(record)),
+                    None => fallback.read_detached(&path).await,
+                }
+            })
+        }
+    }
+    impl<A: DetachedWriter, B: Send> DetachedWriter for Cascade<A, B> {
+        fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
+            self.primary.write_detached(to, data)
+        }
+    }
+}
+#[cfg(feature = "async")]
+pub use detached::DetachedShared;

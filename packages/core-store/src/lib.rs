@@ -38,6 +38,7 @@ pub mod mount_store;
 pub mod overlay_store;
 mod path;
 mod path_pattern;
+pub mod path_serde;
 pub mod path_trie;
 mod record;
 mod reference;
@@ -46,6 +47,8 @@ mod traits;
 mod value;
 
 pub use bridge::{CoreToLL, LLToCore};
+#[cfg(feature = "async")]
+pub use combinators::DetachedShared;
 pub use combinators::{Cascade, Masked, ReadOnly, Rooted, Shared};
 pub use error::{CodecErrorKind, CodecOperation, Error};
 pub use format::Format;

@@ -50,7 +50,8 @@
 //! structfs-serde-store = { version = "0.1", features = ["async"] }
 //! ```
 //!
-//! Then use `AsyncTypedReader` and `AsyncTypedWriter`.
+//! Use `AsyncTypedReader`/`AsyncTypedWriter` for borrowing futures, or
+//! `DetachedTypedReader`/`DetachedTypedWriter` for independent operations.
 
 pub use bytes::Bytes;
 
@@ -88,5 +89,11 @@ pub use async_typed::{AsyncTypedReader, AsyncTypedWriter};
 #[cfg(feature = "async")]
 pub use structfs_core_store::{
     AsyncCoreToLL, AsyncLLReader, AsyncLLStore, AsyncLLToCore, AsyncLLWriter, AsyncReader,
-    AsyncStore, AsyncWriter, SyncToAsync, SyncToAsyncLL,
+    AsyncStore, AsyncWriter, DetachedFuture, DetachedReader, DetachedStore, DetachedWriter,
+    SyncToAsync, SyncToAsyncLL,
 };
+
+#[cfg(feature = "async")]
+mod detached_typed;
+#[cfg(feature = "async")]
+pub use detached_typed::{DetachedTypedReader, DetachedTypedWriter};
