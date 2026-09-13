@@ -165,7 +165,7 @@ not bound arbitrary host I/O. The
 [spec](https://github.com/StructFS/structfs/tree/main/isotope/spec) is
 the contract; this crate is the working model of it.
 
-## External embedding (0.2.0 candidate)
+## External embedding (0.3.0 development)
 
 Prepare code in the embedding host, then call `Runtime::register_artifact` with
 an `Arc<dyn WasmBlockDriver>`. Implement `execute(DriverContext)` for asynchronous
@@ -220,3 +220,25 @@ on each new instance. Quiescent owner records may remain visible until reclamati
 unfinished work and unacknowledged failures always retain their capacity slots.
 See the [release measurements](https://github.com/StructFS/structfs/blob/main/docs/release-validation-2026-09-12.md)
 for the workload, observed memory and timing, and limits of those observations.
+
+## Complete HTTP lifecycle example
+
+Run `cargo run --manifest-path tests/embedding/Cargo.toml --example cancelled_http`
+from the repository root. The [example](../../tests/embedding/examples/cancelled_http.rs)
+and its [implementation](../../tests/embedding/src/lifecycle.rs) reuse one prepared
+module across real loopback HTTP disconnects. The external allocator returns
+accepted results after cancellation; `OwnerHandle::open` retains them until their
+release callbacks join the actual producer, independently of public handle aliases.
+Incomplete or failed cleanup retains the engine reservation and supervisor slot;
+the example acknowledges a lost release reply only after checking actual termination.
+The same guest also demonstrates a nonzero exit without a required trap diagnostic.
+
+The HTTP exchange and allocator are deterministic fixtures. Adapt the lifecycle
+ownership to your HTTP framework and external protocol. Keep the executor alive
+until engine ticking and all retained cleanup are finished; a grace timeout is not
+proof of resource release. The release gate runs this example against extracted
+Cargo archives. See the [migration guide](../../docs/migration-0.3.md).
+
+Assembly standard sections and block fields are strict. Unknown fields fail except
+for ignored `x-` extension metadata. `config` and `failure` keys must name blocks;
+per-block configuration values remain unrestricted application data.

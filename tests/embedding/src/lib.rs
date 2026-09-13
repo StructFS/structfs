@@ -1,4 +1,6 @@
 //! Compiled as an independent consumer, including by the package release gate.
+pub mod lifecycle;
+
 #[cfg(test)]
 mod tests {
     #[test]
