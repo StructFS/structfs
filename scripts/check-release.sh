@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 -m unittest discover -s scripts -p 'test_release.py'
 cargo fmt --all -- --check
-for consumer in tests/embedding tests/applications/*; do
+for consumer in tests/embedding tests/portable tests/applications/*; do
     cargo fmt --manifest-path "$consumer/Cargo.toml" -- --check
 done
 cargo test --workspace --all-features --locked --offline
@@ -18,4 +18,7 @@ for feature in '' serde json http sys async service state profiles full; do
         cargo check -p structfs --no-default-features --features "$feature" --locked --offline
     fi
 done
+# Standalone graphs catch native features leaking into browser-shared code.
+cargo check --manifest-path tests/portable/Cargo.toml --locked --offline --target wasm32-unknown-unknown
+cargo check --manifest-path tests/portable/Cargo.toml --locked --offline --features native
 scripts/check-featherweight-release.sh

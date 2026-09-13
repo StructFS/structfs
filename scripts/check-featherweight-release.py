@@ -56,12 +56,14 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
                     assert not isinstance(dep, dict) or "path" not in dep, (name, dep)
 
     import re
-    consumers = ["embedding", "reactive-screen", "streaming-gateway", "conversation-service"]
+    consumers = ["embedding", "reactive-screen", "streaming-gateway", "conversation-service", "portable"]
     consumer_packages = ["featherweight-external-embedding-check"]
     for name in consumers:
-        origin = ROOT / "tests" / ("embedding" if name == "embedding" else f"applications/{name}")
+        origin = ROOT / "tests" / (name if name in ("embedding", "portable") else f"applications/{name}")
         consumer = stage / name
         shutil.copytree(origin / "src", consumer / "src")
+        if (origin / "examples").is_dir():
+            shutil.copytree(origin / "examples", consumer / "examples")
         source = (origin / "Cargo.toml").read_text().replace("[workspace]\n", "")
         source = re.sub(r', path = "[^"]+"', '', source)
         (consumer / "Cargo.toml").write_text(source)
@@ -87,6 +89,16 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     import sys
     run([sys.executable, str(stage / dirs["structfs-serde-store"] /
          "tests/reference_value_v1.py")], stage, env=env)
+    run(["cargo", "run", "--locked", "--offline", "-p", "featherweight-external-embedding-check",
+         "--example", "cancelled_http"], stage, env=env)
+    run(["cargo", "test", "--locked", "--offline", "-p", "structfs-core-store",
+         "--release", "construction_boundary_tests"], stage, env=env)
+    run(["cargo", "test", "--locked", "--offline", "-p", "structfs-serde-store",
+         "--features", "async", "--test", "detached_contracts"], stage, env=env)
+    run(["cargo", "check", "--offline", "-p", "structfs-portable-consumer-check",
+         "--target", "wasm32-unknown-unknown"], stage, env=env)
+    run(["cargo", "check", "--offline", "-p", "structfs-portable-consumer-check",
+         "--features", "native"], stage, env=env)
     run(["cargo", "clippy", "--locked", "--offline", *consumer_args,
          "--all-targets", "--", "-D", "warnings"], stage, env=env)
     run(["cargo", "test", "--locked", "--offline", "-p", "structfs-profiles",
