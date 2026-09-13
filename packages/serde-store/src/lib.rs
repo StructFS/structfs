@@ -47,7 +47,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! structfs-serde-store = { version = "0.1", features = ["async"] }
+//! structfs-serde-store = { version = "0.3", features = ["async"] }
 //! ```
 //!
 //! Use `AsyncTypedReader`/`AsyncTypedWriter` for borrowing futures, or

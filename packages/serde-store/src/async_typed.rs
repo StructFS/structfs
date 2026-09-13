@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! structfs-serde-store = { version = "0.1", features = ["async"] }
+//! structfs-serde-store = { version = "0.3", features = ["async"] }
 //! ```
 
 use async_trait::async_trait;
