@@ -27,6 +27,7 @@ The normative specification of Isotope concepts:
 - [06-protocol.md](spec/06-protocol.md) — Store operation semantics
 - [07-server-protocol.md](spec/07-server-protocol.md) — How Blocks serve requests
 - [08-assembly-management.md](spec/08-assembly-management.md) — Deploying and updating Assemblies
+- [14-capability-profiles.md](spec/14-capability-profiles.md) — Optional application store contracts
 - [13-embedding.md](spec/13-embedding.md) — Embedding, resource accounting, and capability service profiles
 
 ### Rationale (`rationale/`)
@@ -45,6 +46,10 @@ Example usage patterns:
 - [02-web-service.md](examples/02-web-service.md) — A realistic web service
 
 ## Status
+
+The [2026-09-12 release candidate](RELEASE.md) maps the specification to
+StructFS/Featherweight 0.2.0, Value v1, profiles v1 and executable conformance
+evidence. Isotope is released as a tagged specification rather than a Cargo crate.
 
 This specification is a work in progress. Major open questions are noted in
 each document.

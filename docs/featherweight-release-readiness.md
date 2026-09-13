@@ -1,4 +1,9 @@
-# Featherweight embedding release gate — September 11, 2026
+# Featherweight embedding release gate — September 12, 2026
+
+For the coordinated candidate use [the release procedure](releasing.md),
+[migration guide](migration-0.2.md) and [Isotope compatibility matrix](../isotope/RELEASE.md).
+Historical counts below describe the earlier embedding gate. P0-A through P0-E
+are now implemented; see the [latest application report](design/2026-09-12-application-profiles-and-fixtures.md).
 
 The next release can support external runtime adapters without private access.
 The independent `tests/embedding` crate is the acceptance fixture: it registers
@@ -105,9 +110,11 @@ P0-C is implemented in [owned services](design/2026-09-11-owned-services.md):
 owned registrations, provider supervision, bounded results/tails, and provider
 resources in Featherweight shutdown reports. Hosts must check `complete()` and
 retain the cleanup supervisor while any resources remain. Revisioned state and
-bounded observation are the next application-substrate priority (P0-D).
+bounded observation are implemented as P0-D below.
 
 P0-D is implemented in [revisioned state](design/2026-09-12-revisioned-state.md).
 The release gate now tests the packaged state provider/protocol, an external
 projection/effect fixture, an actual guest import, and the `state` guest SDK build.
-Broader external application fixtures remain P0-E before a coordinated release.
+P0-E is implemented by the reactive-screen, streaming-gateway and
+conversation-service archive consumers. Production application integration remains
+a separate acceptance step.

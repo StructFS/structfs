@@ -5,7 +5,8 @@ Date: 2026-09-11
 The [Value v1 specification](structfs-value-v1.md) is implemented in the existing
 core and Serde crates. The shared router is now implemented in the
 [P0-B service layer](../design/2026-09-11-shared-async-services.md). Revisioned state
-providers, subscriptions, and further service profiles remain separate work.
+providers, subscriptions and optional service profiles are now implemented; see
+the [application report](../design/2026-09-12-application-profiles-and-fixtures.md).
 Nothing is published by
 the verification commands below.
 

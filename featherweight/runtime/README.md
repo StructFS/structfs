@@ -114,8 +114,9 @@ token across a fresh request runtime's blocks, routed calls and providers. An
 HTTP owner should cancel that scope on disconnect and retain a cleanup task
 until shutdown completes. The Appiware native listener demonstrates this pattern.
 
-These APIs do not yet bound all timer/signal queues, logs, response retention,
-compiler allocations or HTTP connection state. Admission limits are ceilings,
+These APIs do not account for total process RSS, compiler allocations or HTTP
+connection state. Events and retained replies have separate budgets described
+below. Admission limits are ceilings,
 not a fair-scheduling guarantee. Artifact cache eviction and durable provider
 effects remain host responsibilities.
 
@@ -164,7 +165,7 @@ not bound arbitrary host I/O. The
 [spec](https://github.com/StructFS/structfs/tree/main/isotope/spec) is
 the contract; this crate is the working model of it.
 
-## External embedding (next release)
+## External embedding (0.2.0 candidate)
 
 Prepare code in the embedding host, then call `Runtime::register_artifact` with
 an `Arc<dyn WasmBlockDriver>`. Implement `execute(DriverContext)` for asynchronous
@@ -205,3 +206,17 @@ The independent consumer fixture lives in `tests/embedding` in the repository.
 runs that consumer and runtime/handle tests against the extracted packages, builds
 both guest SDK feature modes for wasm32, and checks documentation. It never
 publishes. See Isotope spec 13 for the detailed embedding and service contracts.
+
+## Capacity and cleanup admission
+
+The 10,000-session capacity harness explicitly reserves 40,000 routed-call slots:
+parked sessions retain both the external caller and a nested provider call. The
+runtime default remains 16,384 calls; increase it explicitly for larger workloads.
+The harness checks zero retained call/byte charges and complete shutdown reports.
+
+Cleanup supervisors retain at most their configured owner capacity, reclaiming
+quiescent owners when admission needs space. This avoids scanning every live owner
+on each new instance. Quiescent owner records may remain visible until reclamation;
+unfinished work and unacknowledged failures always retain their capacity slots.
+See the [release measurements](https://github.com/StructFS/structfs/blob/main/docs/release-validation-2026-09-12.md)
+for the workload, observed memory and timing, and limits of those observations.
