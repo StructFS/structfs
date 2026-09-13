@@ -23,6 +23,15 @@ use tokio::{
     sync::{oneshot, Semaphore},
 };
 
+// A host-owned teardown task is returned as ownership, not as the HTTP
+// operation's next future. Joining it is a separate host lifecycle decision.
+struct RetainedCleanup(tokio::task::JoinHandle<()>);
+impl RetainedCleanup {
+    async fn join(self) -> Result<(), tokio::task::JoinError> {
+        self.0.await
+    }
+}
+
 type DemoResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const HTTP_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
 const GUEST: &str = r#"(module
@@ -181,7 +190,7 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
             // separately; dropping an HTTP response cannot drop its ownership.
             scope.cancel();
             owner.cancel();
-            tokio::spawn(async move {
+            RetainedCleanup(tokio::spawn(async move {
                 let shutdown = assembly.shutdown(Duration::from_secs(1)).await;
                 assert!(shutdown.complete(), "{shutdown:?}");
                 assert_eq!(runtime.registered_blocks(), 0);
@@ -204,7 +213,7 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
                 drop(assembly);
                 drop(runtime);
                 drop(reservation);
-            })
+            }))
         });
         let mut client = TcpStream::connect(address).await?;
         client.write_all(HTTP_REQUEST).await?;
@@ -243,7 +252,7 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
                 owner_handle.acknowledge_failure(resource.id)?;
             }
         }
-        cleanup.await?;
+        cleanup.join().await?;
         assert!(owner_handle.report().is_quiescent());
         assert_eq!(allocation.live.load(Ordering::SeqCst), 0);
         assert_eq!(allocation.released.load(Ordering::SeqCst), 1);
