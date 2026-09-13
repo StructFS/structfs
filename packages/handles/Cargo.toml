@@ -10,9 +10,13 @@ readme = "README.md"
 keywords = ["store", "handle", "streaming", "async"]
 categories = ["asynchronous", "data-structures"]
 
+[features]
+default = ["sync-bridge"]
+sync-bridge = ["tokio/rt"]
+
 [dependencies]
 structfs-core-store = { workspace = true, features = ["async"] }
-tokio = { workspace = true, features = ["sync", "rt"] }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

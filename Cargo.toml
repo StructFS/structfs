@@ -54,7 +54,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.96"
 license = "Apache-2.0"
@@ -62,22 +62,22 @@ repository = "https://github.com/StructFS/structfs"
 
 [workspace.dependencies]
 # Workspace crates - layered architecture
-structfs-ll-store = { version = "0.2.0", path = "packages/ll-store" }
-structfs-path-validation = { version = "0.2.0", path = "packages/path-validation" }
-structfs-path-macro = { version = "0.2.0", path = "packages/path-macro" }
-structfs-core-store = { version = "0.2.0", path = "packages/core-store" }
-structfs-serde-store = { version = "0.2.0", path = "packages/serde-store" }
+structfs-ll-store = { version = "0.3.0", path = "packages/ll-store" }
+structfs-path-validation = { version = "0.3.0", path = "packages/path-validation" }
+structfs-path-macro = { version = "0.3.0", path = "packages/path-macro" }
+structfs-core-store = { version = "0.3.0", path = "packages/core-store" }
+structfs-serde-store = { version = "0.3.0", path = "packages/serde-store" }
 namecode = { version = "0.1.1", path = "namecode" }
 
 # Workspace crates - store implementations
-structfs-profiles = { version = "0.2.0", path = "packages/profiles", default-features = false }
-structfs-json-store = { version = "0.2.0", path = "packages/json_store" }
-structfs-service = { version = "0.2.0", path = "packages/service" }
-structfs-state = { version = "0.2.0", path = "packages/state", default-features = false }
-structfs-handles = { version = "0.2.0", path = "packages/handles" }
-structfs-http = { version = "0.2.0", path = "packages/http" }
-structfs-repl = { version = "0.2.0", path = "packages/repl" }
-structfs-sys = { version = "0.2.0", path = "packages/sys" }
+structfs-profiles = { version = "0.3.0", path = "packages/profiles", default-features = false }
+structfs-json-store = { version = "0.3.0", path = "packages/json_store" }
+structfs-service = { version = "0.3.0", path = "packages/service" }
+structfs-state = { version = "0.3.0", path = "packages/state", default-features = false }
+structfs-handles = { version = "0.3.0", path = "packages/handles" }
+structfs-http = { version = "0.3.0", path = "packages/http" }
+structfs-repl = { version = "0.3.0", path = "packages/repl" }
+structfs-sys = { version = "0.3.0", path = "packages/sys" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -89,7 +89,7 @@ flexbuffers = "25.2"
 async-trait = "0.1"
 
 # HTTP
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", features = ["json"] }
 http = "1.2"
 url = "2.5"
 
@@ -103,7 +103,7 @@ collection_literals = "1.0"
 # Testing
 tempfile = "3.14"
 wiremock = "0.6"
-tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.42", features = ["macros"] }
 
 # CLI/REPL
 reedline = "0.44"

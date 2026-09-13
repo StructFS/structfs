@@ -11,7 +11,7 @@ keywords = ["isotope", "wasm", "component-model", "wit", "runtime"]
 categories = ["wasm", "virtualization"]
 
 [dependencies]
-featherweight-runtime = { version = "0.2.0", path = "../runtime" }
+featherweight-runtime = { version = "0.3.0", path = "../runtime" }
 structfs-core-store = { workspace = true }
 structfs-ll-store = { workspace = true }
 structfs-serde-store = { workspace = true }

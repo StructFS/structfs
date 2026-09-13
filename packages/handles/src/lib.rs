@@ -16,7 +16,7 @@
 //! - [`Gate`] / [`CancelToken`]: park-until-predicate with the
 //!   enable-before-check ordering baked in (no lost wakeups), and
 //!   cancellation that fails parked reads while leaving writes open.
-//! - [`SyncBridge`]: run a detached async store from synchronous code on a
+//! - `SyncBridge` (feature `sync-bridge`): run a detached async store from synchronous code on a
 //!   blocking thread.
 //! - [`conformance`]: certify any handle store against the protocol rules.
 
@@ -25,6 +25,7 @@ pub use duplex::{DuplexStream, StreamReadiness, StreamStore};
 mod byte_stream;
 mod gate;
 mod handle_store;
+#[cfg(feature = "sync-bridge")]
 mod sync_bridge;
 mod tail;
 
@@ -33,6 +34,7 @@ pub mod conformance;
 pub use byte_stream::{ByteChunk, ByteStream};
 pub use gate::{CancelToken, Cancelled, Gate};
 pub use handle_store::{HandleCx, HandleProtocol, HandleStore};
+#[cfg(feature = "sync-bridge")]
 pub use sync_bridge::SyncBridge;
 pub use tail::{TailLog, TailPage};
 

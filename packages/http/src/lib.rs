@@ -60,18 +60,26 @@
 //! ```
 
 pub mod error;
+#[cfg(feature = "blocking")]
 pub mod executor;
 pub mod handle;
+#[cfg(feature = "blocking")]
 mod handle_broker;
 pub mod types;
 
+#[cfg(feature = "blocking")]
 mod core;
 
 // Re-export main types
 pub use error::Error;
+#[cfg(feature = "blocking")]
 pub use executor::{HttpExecutor, ReqwestExecutor};
 pub use handle::{RequestState, RequestStatus};
 pub use types::{HttpRequest, HttpResponse, Method};
 
 // Re-export stores
+#[cfg(feature = "blocking")]
 pub use crate::core::{AsyncHttpBrokerStore, HttpBrokerStore, HttpClientStore};
+
+#[cfg(all(feature = "blocking", target_arch = "wasm32"))]
+compile_error!("structfs-http stores require a native target; use default-features = false for portable HTTP types");

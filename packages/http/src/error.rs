@@ -2,6 +2,7 @@ use structfs_core_store::Error as CoreError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[cfg(feature = "blocking")]
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
