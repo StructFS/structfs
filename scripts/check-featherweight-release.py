@@ -80,6 +80,8 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     # Building the extracted workspace avoids Cargo's temporary-registry hash
     # lookup failure during built-in batch verification on Cargo 1.96.
     run(["cargo", "check", "--offline", "--workspace", "--all-targets"], stage, env=env)
+    run(["cargo", "run", "--locked", "--offline", "-p", "structfs",
+         "--features", "json", "--example", "quickstart"], stage, env=env)
     run(["cargo", "test", "--offline", "-p", "featherweight-runtime", "-p", "structfs-handles",
          "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
     import sys
@@ -94,6 +96,7 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     for features in [[], ["--no-default-features"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"], ["--no-default-features", "--features", "profiles"]]:
         run(["cargo", "build", "--locked", "--offline", "-p", "featherweight-guest",
              "--target", "wasm32-unknown-unknown", *features], stage, env=env)
-    run(["cargo", "doc", "--locked", "--offline", "--no-deps", "-p", "featherweight-runtime",
-         "-p", "structfs-handles", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles"], stage, env={**env, "RUSTDOCFLAGS": "-D warnings"})
+    run(["cargo", "doc", "--locked", "--offline", "--no-deps", "--workspace",
+         "--all-features"], stage, env={**env, "RUSTDOCFLAGS": "-D warnings"})
+
 print("Featherweight package embedding gate passed; nothing published.")

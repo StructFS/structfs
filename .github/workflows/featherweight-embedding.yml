@@ -1,37 +1,50 @@
-name: Featherweight package embedding
+name: Release readiness
 on:
   pull_request:
-    paths:
-      - 'Cargo.*'
-      - 'featherweight/**'
-      - 'packages/**'
-      - 'namecode/**'
-      - 'tests/embedding/**'
-      - 'scripts/check-featherweight-release*'
-      - '.github/workflows/featherweight-embedding.yml'
   push:
     branches: [main]
-    paths:
-      - 'Cargo.*'
-      - 'featherweight/**'
-      - 'packages/**'
-      - 'namecode/**'
-      - 'tests/embedding/**'
-      - 'scripts/check-featherweight-release*'
-      - '.github/workflows/featherweight-embedding.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   package-consumer:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: ['1.96.0', stable]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.rust }}
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: cargo fetch --locked
-      - run: cargo fmt --all -- --check
-      - run: cargo fmt --manifest-path tests/embedding/Cargo.toml -- --check
-      - run: scripts/check-featherweight-release.sh
+      - run: scripts/check-release.sh
+  browser-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.9.0'
+      - run: npm ci
+        working-directory: featherweight/host/browser
+      - run: npm run check && npm test
+        working-directory: featherweight/host/browser
+  specification-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.20.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: isotope/site/build.sh

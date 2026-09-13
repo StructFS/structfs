@@ -28,10 +28,14 @@ else
 fi
 
 printf "clippy: "
-cargo clippy --workspace --all-targets --quiet -- -D warnings && echo "ok"
+cargo clippy --workspace --all-features --all-targets --locked --quiet -- -D warnings
+echo "ok"
 
 printf "test: "
-test_output=$(cargo test --workspace 2>&1)
+if ! test_output=$(cargo test --workspace --all-features --locked 2>&1); then
+    echo "$test_output"
+    exit 1
+fi
 # Count passed/failed/ignored from all "test result:" lines
 passed=$(echo "$test_output" | grep -o '[0-9]* passed' | awk '{sum += $1} END {print sum+0}')
 failed=$(echo "$test_output" | grep -o '[0-9]* failed' | awk '{sum += $1} END {print sum+0}')
