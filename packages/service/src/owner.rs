@@ -157,6 +157,9 @@ impl Inner {
 }
 /// Host authority retained through shutdown. Capacity bounds even leaked owners.
 /// Keep the Tokio runtime alive until cleanup has completed or been reconciled.
+/// Quiescent owner records are reclaimed when admission needs capacity; until
+/// then they may remain visible in reports. Unfinished or failed cleanup retains
+/// its slot.
 pub struct CleanupSupervisor {
     runtime: tokio::runtime::Handle,
     owners: Mutex<BTreeMap<u64, Arc<Inner>>>,
@@ -198,7 +201,13 @@ impl CleanupSupervisor {
             return Err(Error::cancelled("supervisor closed"));
         }
         let mut owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
-        owners.retain(|_, o| !o.report().is_quiescent());
+        // Reclaim only when admission needs space. Scanning every live owner
+        // for each insertion makes creating N concurrent scopes quadratic.
+        // Retention stays bounded by capacity, and unfinished/failed cleanup
+        // must keep its slot even after the caller drops the owner.
+        if owners.len() >= self.capacity {
+            owners.retain(|_, o| !o.report().is_quiescent());
+        }
         if owners.len() >= self.capacity {
             return Err(Error::overloaded("owner capacity exhausted"));
         }

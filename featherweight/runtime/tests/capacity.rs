@@ -1,5 +1,7 @@
 //! Fresh-session concurrency proof. Scale manually with FW_CAPACITY=10000.
-use featherweight_runtime::{async_host_store, AssemblyDef, CoreWasmEngine, Runtime};
+use featherweight_runtime::{
+    async_host_store, AssemblyDef, CallBudget, CallLimits, CoreWasmEngine, Runtime,
+};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -106,7 +108,17 @@ fn fresh_sessions_share_code_and_release_registrations() {
     executor.block_on(async {
         let engine = CoreWasmEngine::new(2).unwrap();
         let code = Arc::new(engine.prepare(GUEST.as_bytes().to_vec()).await.unwrap());
-        let mut runtime = Runtime::new().with_timeout(Duration::from_secs(120));
+        // A session retains its caller and a nested provider call concurrently.
+        // Reserve additional headroom for mailbox/response routing. At 10,000
+        // sessions this workload deliberately exceeds the default call ceiling.
+        let call_limit = count.checked_mul(4).expect("capacity call limit overflow");
+        let budget = CallBudget::new(CallLimits {
+            calls: call_limit,
+            ..Default::default()
+        });
+        let mut runtime = Runtime::new()
+            .with_call_budget(budget.clone())
+            .with_timeout(Duration::from_secs(120));
         runtime.register_core_artifact("prepared:capacity", code);
         let def = AssemblyDef::from_str(
             r#"{
@@ -138,14 +150,15 @@ fn fresh_sessions_share_code_and_release_registrations() {
                 requests.spawn(async move { request.read(path!("answer")).await });
                 sessions.push(session);
             }
-            tokio::time::timeout(
-                Duration::from_secs(90),
-                entered.acquire_many(count.try_into().unwrap()),
-            )
-            .await
-            .expect("not all requests reached the provider")
-            .unwrap()
-            .forget();
+            tokio::select! {
+                entered = tokio::time::timeout(
+                    Duration::from_secs(90),
+                    entered.acquire_many(count.try_into().unwrap()),
+                ) => entered.expect("not all requests reached the provider").unwrap().forget(),
+                ended = requests.join_next() => {
+                    panic!("request ended before provider release: {ended:?}");
+                }
+            }
             assert_eq!(runtime.registered_blocks(), count);
             eprintln!(
                 "round={round} parked={count} elapsed_ms={} pid={}",
@@ -153,14 +166,21 @@ fn fresh_sessions_share_code_and_release_registrations() {
                 std::process::id()
             );
             sample_process("parked");
+            eprintln!(
+                "round={round} call_limit={call_limit} parked_calls={} peak_calls={}",
+                budget.usage().calls,
+                budget.metrics().peak_calls,
+            );
             release.add_permits(count);
             while let Some(answer) = requests.join_next().await {
                 assert_eq!(answer.unwrap().unwrap(), Some(Value::from(42i64)));
             }
             for session in sessions {
-                session.shutdown(Duration::from_secs(1)).await;
+                assert!(session.shutdown(Duration::from_secs(1)).await.complete());
             }
             assert_eq!(runtime.registered_blocks(), 0);
+            assert_eq!(budget.usage().calls, 0);
+            assert_eq!(budget.usage().bytes, 0);
             sample_process("released");
             // Each provider future and store released its shared state.
             assert_eq!(Arc::strong_count(&entered), 1);

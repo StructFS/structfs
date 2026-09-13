@@ -386,3 +386,44 @@ async fn owned_open_rejects_before_effect_and_delivered_handles_are_revocable() 
     assert!(owner.close(WAIT).await.is_quiescent());
     assert!(resource.with(|v| *v).is_err());
 }
+
+#[tokio::test]
+async fn capacity_reclamation_preserves_unfinished_owners() {
+    let supervisor = CleanupSupervisor::new(2).unwrap();
+    let pending = supervisor.owner(OwnerLimits::default()).unwrap();
+    let retained = pending.handle().track(ResourceKind::Task, 8).unwrap();
+    let completed = supervisor.owner(OwnerLimits::default()).unwrap();
+    assert!(completed.close(WAIT).await.is_quiescent());
+    assert!(!pending.close(Duration::ZERO).await.is_quiescent());
+
+    // Admission may reclaim completed scopes, but outstanding cleanup still
+    // consumes one of the supervisor's two slots.
+    let replacement = supervisor.owner(OwnerLimits::default()).unwrap();
+    assert_eq!(supervisor.reports().len(), 2);
+    assert!(supervisor.owner(OwnerLimits::default()).is_err());
+    drop(retained);
+    assert!(pending.close(WAIT).await.is_quiescent());
+    let next = supervisor.owner(OwnerLimits::default()).unwrap();
+    assert_eq!(supervisor.reports().len(), 2);
+    assert!(replacement.close(WAIT).await.is_quiescent());
+    assert!(next.close(WAIT).await.is_quiescent());
+}
+
+#[tokio::test]
+async fn capacity_reclamation_preserves_unacknowledged_failures() {
+    let supervisor = CleanupSupervisor::new(1).unwrap();
+    let owner = supervisor.owner(OwnerLimits::default()).unwrap();
+    let registration = owner
+        .handle()
+        .register(ResourceKind::Registration, 0, || async {
+            Err(Error::conflict("cleanup failed"))
+        })
+        .unwrap();
+    assert!(!owner.close(Duration::from_millis(20)).await.is_quiescent());
+    assert!(supervisor.owner(OwnerLimits::default()).is_err());
+    owner
+        .handle()
+        .acknowledge_failure(registration.id())
+        .unwrap();
+    assert!(supervisor.owner(OwnerLimits::default()).is_ok());
+}
