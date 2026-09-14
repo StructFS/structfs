@@ -10,11 +10,11 @@ preserves bytes, full u64 values and non-finite floats. Plain JSON rejects shape
 it cannot preserve. `ExplicitOption` represents null-valued Some explicitly.
 Enable `async` for async typed access.
 
-## Development version and support
+## Version and support
 
-This checkout targets unreleased 0.3.0 and Rust 1.96+. See the [API documentation](https://docs.rs/structfs-serde-store)
+The 0.3 release line supports Rust 1.96+. See the [API documentation](https://docs.rs/structfs-serde-store)
 for compiled examples and full contracts.
-Read the [migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.2.md) before upgrading
+Read the [migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md) before upgrading
 code or persisted data. The [release procedure](https://github.com/StructFS/structfs/blob/main/docs/releasing.md)
 describes package, platform and feature verification.
 

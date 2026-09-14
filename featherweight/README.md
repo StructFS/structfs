@@ -4,12 +4,13 @@ A strawman [Isotope](../isotope/spec/00-overview.md) runtime: blocks are
 pico-processes whose entire world is StructFS reads and writes, composed
 into assemblies with capability wiring.
 
-## Install the published baseline
+## Install the 0.3 release line
 
-0.2.0 is the published baseline. This checkout targets unreleased 0.3.0.
+See the [changelog](https://github.com/StructFS/structfs/blob/main/CHANGELOG.md)
+for publication status before installing this version.
 
 ```sh
-cargo install featherweight --version 0.2.0 --locked
+cargo install featherweight --version 0.3.0 --locked
 fw shell
 ```
 
@@ -18,7 +19,7 @@ guests depend on `featherweight-guest`. The component-model adapter and WASI shi
 are separate crates. See the
 [migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md)
 and [specification matrix](https://github.com/StructFS/structfs/blob/main/isotope/RELEASE.md)
-for the development version’s compatibility and support boundaries.
+for the release line’s compatibility and support boundaries.
 
 ## Try it
 

@@ -165,7 +165,7 @@ not bound arbitrary host I/O. The
 [spec](https://github.com/StructFS/structfs/tree/main/isotope/spec) is
 the contract; this crate is the working model of it.
 
-## External embedding (0.3.0 development)
+## External embedding (0.3 release line)
 
 Prepare code in the embedding host, then call `Runtime::register_artifact` with
 an `Arc<dyn WasmBlockDriver>`. Implement `execute(DriverContext)` for asynchronous
