@@ -2,7 +2,7 @@
 # The same candidate checks run locally and on every release CI host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-python3 -m unittest discover -s scripts -p 'test_release.py'
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_release.py'
 cargo fmt --all -- --check
 for consumer in tests/embedding tests/portable tests/applications/*; do
     cargo fmt --manifest-path "$consumer/Cargo.toml" -- --check
@@ -22,3 +22,4 @@ done
 cargo check --manifest-path tests/portable/Cargo.toml --locked --offline --target wasm32-unknown-unknown
 cargo check --manifest-path tests/portable/Cargo.toml --locked --offline --features native
 scripts/check-featherweight-release.sh
+scripts/browser_host_test.sh

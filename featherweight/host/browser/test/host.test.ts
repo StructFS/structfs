@@ -50,9 +50,10 @@ test("batch mode: manifest and a kv round trip", async () => {
   });
   assert.deepEqual(iso.responses.get(read), {
     result: "ok",
+    present: true,
     value: { n: 42 },
   });
-  assert.deepEqual(iso.responses.get(gone), { result: "ok", value: null });
+  assert.deepEqual(iso.responses.get(gone), { result: "ok", present: false });
   assert.deepEqual(iso.responses.get(deleted), {
     result: "ok",
     path: "answer",
@@ -82,9 +83,13 @@ test("the iso surface serves time and randomness", () => {
   assert.ok(!Number.isNaN(Date.parse(String(now))));
 });
 
-test("worker mode: a resident, stateful server", async () => {
+test("worker mode: a resident, stateful server", async (t) => {
   const host = await WorkerHost.start({
-    createWorker: () => new Worker(new URL("../worker.ts", import.meta.url)),
+    createWorker: () => {
+      const worker = new Worker(new URL("../worker.ts", import.meta.url));
+      t.after(async () => { await worker.terminate(); });
+      return worker;
+    },
     wasm,
   });
   assert.equal((host.manifest as GuestManifest).name, "wasm-kv");
@@ -95,9 +100,9 @@ test("worker mode: a resident, stateful server", async () => {
   // The block stays parked on its mailbox between requests, so its
   // state survives — the property batch mode cannot offer.
   const first = await host.request("read", "greeting");
-  assert.deepEqual(first, { result: "ok", value: "hello" });
+  assert.deepEqual(first, { result: "ok", present: true, value: "hello" });
   const second = await host.request("read", "greeting");
-  assert.deepEqual(second, { result: "ok", value: "hello" });
+  assert.deepEqual(second, { result: "ok", present: true, value: "hello" });
 
   assert.equal(await host.shutdown(), 0);
 });

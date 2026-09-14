@@ -11,18 +11,23 @@ preflight for every package immediately before publication; this observation is
 not a lock on registry state. The 0.3 line includes public enum and feature-surface
 changes and must not be published under the existing 0.2 contracts.
 
-See [local release evidence](release-validation-2026-09-12.md) for the completed
-checks, measured capacity workload and remaining environment-specific acceptance.
+See [local release evidence](release-validation-2026-09-13.md) for the current
+consumer contract checks. The [earlier capacity run](release-validation-2026-09-12.md)
+records its separate measured workload.
 
 ## Candidate verification
 
-Use Rust 1.96+, Python 3.12 (archive extraction), and cached Cargo dependencies:
+For the 0.3 release, acceptance is local: the complete release dry-run, rebuilt
+browser-host tests, and review of the resulting artifacts. Remote CI status is not
+a prerequisite for this release. This does not claim validation on other hosts.
+
+Use Rust 1.96+, Python 3.12 (archive extraction), Node 25.9.0 and npm:
 
 ```sh
-cargo fetch --locked
 rustup target add wasm32-unknown-unknown
+scripts/prepare-release.sh
 scripts/release.sh --plan
-scripts/check-release.sh
+scripts/release.sh --dry-run
 ```
 
 The plan is read-only and offline. The gate runs release-driver regressions,
@@ -34,11 +39,20 @@ and the real loopback disconnect lifecycle example. It never publishes or tags. 
 SystemConfiguration access, so a restricted execution sandbox may prevent them
 from initializing.
 
-In `featherweight/host/browser`, run `npm ci`, `npm run check`, and `npm test` using
-Node 25.9.0. CI runs these separately, plus the native gate on Linux/macOS with
-Rust 1.96 and stable. All PRs trigger the workflow, including spec/fixture changes.
-Configure branch protection to require these jobs; workflow files alone cannot
-set repository protection. Windows and actual browser engines are not certified.
+`prepare-release.sh` fetches locked dependencies for the workspace and every
+standalone consumer, then installs the browser host's locked npm dependencies.
+The standalone lockfiles can resolve versions absent from the workspace cache.
+`check-release.sh` remains offline for Cargo checks and rebuilds `kv.wasm` before
+running the browser host's TypeScript and Node tests. An existing ignored Wasm
+file is never sufficient evidence of a passing release.
+
+For the optional documentation-site artifact, run `CI=true site/build.sh` locally
+with wasm-pack and pnpm installed. Here `CI=true` makes dependency installation
+noninteractive; the command builds locally and does not deploy anything. The site
+uses frozen npm dependency resolution and a locked Cargo build.
+
+The existing CI workflows remain additional automation. Windows and actual browser
+engines are not certified by local macOS and Node tests.
 
 Review changelog, migration guide, spec matrix, packaged README links and ignored
 tests. The three ignored runtime tests regenerate fixtures or print scheduling
@@ -48,9 +62,9 @@ performance run, not a substitute for latency/throughput measurements of a real
 production provider. Record hardware, toolchain, workload, latency and memory
 units with any published performance claim.
 
-Run a downstream application's migration tests using extracted archives. The four
-independent consumers are the repository's acceptance fixtures; Ox/Horns integration
-requires those applications' own environments and tests.
+The five independent consumers are the repository’s acceptance fixtures and run
+against extracted archives. Ox/Horns migration tests require their own environments;
+application-specific adoption is separate from this local crate release acceptance.
 
 ## Registry preflight and publication
 
@@ -70,7 +84,7 @@ already published and unyanked; Cargo verifies resolution again before uploading
 each package. Review the full
 plan when coordinated dependency versions change.
 
-After the candidate passes CI and review, commit it on main with a clean tree.
+After the candidate passes the local gates and review, commit it on main with a clean tree.
 Actual publication is a separate, deliberate action:
 
 ```sh
@@ -101,7 +115,9 @@ which source was uploaded from an unverified local tag or recreate tags blindly.
 In a fresh directory outside the checkout, install the versioned CLI and run its
 shell; create a consumer with exact published dependencies and no workspace patches.
 Repeat the application smoke tests against registry-only dependencies. Verify docs.rs
-builds, README rendering and supported feature pages. Push the reviewed crate tags,
+builds, README rendering and supported feature pages. Update the changelog and
+checkout release-status notices using confirmed registry results; packaged READMEs
+describe the version’s API without embedding an unpublished-status claim. Push the reviewed crate tags,
 tag the Isotope snapshot, and publish the matching specification site and changelog.
 If a package is defective, assess yanking and publish a corrected new version;
 publication is not rolled back by deleting a Git tag.

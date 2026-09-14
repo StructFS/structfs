@@ -66,12 +66,16 @@ test("recording links session entries into the transcript", async () => {
   }
 });
 
-test("two resident blocks share one timeline", async () => {
+test("two resident blocks share one timeline", async (t) => {
   const wasm = await readFile(new URL("../kv.wasm", import.meta.url));
   const session = new SessionLog();
   const spawn = (block: string) =>
     WorkerHost.start({
-      createWorker: () => new Worker(new URL("../worker.ts", import.meta.url)),
+      createWorker: () => {
+      const worker = new Worker(new URL("../worker.ts", import.meta.url));
+      t.after(async () => { await worker.terminate(); });
+      return worker;
+    },
       wasm,
       session,
       block,

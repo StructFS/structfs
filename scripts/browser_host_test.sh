@@ -9,11 +9,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build -p featherweight-guest --target wasm32-unknown-unknown --release
+cargo build -p featherweight-guest --target wasm32-unknown-unknown --release --locked --offline
 cp target/wasm32-unknown-unknown/release/featherweight_guest.wasm \
    featherweight/host/browser/kv.wasm
 
 cd featherweight/host/browser
-if [ ! -d node_modules ]; then npm install --no-audit --no-fund; fi
+if [ ! -d node_modules ]; then
+    echo 'Missing browser dependencies; run scripts/prepare-release.sh first.' >&2
+    exit 1
+fi
 node node_modules/typescript/bin/tsc --noEmit
 node --test "test/*.test.ts"

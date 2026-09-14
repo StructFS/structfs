@@ -139,16 +139,20 @@ test("cross-host: the native runtime's recording replays this guest", async () =
   assert.equal(replay.remaining(), 0);
 });
 
-test("worker mode records and replays a resident run", async () => {
+test("worker mode records and replays a resident run", async (t) => {
   const wasm = await readFile(new URL("../kv.wasm", import.meta.url));
   const recorded = await WorkerHost.start({
-    createWorker: () => new Worker(new URL("../worker.ts", import.meta.url)),
+    createWorker: () => {
+      const worker = new Worker(new URL("../worker.ts", import.meta.url));
+      t.after(async () => { await worker.terminate(); });
+      return worker;
+    },
     wasm,
     record: true,
   });
   await recorded.request("write", "greeting", "hello");
   const read = await recorded.request("read", "greeting");
-  assert.deepEqual(read, { result: "ok", value: "hello" });
+  assert.deepEqual(read, { result: "ok", present: true, value: "hello" });
   assert.equal(await recorded.shutdown(), 0);
 
   const transcript = recorded.transcript();
@@ -157,7 +161,11 @@ test("worker mode records and replays a resident run", async () => {
   // Replay: the channel is never waited on, no requests are sent, and
   // the guest re-runs the recorded session to the same exit.
   const replayed = await WorkerHost.start({
-    createWorker: () => new Worker(new URL("../worker.ts", import.meta.url)),
+    createWorker: () => {
+      const worker = new Worker(new URL("../worker.ts", import.meta.url));
+      t.after(async () => { await worker.terminate(); });
+      return worker;
+    },
     wasm,
     replay: transcript,
   });
@@ -197,7 +205,7 @@ test("a seek replays a prefix and the guest serves live from that state", async 
   // The handed-off guest answered a live request from replayed state:
   // the write it "performed" during the prefix is really in its memory.
   assert.ok(replay.handedOff());
-  assert.deepEqual(live.responses.get(readBack), { result: "ok", value: 1 });
+  assert.deepEqual(live.responses.get(readBack), { result: "ok", present: true, value: 1 });
 });
 
 test("a seek past effects into non-iso targets is refused", () => {
