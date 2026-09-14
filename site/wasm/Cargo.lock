@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-core-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "collection_literals",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-json-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-ll-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "thiserror",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-path-macro"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -291,14 +291,14 @@ dependencies = [
 
 [[package]]
 name = "structfs-path-validation"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "unicode-ident",
 ]
 
 [[package]]
 name = "structfs-serde-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bytes",
