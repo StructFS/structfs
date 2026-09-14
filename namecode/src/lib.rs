@@ -511,7 +511,7 @@ mod proptests {
                 // Only try to decode if it was actually encoded (has prefix)
                 if encoded.starts_with("_N_") {
                     let decoded = decode(&encoded).unwrap_or_else(|e| {
-                        panic!("decode failed for input '{}' with encoding '{}': {:?}", &s, &encoded, e)
+                        panic!("decode failed for input '{}' with encoding '{}': {:?}", s, encoded, e)
                     });
                     prop_assert_eq!(&decoded, &s, "roundtrip failed for: {}", &s);
                 } else {
@@ -573,7 +573,7 @@ mod proptests {
                 let encoded = encode(&s);
                 prop_assert!(encoded.starts_with("_N_"), "expected encoding for: {}", &s);
                 let decoded =
-                    decode(&encoded).unwrap_or_else(|e| panic!("decode failed for {}: {:?}", &s, e));
+                    decode(&encoded).unwrap_or_else(|e| panic!("decode failed for {}: {:?}", s, e));
                 prop_assert_eq!(&decoded, &s);
             }
         }
@@ -586,7 +586,7 @@ mod proptests {
                 let encoded = encode(&s);
                 prop_assert!(encoded.starts_with("_N_"));
                 let decoded =
-                    decode(&encoded).unwrap_or_else(|e| panic!("decode failed for {}: {:?}", &s, e));
+                    decode(&encoded).unwrap_or_else(|e| panic!("decode failed for {}: {:?}", s, e));
                 prop_assert_eq!(&decoded, &s);
             }
         }
