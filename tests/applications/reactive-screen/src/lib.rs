@@ -351,3 +351,46 @@ mod tests {
         assert_eq!(c.data(&path!("result")).await.unwrap(), None);
     }
 }
+
+#[cfg(test)]
+mod coherent_contracts {
+    use std::sync::Arc;
+    use structfs_core_store::{
+        matches_prefix_suffix, path, DetachedShared, MemoryStore, Record, Shared, SharedReader,
+        SharedWriter, Value,
+    };
+    #[tokio::test]
+    async fn snapshot_and_shared_subscription_writes() {
+        let store = MemoryStore::from_entries([(path!("settings/example"), Value::Null)]).unwrap();
+        let shared = Arc::new(DetachedShared::new(Shared::new(store)));
+        let reader: Arc<dyn SharedReader> = shared.clone();
+        let writer: Arc<dyn SharedWriter> = shared;
+        assert_eq!(
+            reader
+                .read(path!("settings/example"))
+                .await
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&Value::Null)
+        );
+        let first = writer.write(
+            path!("accounts/alice/provider"),
+            Record::parsed(Value::Bool(true)),
+        );
+        let second = writer.write(path!("settings/example"), Record::parsed(Value::Null));
+        let written = first.await.unwrap();
+        second.await.unwrap();
+        assert!(matches_prefix_suffix(
+            &written,
+            &path!("accounts"),
+            &path!("provider"),
+            1
+        ));
+        assert!(reader
+            .read(path!("settings/example"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+}

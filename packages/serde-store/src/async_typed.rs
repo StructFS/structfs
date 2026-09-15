@@ -62,6 +62,15 @@ pub trait AsyncTypedReader: AsyncReader {
         Ok(Some(typed))
     }
 
+    /// Parsed-only typed read, identical to synchronous and detached helpers.
+    async fn read_typed_async<T: DeserializeOwned + Send>(
+        &mut self,
+        from: &Path,
+    ) -> Result<Option<T>, Error> {
+        self.read_as_async(from, &structfs_core_store::NoCodec)
+            .await
+    }
+
     /// Read a value as a serde_json::Value asynchronously.
     ///
     /// Convenience method when you don't know the exact type.

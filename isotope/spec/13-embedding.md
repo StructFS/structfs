@@ -40,9 +40,8 @@ The core Wasm driver uses this same entry point. Adapters must join child tasks
 and release execution resources before returning, and enforce or explicitly
 reject unsupported requested limits. Rust adapters are trusted host code.
 
-The legacy synchronous `run`/`run_async` bridge remains for existing adapters.
-It receives the original fuel/epoch policy but reports no measurements unless
-updated; missing measurements are represented as absent, never zero.
+Artifact adapters implement the full execution context directly. There is no
+implicit legacy bridge that discards execution policy or accounting context.
 
 ## Reserved runtime paths
 
@@ -155,3 +154,28 @@ branches or core-Wasm imports. Rust and portable guest schemas are in
 
 The [implementation and support matrix](../../docs/design/2026-09-12-application-profiles-and-fixtures.md)
 records archive-built migration fixtures and platform limits.
+
+## Recoverable host execution
+
+An embedding implementation offering host-state recovery MUST keep execution
+results separate from ownership of host state. Success, guest failure, cancellation,
+and deadlines must not discard accepted effects. State may be returned only after
+owned host effects finish. Waiting can time out without consuming the owner; a
+later join can recover it. Dropping an owner requests cancellation and transfers
+unfinished work to explicitly admitted supervision. Supervision capacity must be
+reserved before dispatch, and unfinished work remains inspectable and charged.
+
+Cancellation prevents subsequent host dispatch and interrupts guest computation.
+An outstanding noninterruptible host effect may outlive the execution deadline;
+cleanup is a separate wait. A noncooperative effect cannot be declared reclaimed
+merely because its caller stopped waiting. Hosts keep the supervisor and executor
+alive until reconciliation. Host panic must be distinguishable from a guest trap;
+recovered state after a host panic may have invalid application invariants.
+
+Reusable code is distinct from fresh instance state. Limits apply during
+instantiation and execution, including guest allocations. Denied memory growth
+and a guest's handling of a failed-growth return are different policy choices;
+a host requesting trapping must not receive success merely because the guest
+ignored failure. A driver must enforce or explicitly reject requested guarantees.
+Epoch scheduling is an engine concern, not a per-request source of cross-run
+cancellation. These requirements do not prescribe Tokio, Rust types, or Wasmtime.

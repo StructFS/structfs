@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     run(["cargo", "check", "--offline", "--workspace", "--all-targets"], stage, env=env)
     run(["cargo", "run", "--locked", "--offline", "-p", "structfs",
          "--features", "json", "--example", "quickstart"], stage, env=env)
-    run(["cargo", "test", "--offline", "-p", "featherweight-runtime", "-p", "structfs-handles",
+    run(["cargo", "test", "--offline", "-p", "featherweight", "-p", "featherweight-runtime", "-p", "structfs-handles",
          "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
     import sys
     run([sys.executable, str(stage / dirs["structfs-serde-store"] /

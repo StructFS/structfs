@@ -404,3 +404,21 @@ async fn command_envelopes_do_not_consume_the_state_tree_depth_allowance() {
     ));
     assert_eq!(state.token(), before);
 }
+
+#[tokio::test]
+async fn conventional_writes_translate_without_changing_internal_state_semantics() {
+    let (_supervisor, owner, _, client, _) = setup(StateLimits::default());
+    client
+        .batch(None, vec![set("a", Value::Null)])
+        .await
+        .unwrap();
+    assert_eq!(client.data(&path!("a")).await.unwrap(), Some(Value::Null));
+    client.write(&path!("a"), Value::Null).await.unwrap();
+    assert_eq!(client.data(&path!("a")).await.unwrap(), None);
+    client.write(&path!("a"), Value::Bool(true)).await.unwrap();
+    assert_eq!(
+        client.data(&path!("a")).await.unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+}

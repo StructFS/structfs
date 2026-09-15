@@ -169,3 +169,12 @@ a bounded operation exit result, explicit grant checks, cancellation and owner j
 Its approval-gated fake tool separately demonstrates durable commit ordering and
 fresh guest turns over a persistent host service. It does not spawn an OS process,
 provide an OS sandbox, or certify Ox worker isolation. Production adapters remain P1.
+
+## Store conventions and implementation state
+
+The revisioned-state batch protocol distinguishes Set and Delete so internal
+state and immutable snapshots can represent present Null. An Isotope-facing
+conventional store assignment maps a Null write to Delete and another Value to
+Set. Its implementation can retain the richer batch operations. This boundary
+translation does not add a core operation or require recursive normalization of
+Values, command payloads, or snapshots.

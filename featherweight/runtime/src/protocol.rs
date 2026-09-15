@@ -182,7 +182,7 @@ fn decode_error(map: &BTreeMap<String, Value>) -> Error {
     }
 }
 
-/// Decode explicit presence; unmarked legacy Null responses remain absent.
+/// Decode canonical explicit presence. Unmarked responses are malformed.
 pub fn decode_read_response(response: Value) -> Result<Option<Value>, Error> {
     let map = match response {
         Value::Map(map) => map,
@@ -203,10 +203,7 @@ pub fn decode_read_response(response: Value) -> Result<Option<Value>, Error> {
                 .ok_or_else(|| Error::conflict("present response missing value")),
             Some(Value::Bool(false)) if !map.contains_key("value") => Ok(None),
             Some(_) => Err(Error::conflict("invalid response presence")),
-            None => match map.get("value").cloned().unwrap_or(Value::Null) {
-                Value::Null => Ok(None),
-                value => Ok(Some(value)),
-            },
+            None => Err(Error::conflict("response missing presence")),
         },
         _ => Err(decode_error(&map)),
     }
@@ -273,7 +270,7 @@ mod tests {
             ("result".into(), "ok".into()),
             ("value".into(), Value::Null),
         ]));
-        assert_eq!(decode_read_response(legacy).unwrap(), None);
+        assert!(decode_read_response(legacy).is_err());
         let invalid = Value::Map(BTreeMap::from([
             ("result".into(), "ok".into()),
             ("present".into(), true.into()),

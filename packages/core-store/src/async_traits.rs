@@ -180,6 +180,41 @@ impl<T: crate::Writer + Send + 'static> AsyncWriter for SyncToAsync<T> {
     }
 }
 
+/// Shared read capability. Construction must be prompt; acceptance and abandonment
+/// semantics belong to the provider. A detached future does not imply rollback.
+pub trait SharedReader: Send + Sync {
+    fn read(&self, path: Path) -> DetachedFuture<Option<Record>>;
+}
+
+/// Shared write capability with independent owned operations. Providers define
+/// acceptance, ordering and what dropping an unpolled or pending future does.
+pub trait SharedWriter: Send + Sync {
+    fn write(&self, path: Path, record: Record) -> DetachedFuture<Path>;
+}
+
+impl<T: SharedReader + ?Sized> SharedReader for std::sync::Arc<T> {
+    fn read(&self, path: Path) -> DetachedFuture<Option<Record>> {
+        (**self).read(path)
+    }
+}
+impl<T: SharedWriter + ?Sized> SharedWriter for std::sync::Arc<T> {
+    fn write(&self, path: Path, record: Record) -> DetachedFuture<Path> {
+        (**self).write(path, record)
+    }
+}
+// Shared clients can be composed by every existing detached combinator without
+// another wrapper or a lock held over a parked request.
+impl<T: SharedReader + ?Sized> DetachedReader for std::sync::Arc<T> {
+    fn read_detached(&mut self, path: &Path) -> DetachedFuture<Option<Record>> {
+        (**self).read(path.clone())
+    }
+}
+impl<T: SharedWriter + ?Sized> DetachedWriter for std::sync::Arc<T> {
+    fn write_detached(&mut self, path: &Path, record: Record) -> DetachedFuture<Path> {
+        (**self).write(path.clone(), record)
+    }
+}
+
 // === Detached async traits ===
 
 /// A boxed future that does not borrow the store that produced it.
@@ -293,8 +328,6 @@ mod tests {
 
     #[tokio::test]
     async fn async_read_write_works() {
-        use crate::path;
-
         let mut store = TestAsyncStore::new();
 
         // Write
@@ -315,8 +348,6 @@ mod tests {
 
     #[tokio::test]
     async fn async_with_parsed_values() {
-        use crate::path;
-
         let mut store = TestAsyncStore::new();
 
         // Write a parsed value
@@ -336,8 +367,6 @@ mod tests {
 
     #[tokio::test]
     async fn object_safety_works() {
-        use crate::path;
-
         let mut store = TestAsyncStore::new();
         let boxed: &mut dyn AsyncStore = &mut store;
 
@@ -355,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn detached_futures_do_not_borrow_the_store() {
-        use crate::{path, MemoryStore, Shared};
+        use crate::{MemoryStore, Shared};
 
         let mut store = Shared::new(MemoryStore::new());
 
@@ -373,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn detached_object_safety() {
-        use crate::{path, MemoryStore, Shared};
+        use crate::{MemoryStore, Shared};
 
         let mut boxed: Box<dyn DetachedStore> = Box::new(Shared::new(MemoryStore::new()));
         boxed
@@ -385,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_to_async_adapter_works() {
-        use crate::{path, Reader, Writer};
+        use crate::{Reader, Writer};
 
         // Create a sync store
         struct SyncStore {

@@ -230,7 +230,7 @@ impl<T: AsyncWriter, C: Send + Sync> AsyncLLWriter for AsyncCoreToLL<T, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{path, NoCodec};
+    use crate::NoCodec;
     use std::collections::HashMap;
 
     /// Simple async in-memory LL store for testing.

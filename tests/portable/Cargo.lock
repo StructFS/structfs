@@ -1026,7 +1026,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "structfs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "structfs-core-store",
  "structfs-serde-store",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-core-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-handles"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "structfs-core-store",
  "tokio",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "collection_literals",
  "http",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-ll-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-path-macro"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-path-validation"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "unicode-ident",
 ]
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "structfs-serde-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",

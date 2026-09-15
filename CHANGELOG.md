@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.3.0 — unreleased
+## 0.4.0
+
+- Recoverable prepared execution for synchronous and asynchronous host stores,
+  with explicit execution owners, joined state recovery, supervisor retention,
+  engine-wide epoch cadence, and configurable growth-denial behavior.
+- Shared reader/writer capabilities, allocation-free normalized suffix matching,
+  hygienic path macros through renamed dependencies and facades.
+- Flat-entry MemoryStore snapshots preserving Null and empty containers; optional
+  roots distinguish imported Null from an empty store. Ordinary Null writes delete.
+- Conventional state assignment translates Null to the internal Delete operation.
+- Parsed-only implicit typed reads and canonical explicit server response presence.
+- Legacy driver bridges and public unowned core-Wasm run entry points removed.
+
+See [migration](docs/migration-0.4.md), [design decisions](docs/design/2026-09-14-coherent-contracts.md),
+and the generated [registry status](docs/release-status.md) for publication state.
+Historical validation records do not certify this revision.
+
+## 0.3.0 — published
 
 ### Added
 
@@ -27,7 +44,8 @@
 
 `PathPattern` has a new public variant. HTTP without default features now exposes
 portable types without native stores. See [0.3 migration](docs/migration-0.3.md)
-and [platform support](docs/platforms.md). No publication has been performed.
+and [platform support](docs/platforms.md). Registry availability was verified on
+2026-09-14; the previous unreleased wording was stale.
 
 ## 0.2.0 — published
 

@@ -165,7 +165,7 @@ not bound arbitrary host I/O. The
 [spec](https://github.com/StructFS/structfs/tree/main/isotope/spec) is
 the contract; this crate is the working model of it.
 
-## External embedding (0.3 release line)
+## External embedding (0.4 release line)
 
 Prepare code in the embedding host, then call `Runtime::register_artifact` with
 an `Arc<dyn WasmBlockDriver>`. Implement `execute(DriverContext)` for asynchronous
@@ -237,8 +237,20 @@ The HTTP exchange and allocator are deterministic fixtures. Adapt the lifecycle
 ownership to your HTTP framework and external protocol. Keep the executor alive
 until engine ticking and all retained cleanup are finished; a grace timeout is not
 proof of resource release. The release gate runs this example against extracted
-Cargo archives. See the [migration guide](../../docs/migration-0.3.md).
+Cargo archives. See the [migration guide](../../docs/migration-0.4.md).
 
 Assembly standard sections and block fields are strict. Unknown fields fail except
 for ignored `x-` extension metadata. `config` and `failure` keys must name blocks;
 per-block configuration values remain unrestricted application data.
+
+## Recoverable prepared hosting
+
+CoreWasmEngine::prepare produces reusable code. Wrap it in Arc and use start_sync
+or start_async with an explicit CleanupSupervisor and ExecutionPolicy. Join the
+ExecutionOwner to obtain both the execution result and the original host state.
+Cancellation retains accepted effects until they finish; bounded waits leave the
+owner joinable. Dropped owners leave unfinished work under the supervisor.
+
+The prepared_hosting example measures 100 fresh sync and async runs over one
+prepared module. See [0.4 migration](https://github.com/StructFS/structfs/blob/main/docs/migration-0.4.md)
+for policy defaults, panic/recovery limits and the retained provider interfaces.

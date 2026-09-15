@@ -33,44 +33,76 @@ use crate::{Error, NoCodec, Path, Reader, Record, Value, Writer};
 /// ```
 #[derive(Debug, Default)]
 pub struct MemoryStore {
-    root: Value,
+    root: Option<Value>,
 }
 
 impl MemoryStore {
     /// Create a new empty store.
     pub fn new() -> Self {
-        Self { root: Value::Null }
+        Self { root: None }
     }
 
     /// Create a store with initial contents.
     pub fn with_root(root: Value) -> Self {
-        Self { root }
+        Self { root: Some(root) }
     }
 
-    /// Borrow the root value.
-    pub fn root(&self) -> &Value {
-        &self.root
+    /// Construct a snapshot without replaying writes. Null and empty containers
+    /// are preserved, including a present Null root. Duplicate paths and explicit
+    /// ancestor/descendant overlaps are rejected independent of input order.
+    /// Implicit parents are maps; numeric components do not infer arrays.
+    pub fn from_entries(entries: impl IntoIterator<Item = (Path, Value)>) -> Result<Self, Error> {
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.iter().cmp(b.iter()));
+        for pair in entries.windows(2) {
+            if pair[1].0.has_prefix(&pair[0].0) {
+                return Err(Error::conflict(format!(
+                    "snapshot paths overlap: '{}' and '{}'",
+                    pair[0].0, pair[1].0
+                )));
+            }
+        }
+        let mut store = Self::new();
+        for (path, value) in entries {
+            // Path is already validated. Never use write here: Null is data in a snapshot.
+            if path.is_empty() {
+                store.root = Some(value);
+            } else {
+                store
+                    .root
+                    .get_or_insert_with(Value::map)
+                    .set(&path, value)?;
+            }
+        }
+        Ok(store)
+    }
+
+    /// Borrow the root value. None is empty; Some(Null) is an imported Null root.
+    pub fn root(&self) -> Option<&Value> {
+        self.root.as_ref()
     }
 }
 
 impl Reader for MemoryStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        if from.is_empty() && self.root.is_null() {
-            return Ok(None);
-        }
-        Ok(self.root.get(from).cloned().map(Record::parsed))
+        Ok(self
+            .root
+            .as_ref()
+            .and_then(|root| root.get(from))
+            .cloned()
+            .map(Record::parsed))
     }
 
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
-        // Project children without cloning the subtree.
-        if from.is_empty() && self.root.is_null() {
-            return Ok(None);
-        }
-        Ok(self.root.get(from).map(|v| match v {
-            Value::Map(map) => map.keys().cloned().collect(),
-            Value::Array(arr) => (0..arr.len()).map(|i| i.to_string()).collect(),
-            _ => Vec::new(),
-        }))
+        Ok(self
+            .root
+            .as_ref()
+            .and_then(|root| root.get(from))
+            .map(|v| match v {
+                Value::Map(map) => map.keys().cloned().collect(),
+                Value::Array(arr) => (0..arr.len()).map(|i| i.to_string()).collect(),
+                _ => Vec::new(),
+            }))
     }
 }
 
@@ -81,24 +113,25 @@ impl Writer for MemoryStore {
         // Null write deletes the node and its subtree.
         if value.is_null() {
             if to.is_empty() {
-                self.root = Value::Null;
-            } else {
-                self.root.remove(to)?;
+                self.root = None;
+            } else if let Some(root) = &mut self.root {
+                root.remove(to)?;
             }
             return Ok(to.clone());
         }
 
         if to.is_empty() {
-            self.root = value;
+            self.root = Some(value);
             return Ok(to.clone());
         }
 
         // Writing below a Null root implicitly creates the root map;
         // Value::set then creates intermediate maps along the way.
-        if self.root.is_null() {
-            self.root = Value::map();
+        let root = self.root.get_or_insert_with(Value::map);
+        if root.is_null() {
+            *root = Value::map();
         }
-        self.root.set(to, value)?;
+        root.set(to, value)?;
         Ok(to.clone())
     }
 }

@@ -36,15 +36,15 @@
 // ── Core: always available ──────────────────────────────────────────
 
 pub use structfs_core_store::{
-    Bytes, Cascade, Codec, CodecOperation, CoreToLL, Error, Format, LLError, LLPath, LLReader,
-    LLStore, LLToCore, LLWriter, LazyRecord, Masked, NoCodec, Path, PathComponent, PathError,
-    PathPattern, PathTrie, ReadOnly, Reader, Record, Reference, Rooted, Shared, Store,
-    TypeDescriptor, TypeInfo, Value, Writer,
+    matches_prefix_suffix, Bytes, Cascade, Codec, CodecOperation, CoreToLL, Error, Format, LLError,
+    LLPath, LLReader, LLStore, LLToCore, LLWriter, LazyRecord, Masked, MemoryStore, NoCodec, Path,
+    PathComponent, PathError, PathPattern, PathTrie, ReadOnly, Reader, Record, Reference, Rooted,
+    Shared, Store, TypeDescriptor, TypeInfo, Value, Writer,
 };
 
 /// Path macro for constructing validated [`Path`] values from string literals.
-/// The expansion requires a direct `structfs-core-store` dependency, even when
-/// importing through this facade; runtime expressions must be `PathComponent`.
+/// Expansion supports renamed dependencies and facade reexports; runtime
+/// expressions must be `PathComponent`.
 ///
 /// ```rust
 /// use structfs::path;
@@ -71,7 +71,7 @@ pub use structfs_core_store::{path_serde, path_trie};
 pub use structfs_core_store::{
     AsyncCoreToLL, AsyncLLReader, AsyncLLStore, AsyncLLToCore, AsyncLLWriter, AsyncReader,
     AsyncStore, AsyncWriter, DetachedFuture, DetachedReader, DetachedShared, DetachedStore,
-    DetachedWriter, SyncToAsync, SyncToAsyncLL,
+    DetachedWriter, SharedReader, SharedWriter, SyncToAsync, SyncToAsyncLL,
 };
 
 // ── Serde integration (feature = "serde") ───────────────────────────

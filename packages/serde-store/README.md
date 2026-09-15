@@ -12,9 +12,9 @@ Enable `async` for async typed access.
 
 ## Version and support
 
-The 0.3 release line supports Rust 1.96+. See the [API documentation](https://docs.rs/structfs-serde-store)
+The 0.4 release line supports Rust 1.96+. See the [API documentation](https://docs.rs/structfs-serde-store)
 for compiled examples and full contracts.
-Read the [migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md) before upgrading
+Read the [migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.4.md) before upgrading
 code or persisted data. The [release procedure](https://github.com/StructFS/structfs/blob/main/docs/releasing.md)
 describes package, platform and feature verification.
 
@@ -25,4 +25,8 @@ futures that retain no store borrow. `read_typed_detached` requires parsed recor
 `read_as_detached` accepts an owned `Arc<dyn Codec>` for raw records. Conversion and
 codec errors preserve their categories and bounded diagnostics. Serialization of
 borrowed write input completes before constructing the underlying operation.
-See the [composition and migration guide](../../docs/migration-0.3.md).
+See the [composition and migration guide](../../docs/migration-0.4.md).
+
+All implicit typed reads are parsed-only, including synchronous read_typed.
+Raw JSON is not special: select JsonCodec explicitly with read_as. See the
+[0.4 behavior matrix](https://github.com/StructFS/structfs/blob/main/docs/migration-0.4.md).

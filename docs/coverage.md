@@ -150,3 +150,12 @@ Use `--clean` to clear the cache and re-run tests.
 
 - `cargo-llvm-cov` (automatically installed if missing)
 - `bc` (for floating point comparison)
+
+## Feature graph
+
+Coverage runs the workspace with `--all-features --locked`, matching the quality
+gate's test and Clippy graph. The previous default-feature coverage run skipped
+async Serde contract tests entirely; comparing that run to the full-feature test
+result understated the exercised API surface. The 90% threshold and existing
+file exclusions are unchanged. CLI integration tests execute the shipped fw binary,
+including prepared file loading, record/replay/seek, and invalid input handling.

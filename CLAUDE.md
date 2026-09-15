@@ -119,11 +119,12 @@ cargo run -p structfs-repl
    - `core-store`: Record/Value abstraction, path routing
    - `serde-store`: Serde integration for typed access
 
-2. **Synchronous interface**: All store operations are synchronous. The HTTP broker uses a deferred execution pattern (write queues, read executes).
+2. **Provider interfaces**: Stores support synchronous, borrowed async, detached,
+   and shared-client access with explicit concurrency contracts. The HTTP broker uses a deferred execution pattern (write queues, read executes).
 
 3. **Path-based routing**: Paths are the universal addressing mechanism. The `Path` type normalizes trailing slashes and validates components.
 
-4. **Mutable Reader/Writer traits**: Both `read()` and `write()` take `&mut self`.
+4. **Mutable provider Reader/Writer traits**: Both `read()` and `write()` take `&mut self`.
    This is intentional—some stores (HTTP broker, filesystem) have state that
    changes on read. Using `&mut self` uniformly avoids the complexity of split
    traits or interior mutability. For concurrent access, wrap stores in
@@ -220,3 +221,13 @@ Some files remain at 0% coverage by design:
 - `packages/repl/src/help_store.rs` - Help system
 - `packages/repl/src/commands.rs` - Command parsing, register handling, dereference syntax
 - `packages/repl/src/io/test_host.rs` - TestHost for testing REPL without terminal
+
+## 0.4 contract boundaries
+
+Isotope exposed stores follow the Null-as-deletion convention; internal data
+structures, snapshot construction and state batch operations may preserve Null.
+Use MemoryStore::from_entries for explicit snapshot import. SharedReader and
+SharedWriter are the erased shared client capabilities. All implicit typed reads
+are parsed-only. For core-Wasm embedding, prepare code then start_sync/start_async
+with an explicit CleanupSupervisor and join the ExecutionOwner to recover host
+state. See docs/migration-0.4.md and plans/02-coherent-contracts.md.

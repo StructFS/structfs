@@ -18,9 +18,12 @@ name = "fw"
 path = "src/main.rs"
 
 [dependencies]
-featherweight-runtime = { version = "0.3.0", path = "runtime" }
-featherweight-component = { version = "0.3.0", path = "component" }
+featherweight-runtime = { version = "0.4.0", path = "runtime" }
+featherweight-component = { version = "0.4.0", path = "component" }
 structfs-core-store = { workspace = true }
 structfs-json-store = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

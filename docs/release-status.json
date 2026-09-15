@@ -1,0 +1,86 @@
+{
+  "verified_at_utc": "2026-09-15T01:38:34Z",
+  "source": "https://index.crates.io",
+  "packages": {
+    "namecode": {
+      "version": "0.1.1",
+      "status": "published"
+    },
+    "structfs-ll-store": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-path-validation": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-path-macro": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-core-store": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-handles": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-serde-store": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-service": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "featherweight-wasi": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-json-store": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-state": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "featherweight-runtime": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "featherweight-component": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "featherweight": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-profiles": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "featherweight-guest": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-http": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-sys": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    },
+    "structfs-repl": {
+      "version": "0.4.0",
+      "status": "unpublished"
+    }
+  }
+}

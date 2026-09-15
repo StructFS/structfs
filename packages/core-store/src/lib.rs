@@ -55,7 +55,7 @@ pub use format::Format;
 pub use lazy_record::LazyRecord;
 pub use memory_store::MemoryStore;
 pub use path::{Path, PathComponent, PathError};
-pub use path_pattern::PathPattern;
+pub use path_pattern::{matches_prefix_suffix, PathPattern};
 pub use path_trie::PathTrie;
 pub use record::Record;
 pub use reference::{Reference, TypeDescriptor, TypeInfo};
@@ -77,7 +77,15 @@ pub use value::Value;
 /// let p = path!("users", name, "profile");
 /// assert_eq!(p.to_string(), "users/alice/profile");
 /// ```
-pub use structfs_path_macro::path;
+#[doc(hidden)]
+pub use structfs_path_macro::path as __path;
+
+/// Construct a validated path. Runtime expressions must be PathComponent values.
+/// Expansion is hygienic through renamed dependencies and facade reexports.
+#[macro_export]
+macro_rules! path {
+    ($($input:tt)*) => { $crate::__path!($crate; $($input)*) };
+}
 
 // Re-export LL types for convenience
 pub use structfs_ll_store::{LLError, LLPath, LLReader, LLStore, LLWriter};
@@ -92,7 +100,7 @@ mod async_bridge;
 #[cfg(feature = "async")]
 pub use async_traits::{
     AsyncReader, AsyncStore, AsyncWriter, DetachedFuture, DetachedReader, DetachedStore,
-    DetachedWriter, SyncToAsync,
+    DetachedWriter, SharedReader, SharedWriter, SyncToAsync,
 };
 
 #[cfg(feature = "async")]

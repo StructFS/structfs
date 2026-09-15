@@ -535,3 +535,6 @@ mod tests {
         assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
     }
 }
+
+#[cfg(test)]
+mod owned_execution;

@@ -41,3 +41,11 @@ author targets two imports in the `structfs` module, and no host is
 required to carry component tooling. Where wasip2 composition or
 wit-bindgen language coverage is wanted, this adapter provides it —
 one `register` call, no core changes.
+
+## Hosting support boundary
+
+The 0.4 native core-Wasm recoverable-host API is not implemented by this adapter.
+It does not advertise host-state recovery or arbitrary ExecutionPolicy support.
+Its existing documented execution/teardown contract remains separate. Matching
+core import signatures is not a claim that native scheduling and limit policies
+are available here. Pin SDK/runtime pairs to the documented specification snapshot.

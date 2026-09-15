@@ -33,6 +33,9 @@ pub struct ExecutionUsage {
 #[derive(Clone, Default)]
 pub struct ExecutionMeter(Arc<Mutex<ExecutionUsage>>);
 impl ExecutionMeter {
+    pub(crate) fn replace(&self, usage: ExecutionUsage) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = usage;
+    }
     pub fn snapshot(&self) -> ExecutionUsage {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }

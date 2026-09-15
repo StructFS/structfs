@@ -1,19 +1,14 @@
 # Coordinated release procedure
 
-StructFS and Featherweight currently target **0.3.0 (unreleased)**; Isotope's
-specification snapshot remains 2026-09-12. Namecode is independently versioned.
-Never overwrite an existing publication.
+StructFS and Featherweight currently target **0.4.0**, paired with the Isotope
+2026-09-14 specification candidate. Namecode is independently versioned. Never
+overwrite an existing publication. [Registry status](release-status.md) records
+exact-version availability; repeat verification immediately before publication.
 
-StructFS 0.2.0 was verified as published and not yanked on 2026-09-13 through
-[Cargo's sparse registry index](https://index.crates.io/st/ru/structfs). This
-supersedes the 2026-09-12 unpublished-candidate observation. Repeat exact-version
-preflight for every package immediately before publication; this observation is
-not a lock on registry state. The 0.3 line includes public enum and feature-surface
-changes and must not be published under the existing 0.2 contracts.
-
-See [local release evidence](release-validation-2026-09-13.md) for the current
-consumer contract checks. The [earlier capacity run](release-validation-2026-09-12.md)
-records its separate measured workload.
+The 0.3 packages were verified as published on 2026-09-14. Historical validation
+records describe their dated workloads and do not certify this revision. See
+[0.4 implementation decisions](design/2026-09-14-coherent-contracts.md) and
+[migration](migration-0.4.md) for the new contracts.
 
 ## Candidate verification
 
@@ -121,3 +116,13 @@ describe the version’s API without embedding an unpublished-status claim. Push
 tag the Isotope snapshot, and publish the matching specification site and changelog.
 If a package is defective, assess yanking and publish a corrected new version;
 publication is not rolled back by deleting a Git tag.
+
+## Registry status record
+
+Run `python3 scripts/release.py --status` to verify selected package versions and
+regenerate `docs/release-status.json` and its Markdown projection. It never
+publishes. The publication command refreshes this record after successful
+publication; if a publication attempt stops partway, run `--status` to record the
+partial state before retrying. Missing versions, published versions and yanked
+versions are distinct. Link current readiness documentation to this record rather
+than inferring publication from local tags or old changelog wording.

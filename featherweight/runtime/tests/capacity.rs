@@ -45,7 +45,7 @@ const GUEST: &str = r#"(module
  (data (i32.const 128) "iso/server/requests")
  (data (i32.const 192) "gate/wait")
  (data (i32.const 256) "iso/server/responses/0")
- (data (i32.const 320) "{\"result\":\"ok\",\"value\":42}")
+ (data (i32.const 320) "{\"result\":\"ok\",\"present\":true,\"value\":42}")
  (func (export "manifest") (param $ret i32) (result i32)
   (i32.store (i32.const 512) (i32.const 99))
   (i32.store (local.get $ret) (i32.const 32))
@@ -55,7 +55,7 @@ const GUEST: &str = r#"(module
   (i32.store (i32.const 512) (i32.const 1))
   (drop (call $read (i32.const 128) (i32.const 19) (i32.const 1024)))
   (drop (call $read (i32.const 192) (i32.const 9) (i32.const 1024)))
-  (call $write (i32.const 256) (i32.const 22) (i32.const 320) (i32.const 26) (i32.const 1024))))"#;
+  (call $write (i32.const 256) (i32.const 22) (i32.const 320) (i32.const 41) (i32.const 1024))))"#;
 
 fn sample_process(label: &str) {
     #[cfg(unix)]

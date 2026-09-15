@@ -3,7 +3,7 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use structfs_core_store::{Codec, Error, Format, Path, Reader, Record, Value, Writer};
+use structfs_core_store::{Codec, Error, Path, Reader, Record, Value, Writer};
 
 use crate::convert::{from_value, to_value};
 
@@ -64,34 +64,9 @@ pub trait TypedReader: Reader {
             .transpose()
     }
 
-    /// Codec-free typed read.
-    ///
-    /// Most stores return `Record::Parsed` values, where a codec argument is
-    /// meaningless; this method deserializes them directly via serde. Raw
-    /// JSON records are parsed with the bounded JSON profile; other raw formats are an
-    /// `UnsupportedFormat` error — use [`TypedReader::read_as`] with a codec
-    /// for those.
-    ///
-    /// ```rust,ignore
-    /// let config: Option<Config> = store.read_typed(&path!("config"))?;
-    /// ```
+    /// Parsed-only typed read. Raw records require an explicit codec via `read_as`.
     fn read_typed<T: DeserializeOwned>(&mut self, from: &Path) -> Result<Option<T>, Error> {
-        let Some(record) = self.read(from)? else {
-            return Ok(None);
-        };
-        match record {
-            Record::Parsed(value) => Ok(Some(from_value(value)?)),
-            Record::Raw { bytes, format, .. } if format == Format::JSON => crate::JsonCodec
-                .decode(&bytes, &format)
-                .and_then(from_value)
-                .map(Some),
-            Record::Raw { format, .. } => Err(Error::UnsupportedFormat(format)),
-            _ => Err(Error::store(
-                "typed_reader",
-                "read_typed",
-                "unsupported record variant",
-            )),
-        }
+        self.read_as(from, &structfs_core_store::NoCodec)
     }
 
     /// Enumerate children at a prefix and deserialize each into `T`.
@@ -264,9 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn read_typed_parses_raw_json() {
+    fn read_typed_requires_explicit_json_codec() {
         use bytes::Bytes;
         use structfs_core_store::path;
+        use structfs_core_store::Format;
 
         let mut store = TestStore::new();
         store
@@ -279,7 +255,11 @@ mod tests {
             )
             .unwrap();
 
-        let user: TestUser = store.read_typed(&path!("raw")).unwrap().unwrap();
+        assert!(store.read_typed::<TestUser>(&path!("raw")).is_err());
+        let user: TestUser = store
+            .read_as(&path!("raw"), &crate::JsonCodec)
+            .unwrap()
+            .unwrap();
         assert_eq!(user.name, "Bob");
     }
 
@@ -287,6 +267,7 @@ mod tests {
     fn read_typed_rejects_non_json_raw() {
         use bytes::Bytes;
         use structfs_core_store::path;
+        use structfs_core_store::Format;
 
         let mut store = TestStore::new();
         store

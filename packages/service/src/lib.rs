@@ -266,6 +266,13 @@ impl Router {
     }
 }
 /// Cloneable capability handle. Scoping and permissions can only be attenuated.
+///
+/// Calls are lazy, including through shared and detached traits: dropping an
+/// unpolled future dispatches nothing. Polling resolves the route and acquires
+/// admission before invoking the provider, whose contract defines acceptance.
+/// Dropping a pending call signals its cancellation token and drops the provider
+/// future; it does not roll back effects. Providers that retain work must retain
+/// the context lease until that work finishes (as the blocking adapter does).
 #[derive(Clone)]
 pub struct Client {
     router: Arc<Router>,
@@ -503,5 +510,18 @@ impl Service for OwnedService {
                 result = future => result,
             }
         })
+    }
+}
+
+impl structfs_core_store::SharedReader for Client {
+    fn read(&self, path: Path) -> structfs_core_store::DetachedFuture<Option<Record>> {
+        let client = self.clone();
+        Box::pin(async move { Client::read(&client, &path).await })
+    }
+}
+impl structfs_core_store::SharedWriter for Client {
+    fn write(&self, path: Path, record: Record) -> structfs_core_store::DetachedFuture<Path> {
+        let client = self.clone();
+        Box::pin(async move { Client::write(&client, &path, record).await })
     }
 }

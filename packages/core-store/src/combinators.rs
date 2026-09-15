@@ -514,6 +514,9 @@ mod detached {
     /// Shared access to a detached store. The lock covers only operation
     /// construction and is released before polling the returned future.
     /// Unlike `Shared`, this delegates to detached operations, not sync ones.
+    /// Acceptance and future-drop behavior are inherited from the provider.
+    /// A panic during construction poisons the lock; all later operations fail
+    /// without reentering the possibly inconsistent provider.
     pub struct DetachedShared<S>(Arc<Mutex<S>>);
 
     impl<S> DetachedShared<S> {
@@ -526,20 +529,38 @@ mod detached {
             Self(self.0.clone())
         }
     }
+    impl<S: DetachedReader> crate::SharedReader for DetachedShared<S> {
+        fn read(&self, path: Path) -> DetachedFuture<Option<Record>> {
+            match self.0.lock() {
+                Ok(mut store) => store.read_detached(&path),
+                Err(_) => Box::pin(async {
+                    Err(Error::store("shared", "read", "construction lock poisoned"))
+                }),
+            }
+        }
+    }
+    impl<S: DetachedWriter> crate::SharedWriter for DetachedShared<S> {
+        fn write(&self, path: Path, record: Record) -> DetachedFuture<Path> {
+            match self.0.lock() {
+                Ok(mut store) => store.write_detached(&path, record),
+                Err(_) => Box::pin(async {
+                    Err(Error::store(
+                        "shared",
+                        "write",
+                        "construction lock poisoned",
+                    ))
+                }),
+            }
+        }
+    }
     impl<S: DetachedReader> DetachedReader for DetachedShared<S> {
         fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
-            self.0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .read_detached(from)
+            crate::SharedReader::read(self, from.clone())
         }
     }
     impl<S: DetachedWriter> DetachedWriter for DetachedShared<S> {
         fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
-            self.0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .write_detached(to, data)
+            crate::SharedWriter::write(self, to.clone(), data)
         }
     }
 

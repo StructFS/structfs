@@ -4,7 +4,7 @@ A strawman [Isotope](../isotope/spec/00-overview.md) runtime: blocks are
 pico-processes whose entire world is StructFS reads and writes, composed
 into assemblies with capability wiring.
 
-## Install the 0.3 release line
+## Install the 0.4 release line
 
 See the [changelog](https://github.com/StructFS/structfs/blob/main/CHANGELOG.md)
 for publication status before installing this version.
@@ -17,7 +17,7 @@ fw shell
 Rust 1.96+ is supported. Embedders depend on `featherweight-runtime`; core-Wasm
 guests depend on `featherweight-guest`. The component-model adapter and WASI shim
 are separate crates. See the
-[migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md)
+[migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.4.md)
 and [specification matrix](https://github.com/StructFS/structfs/blob/main/isotope/RELEASE.md)
 for the release line’s compatibility and support boundaries.
 

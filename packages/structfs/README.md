@@ -8,7 +8,7 @@ read/write interface.
 
 ## Library quickstart
 
-This README describes the **0.3 release line**. See the [0.3 migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md)
+This README describes the **0.4 release line**. See the [0.3 migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.4.md)
 and [platform matrix](https://github.com/StructFS/structfs/blob/main/docs/platforms.md).
 
 Check the [changelog](https://github.com/StructFS/structfs/blob/main/CHANGELOG.md)
@@ -16,7 +16,7 @@ for publication status. The 0.3 dependency configuration is:
 
 ```toml
 [dependencies]
-structfs = { version = "0.3.0", features = ["json"] }
+structfs = { version = "0.4.0", features = ["json"] }
 structfs-core-store = "0.3.0" # required by the path! expansion
 ```
 
@@ -37,5 +37,5 @@ Rust 1.96+ is supported. Higher-level consistency, persistence, observation and
 process guarantees belong to each store's documented contract.
 
 See the [changelog](https://github.com/StructFS/structfs/blob/main/CHANGELOG.md),
-[migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.3.md),
+[migration guide](https://github.com/StructFS/structfs/blob/main/docs/migration-0.4.md),
 and [release procedure](https://github.com/StructFS/structfs/blob/main/docs/releasing.md).

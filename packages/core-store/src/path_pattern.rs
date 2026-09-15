@@ -34,14 +34,8 @@ pub enum PathPattern {
     Exact(Path),
     /// Matches the path itself and everything under it.
     Prefix(Path),
-    /// Matches paths that start with the prefix and end with the suffix,
-    /// with at least the suffix's components after the prefix. The middle
-    /// may be empty: `prefix_suffix(a, c)` matches `a/c` and `a/b/c`.
-    PrefixSuffix(Path, Path),
-    /// Explicit minimum number of components between prefix and suffix.
-    /// Serde: `{"prefix_suffix_min_middle":{"prefix":"accounts",
-    /// "suffix":"provider","min_middle":1}}`.
-    PrefixSuffixMinMiddle {
+    /// Prefix and suffix cannot overlap. `min_middle` counts intervening components.
+    PrefixSuffix {
         prefix: Path,
         suffix: Path,
         min_middle: usize,
@@ -61,14 +55,18 @@ impl PathPattern {
 
     /// Pattern matching paths under `prefix` that end with `suffix`.
     pub fn prefix_suffix(prefix: Path, suffix: Path) -> Self {
-        PathPattern::PrefixSuffix(prefix, suffix)
+        PathPattern::PrefixSuffix {
+            prefix,
+            suffix,
+            min_middle: 0,
+        }
     }
 
     /// Match with an explicit minimum middle length. Zero retains the
     /// `prefix_suffix` behavior; one requires at least one intervening component.
-    /// The existing constructor and its Serde tuple retain zero-middle semantics.
+    /// The shorter constructor selects zero; both serialize to the same variant.
     pub fn prefix_suffix_with_min_middle(prefix: Path, suffix: Path, min_middle: usize) -> Self {
-        Self::PrefixSuffixMinMiddle {
+        Self::PrefixSuffix {
             prefix,
             suffix,
             min_middle,
@@ -80,24 +78,30 @@ impl PathPattern {
         match self {
             PathPattern::Exact(p) => p == path,
             PathPattern::Prefix(prefix) => path.has_prefix(prefix),
-            PathPattern::PrefixSuffixMinMiddle {
+            PathPattern::PrefixSuffix {
                 prefix,
                 suffix,
                 min_middle,
-            } => path.strip_prefix(prefix).is_some_and(|rest| {
-                rest.len() >= suffix.len()
-                    && rest.len() - suffix.len() >= *min_middle
-                    && rest.slice(rest.len() - suffix.len(), rest.len()) == *suffix
-            }),
-            PathPattern::PrefixSuffix(prefix, suffix) => match path.strip_prefix(prefix) {
-                Some(rest) => {
-                    rest.len() >= suffix.len()
-                        && rest.slice(rest.len() - suffix.len(), rest.len()) == *suffix
-                }
-                None => false,
-            },
+            } => matches_prefix_suffix(path, prefix, suffix, *min_middle),
         }
     }
+}
+
+/// Allocation-free component predicate for callers retaining their own pattern representation.
+/// Prefix and suffix must be disjoint; empty paths and all minimum lengths are supported.
+pub fn matches_prefix_suffix(path: &Path, prefix: &Path, suffix: &Path, min_middle: usize) -> bool {
+    let Some(rest) = path.len().checked_sub(prefix.len()) else {
+        return false;
+    };
+    let Some(middle) = rest.checked_sub(suffix.len()) else {
+        return false;
+    };
+    middle >= min_middle
+        && path.has_prefix(prefix)
+        && path
+            .iter()
+            .skip(path.len() - suffix.len())
+            .eq(suffix.iter())
 }
 
 #[cfg(test)]
@@ -157,7 +161,7 @@ mod policy_tests {
     fn explicit_policy_and_serde_preserve_watch_boundaries() {
         let pattern =
             PathPattern::prefix_suffix_with_min_middle(path!("accounts"), path!("provider"), 1);
-        let json = r#"{"prefix_suffix_min_middle":{"prefix":"accounts","suffix":"provider","min_middle":1}}"#;
+        let json = r#"{"prefix_suffix":{"prefix":"accounts","suffix":"provider","min_middle":1}}"#;
         assert_eq!(serde_json::to_string(&pattern).unwrap(), json);
         assert_eq!(serde_json::from_str::<PathPattern>(json).unwrap(), pattern);
         assert!(!pattern.matches(&path!("accounts/provider")));
@@ -168,7 +172,7 @@ mod policy_tests {
         assert!(old.matches(&path!("accounts/provider")));
         assert_eq!(
             serde_json::to_string(&old).unwrap(),
-            r#"{"prefix_suffix":["accounts","provider"]}"#
+            r#"{"prefix_suffix":{"prefix":"accounts","suffix":"provider","min_middle":0}}"#
         );
         assert!(
             !PathPattern::prefix_suffix_with_min_middle(path!(""), path!(""), usize::MAX)

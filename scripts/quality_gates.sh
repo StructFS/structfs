@@ -60,7 +60,7 @@ else
     COVERAGE_DIR="target/coverage"
     mkdir -p "$COVERAGE_DIR"
 
-    cov_output=$(cargo llvm-cov --workspace --ignore-filename-regex "$exclude_regex" 2>&1)
+    cov_output=$(cargo llvm-cov --workspace --all-features --locked --ignore-filename-regex "$exclude_regex" 2>&1)
     echo "$cov_output" > "$COVERAGE_DIR/coverage_summary.txt"
 
     # Extract coverage from TOTAL line

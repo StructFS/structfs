@@ -7,9 +7,11 @@ read(path) -> Result<Option<Value>, Error>
 write(path, value) -> Result<Path, Error>
 ```
 
-`None` is absence. `Some(Null)` is a present value. Null is not a universal delete
-command; deletion is a provider operation. Some compatibility stores retain a
-historical delete-on-null convention and must document it. Writes may return a
+`None` is absence. `Some(Null)` is a present value. Isotope's exposed data stores should follow the convention that writing Null
+removes the addressed value. This does not require internal state engines,
+snapshots, maps, codecs, or protocol envelopes to collapse Null and absence.
+Explicit command paths have their documented command semantics; routing does not
+recursively normalize Values or invent a separate delete primitive. Writes may return a
 new handle path, which is significant and must pass namespace confinement checks.
 
 Higher-level semantics belong to the stores implementing them. Core read/write
@@ -83,8 +85,7 @@ codec error. Profile-specific faults requiring richer machine-readable data use
 versioned Value reply envelopes, as revisioned state does.
 
 The [server protocol](07-server-protocol.md) carries response Values. Explicit
-`present` distinguishes absence from Null; unmarked historical responses retain
-their compatibility meaning. Its older error names remain accepted. Cancellation
+`present` distinguishes absence from Null; unmarked read responses are malformed. Its older error names remain accepted. Cancellation
 and resource limits have separate error names. Historical error envelopes lacking
 a structured path cannot reconstruct every native path error exactly.
 

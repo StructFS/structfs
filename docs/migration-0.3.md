@@ -1,6 +1,7 @@
 # Migrating from 0.2 to 0.3
 
-0.2.0 is published. This checkout targets **0.3.0, unreleased**. The new public
+This historical guide describes the published **0.3.0** contracts. For the current
+revision, see [0.4 migration](migration-0.4.md). The 0.3 public
 `PathPattern` variant and optional HTTP/handles surfaces warrant an incompatible
 pre-1.0 release. No persisted records are rewritten automatically.
 

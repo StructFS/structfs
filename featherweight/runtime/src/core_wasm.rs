@@ -59,6 +59,18 @@ struct CoreState<S, C> {
     limits: wasmtime::StoreLimits,
     usage: Option<(crate::ExecutionMeter, u64)>,
     memory: Option<wasmtime::Memory>,
+    execution: Option<(crate::ExecutionPolicy, CancelToken)>,
+}
+
+fn check_host<S, C>(
+    caller: &Caller<'_, CoreState<S, C>>,
+) -> std::result::Result<(), wasmtime::Error> {
+    if let Some((policy, cancel)) = &caller.data().execution {
+        policy
+            .ensure_active(cancel)
+            .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+    }
+    Ok(())
 }
 
 fn sample_caller<S, C>(caller: &mut Caller<'_, CoreState<S, C>>) {
@@ -235,6 +247,7 @@ impl structfs_core_store::AsyncWriter for NoOpStore {
 }
 
 /// A block in the core-wasm binding.
+#[derive(Clone)]
 pub struct CoreWasmBlock {
     module_bytes: Vec<u8>,
     prepared: Option<(Arc<CoreWasmEngine>, Module, Vec<u8>)>,
@@ -250,13 +263,14 @@ pub struct CoreWasmEngine {
     compilation: Arc<tokio::sync::Semaphore>,
     memory_limit: usize,
     sessions: Arc<tokio::sync::Semaphore>,
+    epoch_interval: std::time::Duration,
 }
 
 /// Reserves every guest slot needed by an assembly before any block starts.
 /// Keep all artifacts bound to this reservation in a request-scoped runtime.
 pub struct CoreWasmSession {
     engine: Arc<CoreWasmEngine>,
-    slots: tokio::sync::Semaphore,
+    slots: Arc<tokio::sync::Semaphore>,
     _reservation: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -274,6 +288,27 @@ impl CoreWasmEngine {
         max_sessions: usize,
         memory_limit: usize,
     ) -> Result<Arc<Self>> {
+        Self::with_epoch_interval(
+            compile_parallelism,
+            max_sessions,
+            memory_limit,
+            std::time::Duration::from_millis(10),
+        )
+    }
+
+    /// Engine-wide epoch cadence. Per-run policy never changes the shared ticker.
+    pub fn with_epoch_interval(
+        compile_parallelism: usize,
+        max_sessions: usize,
+        memory_limit: usize,
+        epoch_interval: std::time::Duration,
+    ) -> Result<Arc<Self>> {
+        if epoch_interval.is_zero() {
+            return Err(RuntimeError::wasm(
+                "engine",
+                "epoch interval must be positive",
+            ));
+        }
         if max_sessions == 0 || memory_limit == 0 {
             return Err(RuntimeError::wasm(
                 "engine",
@@ -292,14 +327,28 @@ impl CoreWasmEngine {
         config.cranelift_nan_canonicalization(true);
         config.relaxed_simd_deterministic(true);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::wasm("engine", e))?;
-        let ticker = Metering::default().start_async_ticker(&engine).unwrap();
+        tokio::runtime::Handle::try_current().map_err(|_| {
+            RuntimeError::wasm("engine", "create the engine inside a live Tokio runtime")
+        })?;
+        let ticker = Metering {
+            fuel: None,
+            epoch_interval: Some(epoch_interval),
+        }
+        .start_async_ticker(&engine)
+        .unwrap();
         Ok(Arc::new(Self {
             engine,
             _ticker: ticker,
             compilation: Arc::new(tokio::sync::Semaphore::new(compile_parallelism)),
             memory_limit,
+            epoch_interval,
             sessions: Arc::new(tokio::sync::Semaphore::new(max_sessions)),
         }))
+    }
+
+    /// Cadence of the shared engine ticker.
+    pub fn epoch_interval(&self) -> std::time::Duration {
+        self.epoch_interval
     }
 
     /// Fail fast if the complete assembly cannot be admitted. Include lazy
@@ -316,7 +365,7 @@ impl CoreWasmEngine {
             .map_err(|_| RuntimeError::wasm("admission", "assembly capacity exhausted"))?;
         Ok(Arc::new(CoreWasmSession {
             engine: self.clone(),
-            slots: tokio::sync::Semaphore::new(blocks as usize),
+            slots: Arc::new(tokio::sync::Semaphore::new(blocks as usize)),
             _reservation: reservation,
         }))
     }
@@ -324,6 +373,7 @@ impl CoreWasmEngine {
     fn store_limits(&self) -> wasmtime::StoreLimits {
         wasmtime::StoreLimitsBuilder::new()
             .memory_size(self.memory_limit)
+            .trap_on_grow_failure(true)
             .memories(1)
             .table_elements(100_000)
             .tables(1)
@@ -359,6 +409,7 @@ impl CoreWasmEngine {
                 limits: self.store_limits(),
                 usage: None,
                 memory: None,
+                execution: None,
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -407,8 +458,61 @@ impl CoreWasmEngine {
 }
 
 impl CoreWasmBlock {
+    /// Synchronous loader preparation. Runtime loading is synchronous; compile
+    /// and inspect once here, then share exactly that module with every run.
+    pub(crate) fn prepare_for_loader(bytes: Vec<u8>) -> Result<Self> {
+        let engine = CoreWasmEngine::new(1)?;
+        let module =
+            Module::new(&engine.engine, bytes).map_err(|e| RuntimeError::wasm("module", e))?;
+        let linker = Self::linker::<NoOpStore, structfs_core_store::NoCodec>(&engine.engine)?;
+        let mut store = Store::new(
+            &engine.engine,
+            CoreState {
+                store: NoOpStore,
+                codec: structfs_core_store::NoCodec,
+                format: Format::OCTET_STREAM,
+                limits: engine.store_limits(),
+                usage: None,
+                memory: None,
+                execution: None,
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(10_000_000)
+            .map_err(|e| RuntimeError::wasm("fuel", e))?;
+        store.set_epoch_deadline(u64::MAX / 2);
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|e| RuntimeError::wasm("instantiate", e))?;
+        instance
+            .get_typed_func::<(), i32>(&mut store, "run")
+            .map_err(|e| RuntimeError::wasm("run", e))?;
+        let ret = Self::alloc_ret(&mut store, &instance)?;
+        let manifest = instance
+            .get_typed_func::<i32, i32>(&mut store, "manifest")
+            .map_err(|e| RuntimeError::wasm("manifest", e))?;
+        let code = manifest
+            .call(&mut store, ret as i32)
+            .map_err(|e| RuntimeError::wasm("manifest", e))?;
+        if code != status::OK {
+            return Err(RuntimeError::Manifest(format!(
+                "guest manifest returned status {code}"
+            )));
+        }
+        let manifest = Self::take_ret(&mut store, &instance, ret)?;
+        let _: serde_json::Value =
+            serde_json::from_slice(&manifest).map_err(|e| RuntimeError::Manifest(e.to_string()))?;
+        Ok(Self {
+            module_bytes: Vec::new(),
+            prepared: Some((engine, module, manifest)),
+            session: None,
+        })
+    }
+
     /// Wrap core-module bytes (or wat text — wasmtime accepts both).
-    pub fn new(module_bytes: Vec<u8>) -> Self {
+    #[cfg(test)]
+    fn new(module_bytes: Vec<u8>) -> Self {
         Self {
             module_bytes,
             prepared: None,
@@ -438,7 +542,7 @@ impl CoreWasmBlock {
 
     /// Load from a file.
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(Self::new(std::fs::read(path)?))
+        Self::prepare_for_loader(std::fs::read(path)?)
     }
 
     fn linker<S, C>(engine: &Engine) -> Result<Linker<CoreState<S, C>>>
@@ -457,6 +561,7 @@ impl CoreWasmBlock {
                  path_len: i32,
                  ret_ptr: i32|
                  -> std::result::Result<i32, wasmtime::Error> {
+                    check_host(&caller)?;
                     let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
                     let path = match parse_path(&path_bytes) {
                         Ok(path) => path,
@@ -508,6 +613,7 @@ impl CoreWasmBlock {
                  data_len: i32,
                  ret_ptr: i32|
                  -> std::result::Result<i32, wasmtime::Error> {
+                    check_host(&caller)?;
                     let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
                     let path = match parse_path(&path_bytes) {
                         Ok(path) => path,
@@ -566,6 +672,7 @@ impl CoreWasmBlock {
                  (path_ptr, path_len, ret_ptr): (i32, i32, i32)| {
                     Box::new(async move {
                         sample_caller(&mut caller);
+                        check_host(&caller)?;
                         let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
                         let path = match parse_path(&path_bytes) {
                             Ok(path) => path,
@@ -620,6 +727,7 @@ impl CoreWasmBlock {
                 |mut caller: Caller<'_, CoreState<S, C>>,
                  (path_ptr, path_len, data_ptr, data_len, ret_ptr): (i32, i32, i32, i32, i32)| {
                     Box::new(async move {
+                    check_host(&caller)?;
                     let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
                     let path = match parse_path(&path_bytes) {
                         Ok(path) => path,
@@ -666,7 +774,8 @@ impl CoreWasmBlock {
 
     /// Run a core guest on Tokio. Imports suspend the Wasmtime fiber;
     /// parked guests do not own a blocking-pool thread.
-    pub async fn run_async<S, C>(
+    #[cfg(test)]
+    async fn run_async<S, C>(
         &self,
         _id: BlockId,
         root: S,
@@ -694,7 +803,7 @@ impl CoreWasmBlock {
     /// Async execution with host-visible samples at imports, epoch yields and
     /// termination. Fuel counts Wasmtime units, not emulated instructions.
     #[allow(clippy::too_many_arguments)]
-    pub async fn run_metered_async<S, C>(
+    pub(crate) async fn run_metered_async<S, C>(
         &self,
         _id: BlockId,
         root: S,
@@ -708,140 +817,27 @@ impl CoreWasmBlock {
         S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
         C: Codec + Send + Sync + 'static,
     {
-        usage.configure_wasm(
-            metering.fuel,
-            self.prepared
-                .as_ref()
-                .map(|(engine, _, _)| engine.memory_limit),
-        );
-        let module = if let Some((_, module, _)) = &self.prepared {
-            if metering
-                .epoch_interval
-                .is_some_and(|interval| interval != std::time::Duration::from_millis(10))
-            {
-                return Err(RuntimeError::wasm(
-                    "metering",
-                    "prepared engine requires a 10 ms epoch interval",
-                ));
+        let prepared = match &self.prepared {
+            Some(_) => Arc::new(self.clone()),
+            None => {
+                let engine = CoreWasmEngine::new(1)?;
+                Arc::new(engine.prepare(self.module_bytes.clone()).await?)
             }
-            module.clone()
-        } else {
-            // Compilation is finite CPU work, not the lifetime of the guest.
-            let bytes = self.module_bytes.clone();
-            let compile_metering = metering.clone();
-            let module = tokio::task::spawn_blocking(move || {
-                let mut config = wasmtime::Config::new();
-                config.cranelift_nan_canonicalization(true);
-                config.relaxed_simd_deterministic(true);
-                compile_metering.configure_engine(&mut config);
-                // Cooperative slices apply even when the caller disables caps.
-                config.consume_fuel(true);
-                let engine = Engine::new(&config).map_err(|e| RuntimeError::wasm("engine", e))?;
-                Module::new(&engine, bytes).map_err(|e| RuntimeError::wasm("module", e))
-            })
-            .await
-            .map_err(|e| RuntimeError::wasm("compile task", e))??;
-            module
         };
-        let _session = if let Some(session) = &self.session {
-            Some(session.slots.try_acquire().map_err(|_| {
-                RuntimeError::wasm("admission", "assembly exceeded its reserved block count")
-            })?)
-        } else if let Some((engine, _, _)) = &self.prepared {
-            Some(tokio::select! {
-                permit = engine.sessions.acquire() => permit.map_err(|e| RuntimeError::wasm("session admission", e))?,
-                _ = cancel.cancelled() => return Err(RuntimeError::wasm("execution", "guest interrupted during admission")),
-            })
-        } else {
-            None
-        };
-        let engine = module.engine();
-        let linker = Self::async_linker::<S, C>(engine)?;
-        let mut store = Store::new(
-            engine,
-            CoreState {
-                store: root,
+        let outcome = prepared
+            .run_host_async(
+                root,
                 codec,
                 format,
-                usage: Some((usage.clone(), metering.fuel.unwrap_or(u64::MAX))),
-                memory: None,
-                limits: self
-                    .prepared
-                    .as_ref()
-                    .map(|(engine, _, _)| engine.store_limits())
-                    .unwrap_or_default(),
-            },
-        );
-        store.limiter(|state| &mut state.limits);
-        // Fuel yields also let a current-thread executor drive its epoch timer.
-        store
-            .set_fuel(metering.fuel.unwrap_or(u64::MAX))
-            .map_err(|e| RuntimeError::wasm("fuel", e))?;
-        store
-            .fuel_async_yield_interval(Some(100_000))
-            .map_err(|e| RuntimeError::wasm("fuel yield", e))?;
-        metering.arm_store(&mut store, cancel.clone())?;
-        if metering.epoch_interval.is_some() {
-            let epoch_cancel = cancel.clone();
-            store.epoch_deadline_callback(move |context| {
-                if let Some((meter, initial)) = &context.data().usage {
-                    if let Some(memory) = context.data().memory {
-                        meter.sample_wasm(
-                            initial.saturating_sub(context.get_fuel().unwrap_or(*initial)),
-                            memory.data_size(&context),
-                        );
-                    }
-                }
-                if epoch_cancel.is_cancelled() {
-                    Err(wasmtime::Error::msg(
-                        "guest interrupted: immediate shutdown",
-                    ))
-                } else {
-                    Ok(wasmtime::UpdateDeadline::Yield(1))
-                }
-            });
-        }
-        // A shared engine has exactly one ticker, regardless of guest count.
-        let _ticker = if self.prepared.is_none() {
-            metering.start_async_ticker(engine)
-        } else {
-            None
-        };
-        if self.prepared.is_some() && metering.epoch_interval.is_none() {
-            store.set_epoch_deadline(u64::MAX / 2);
-        }
-        let outcome = tokio::select! {
-            result = async {
-        let instance = linker
-            .instantiate_async(&mut store, &module)
-            .await
-            .map_err(|e| RuntimeError::wasm("instantiate", e))?;
-        store.data_mut().memory = instance.get_memory(&mut store, "memory");
-        let run = instance
-            .get_typed_func::<(), i32>(&mut store, "run")
-            .map_err(|e| RuntimeError::wasm("run", e))?;
-        run.call_async(&mut store, ())
-            .await
-            .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
-            } => result,
-            _ = cancel.cancelled() => Err(RuntimeError::wasm("execution", "guest interrupted: immediate shutdown")),
-        };
-        usage.sample_fuel(
-            metering
-                .fuel
-                .unwrap_or(u64::MAX)
-                .saturating_sub(store.get_fuel().unwrap_or(0)),
-        );
-        if let Some(memory) = store.data().memory {
-            usage.sample_wasm(
-                metering
-                    .fuel
-                    .unwrap_or(u64::MAX)
-                    .saturating_sub(store.get_fuel().unwrap_or(0)),
-                memory.data_size(&store),
-            );
-        }
-        outcome
+                crate::ExecutionPolicy {
+                    fuel: metering.fuel,
+                    ..Default::default()
+                },
+                cancel,
+            )
+            .await;
+        usage.replace(outcome.usage);
+        outcome.result
     }
 
     #[allow(clippy::type_complexity)]
@@ -880,6 +876,7 @@ impl CoreWasmBlock {
             .map_err(|e| RuntimeError::wasm("module", e))?;
         let linker = Self::linker::<S, C>(&engine)?;
         let mut store = Store::new(&engine, state);
+        store.limiter(|state| &mut state.limits);
         metering.arm_store(&mut store, cancel)?;
         let instance = linker
             .instantiate(&mut store, &module)
@@ -943,12 +940,16 @@ impl CoreWasmBlock {
             store: NoOpStore,
             codec: NoCodec,
             format: Format::OCTET_STREAM,
-            limits: wasmtime::StoreLimits::default(),
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(64 * 1024 * 1024)
+                .trap_on_grow_failure(true)
+                .build(),
             usage: None,
             memory: None,
+            execution: None,
         };
         let metering = Metering {
-            fuel: Some(10_000_000_000),
+            fuel: Some(10_000_000),
             epoch_interval: None,
         };
         let (mut store, instance, _ticker) =
@@ -977,7 +978,8 @@ impl CoreWasmBlock {
     /// `cancel` interrupts *guest execution* via epoch interruption (when
     /// metering enables it); parked store reads are cancelled by the same
     /// token through the store contract.
-    pub fn run<S, C>(
+    #[cfg(test)]
+    fn run<S, C>(
         &self,
         _id: BlockId,
         root: S,
@@ -994,9 +996,13 @@ impl CoreWasmBlock {
             store: root,
             codec,
             format,
-            limits: wasmtime::StoreLimits::default(),
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(64 * 1024 * 1024)
+                .trap_on_grow_failure(true)
+                .build(),
             usage: None,
             memory: None,
+            execution: None,
         };
         let (mut store, instance, _ticker) = self.instantiate(state, metering, cancel)?;
         let run = instance
@@ -1013,6 +1019,279 @@ impl CoreWasmBlock {
 /// module — used to pick between this binding and the component one.
 pub fn is_component(bytes: &[u8]) -> bool {
     bytes.len() >= 8 && &bytes[..4] == b"\0asm" && bytes[6] == 0x01
+}
+
+impl CoreWasmBlock {
+    async fn host_admission(
+        &self,
+        policy: &crate::ExecutionPolicy,
+        cancel: &CancelToken,
+    ) -> Result<(Module, tokio::sync::OwnedSemaphorePermit, usize)> {
+        policy.ensure_active(cancel)?;
+        let (engine, module, _) = self.prepared.as_ref().ok_or_else(|| {
+            RuntimeError::wasm(
+                "execution",
+                "prepare the artifact before starting owned execution",
+            )
+        })?;
+        let memory = policy.memory_bytes.unwrap_or(engine.memory_limit);
+        if memory == 0 || memory > engine.memory_limit {
+            return Err(RuntimeError::wasm(
+                "policy",
+                "memory limit must be positive and cannot exceed engine ceiling",
+            ));
+        }
+        let admission = async {
+            if let Some(session) = &self.session {
+                // Session reservations are already owned; retain the session and
+                // use its local slots through an Arc semaphore.
+                session.slots.clone().acquire_owned().await
+            } else {
+                engine.sessions.clone().acquire_owned().await
+            }
+        };
+        let deadline = async {
+            if let Some(deadline) = policy.deadline {
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let permit = tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(structfs_core_store::Error::cancelled("execution admission cancelled").into()),
+            _ = deadline => return Err(structfs_core_store::Error::deadline_exceeded("execution admission deadline").into()),
+            permit = admission => permit.map_err(|e| RuntimeError::wasm("admission", e))?,
+        };
+        policy.ensure_active(cancel)?;
+        Ok((module.clone(), permit, memory))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn host_store<S, C>(
+        module: &Module,
+        host: S,
+        codec: C,
+        format: Format,
+        memory: usize,
+        policy: &crate::ExecutionPolicy,
+        cancel: &CancelToken,
+        usage: &crate::ExecutionMeter,
+    ) -> Store<CoreState<S, C>> {
+        usage.configure_wasm(policy.fuel, Some(memory));
+        Store::new(
+            module.engine(),
+            CoreState {
+                store: host,
+                codec,
+                format,
+                limits: wasmtime::StoreLimitsBuilder::new()
+                    .memory_size(memory)
+                    .trap_on_grow_failure(policy.growth_failure == crate::GrowthFailure::Trap)
+                    .memories(1)
+                    .instances(1)
+                    .tables(1)
+                    .table_elements(100_000)
+                    .build(),
+                usage: Some((usage.clone(), policy.fuel.unwrap_or(u64::MAX))),
+                memory: None,
+                execution: Some((policy.clone(), cancel.clone())),
+            },
+        )
+    }
+
+    fn arm_host<S: Send, C: Send>(
+        store: &mut Store<CoreState<S, C>>,
+        asynchronous: bool,
+    ) -> Result<()> {
+        store.limiter(|state| &mut state.limits);
+        let (policy, cancel) = store.data().execution.as_ref().unwrap().clone();
+        policy.ensure_active(&cancel)?;
+        store
+            .set_fuel(policy.fuel.unwrap_or(u64::MAX))
+            .map_err(|e| RuntimeError::wasm("fuel", e))?;
+        if asynchronous {
+            store
+                .fuel_async_yield_interval(Some(100_000))
+                .map_err(|e| RuntimeError::wasm("fuel yield", e))?;
+        }
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |_| {
+            policy
+                .ensure_active(&cancel)
+                .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+            Ok(if asynchronous {
+                wasmtime::UpdateDeadline::Yield(1)
+            } else {
+                wasmtime::UpdateDeadline::Continue(1)
+            })
+        });
+        Ok(())
+    }
+
+    fn finish_host<S, C>(
+        mut store: Store<CoreState<S, C>>,
+        mut result: Result<i32>,
+        host_panicked: bool,
+        usage: crate::ExecutionMeter,
+    ) -> crate::ExecutionOutcome<S> {
+        let (policy, cancel) = store.data().execution.as_ref().unwrap();
+        if !host_panicked {
+            if let Err(error) = policy.ensure_active(cancel) {
+                result = Err(error);
+            }
+        }
+        let fuel = policy
+            .fuel
+            .unwrap_or(u64::MAX)
+            .saturating_sub(store.get_fuel().unwrap_or(0));
+        if let Some(memory) = store.data().memory {
+            usage.sample_wasm(fuel, memory.data_size(&store));
+        } else {
+            usage.sample_fuel(fuel);
+        }
+        // Extract the host before dropping the Wasm store, then mark memory reclaimed.
+        let _ = &mut store;
+        let host = store.into_data().store;
+        usage.finish();
+        crate::ExecutionOutcome {
+            result,
+            host,
+            usage: usage.snapshot(),
+            host_panicked,
+        }
+    }
+
+    pub(crate) async fn run_host_sync<S, C>(
+        self: &Arc<Self>,
+        host: S,
+        codec: C,
+        format: Format,
+        policy: crate::ExecutionPolicy,
+        cancel: CancelToken,
+    ) -> crate::ExecutionOutcome<S>
+    where
+        S: Reader + Writer + 'static,
+        C: Codec + Send + Sync + 'static,
+    {
+        let usage = crate::ExecutionMeter::default();
+        let (module, permit, memory) = match self.host_admission(&policy, &cancel).await {
+            Ok(admission) => admission,
+            Err(error) => {
+                usage.finish();
+                return crate::ExecutionOutcome {
+                    result: Err(error),
+                    host,
+                    usage: usage.snapshot(),
+                    host_panicked: false,
+                };
+            }
+        };
+        // Retain code, engine ticker, and assembly reservation while blocking.
+        let block = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _keep = (block, permit);
+            let mut store = Self::host_store(
+                &module, host, codec, format, memory, &policy, &cancel, &usage,
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::arm_host(&mut store, false)?;
+                let linker = Self::linker::<S, C>(module.engine())?;
+                let instance = linker
+                    .instantiate(&mut store, &module)
+                    .map_err(|e| RuntimeError::wasm("instantiate", format!("{e:#}")))?;
+                store.data_mut().memory = instance.get_memory(&mut store, "memory");
+                let run = instance
+                    .get_typed_func::<(), i32>(&mut store, "run")
+                    .map_err(|e| RuntimeError::wasm("run", e))?;
+                run.call(&mut store, ())
+                    .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
+            }));
+            let panicked = result.is_err();
+            Self::finish_host(
+                store,
+                result.unwrap_or_else(|_| {
+                    Err(RuntimeError::wasm(
+                        "host panic",
+                        "host state may be inconsistent",
+                    ))
+                }),
+                panicked,
+                usage,
+            )
+        })
+        .await
+        .expect("blocking execution catches host panics; keep executor alive until joined")
+    }
+
+    pub(crate) async fn run_host_async<S, C>(
+        self: &Arc<Self>,
+        host: S,
+        codec: C,
+        format: Format,
+        policy: crate::ExecutionPolicy,
+        cancel: CancelToken,
+    ) -> crate::ExecutionOutcome<S>
+    where
+        S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
+        C: Codec + Send + Sync + 'static,
+    {
+        let usage = crate::ExecutionMeter::default();
+        let (module, _permit, memory) = match self.host_admission(&policy, &cancel).await {
+            Ok(admission) => admission,
+            Err(error) => {
+                usage.finish();
+                return crate::ExecutionOutcome {
+                    result: Err(error),
+                    host,
+                    usage: usage.snapshot(),
+                    host_panicked: false,
+                };
+            }
+        };
+        let mut store = Self::host_store(
+            &module, host, codec, format, memory, &policy, &cancel, &usage,
+        );
+        let result = {
+            let work = async {
+                Self::arm_host(&mut store, true)?;
+                let linker = Self::async_linker::<S, C>(module.engine())?;
+                let instance = linker
+                    .instantiate_async(&mut store, &module)
+                    .await
+                    .map_err(|e| RuntimeError::wasm("instantiate", format!("{e:#}")))?;
+                store.data_mut().memory = instance.get_memory(&mut store, "memory");
+                let run = instance
+                    .get_typed_func::<(), i32>(&mut store, "run")
+                    .map_err(|e| RuntimeError::wasm("run", e))?;
+                run.call_async(&mut store, ())
+                    .await
+                    .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
+            };
+            let mut work = std::pin::pin!(work);
+            std::future::poll_fn(|cx| {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    std::future::Future::poll(work.as_mut(), cx)
+                })) {
+                    Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                    Ok(std::task::Poll::Ready(result)) => std::task::Poll::Ready(Ok(result)),
+                    Err(_) => std::task::Poll::Ready(Err(())),
+                }
+            })
+            .await
+        };
+        let panicked = result.is_err();
+        Self::finish_host(
+            store,
+            result.unwrap_or_else(|_| {
+                Err(RuntimeError::wasm(
+                    "host panic",
+                    "host state may be inconsistent",
+                ))
+            }),
+            panicked,
+            usage,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1324,6 +1603,11 @@ mod tests {
                 r#"(module
                 (import "structfs" "read" (func $read (param i32 i32 i32) (result i32)))
                 (memory (export "memory") 1)
+                (data (i32.const 512) "{{}}")
+                (func (export "block_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "manifest") (param $ret i32) (result i32)
+                    local.get $ret i32.const 512 i32.store
+                    local.get $ret i32.const 4 i32.add i32.const 2 i32.store i32.const 0)
                 (func (export "run") (result i32)
                     (call $read (i32.const {ptr}) (i32.const {len}) (i32.const 0))))"#
             );
@@ -1433,7 +1717,10 @@ mod tests {
         .expect("guest starved the executor")
         .unwrap_err();
         timer.await.unwrap();
-        assert!(err.to_string().contains("interrupted"), "{err}");
+        assert!(
+            err.to_string().contains("interrupted") || err.to_string().contains("cancelled"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -1451,20 +1738,17 @@ mod tests {
                 (then unreachable))"#,
         );
         let prepared = engine.prepare(guest.into_bytes()).await.unwrap();
-        assert_eq!(
-            prepared
-                .run_async(
-                    BlockId::new(),
-                    NoOpStore,
-                    JsonCodec,
-                    Format::JSON,
-                    &Metering::disabled(),
-                    CancelToken::new()
-                )
-                .await
-                .unwrap(),
-            0
-        );
+        assert!(prepared
+            .run_async(
+                BlockId::new(),
+                NoOpStore,
+                JsonCodec,
+                Format::JSON,
+                &Metering::disabled(),
+                CancelToken::new()
+            )
+            .await
+            .is_err());
     }
 
     #[test]

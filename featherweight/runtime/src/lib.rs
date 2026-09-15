@@ -103,3 +103,8 @@ pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
 pub use transcript::{
     SeekPoint, TranscriptAnswer, TranscriptEntry, TranscriptMode, TranscriptProvider,
 };
+
+mod hosting;
+pub use hosting::{
+    ExecutionOutcome, ExecutionOwner, ExecutionPolicy, ExecutionStartError, GrowthFailure,
+};

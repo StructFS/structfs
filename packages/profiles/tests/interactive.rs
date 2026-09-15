@@ -142,3 +142,120 @@ fn persistence_acknowledgments_cannot_claim_memory_is_durable() {
     ack.durability = Durability::FileSynced;
     ack.validate().unwrap();
 }
+
+#[cfg(feature = "host")]
+#[tokio::test]
+async fn shared_service_client_preserves_session_acceptance_and_release() {
+    use std::{sync::Arc, time::Duration};
+    use structfs_core_store::{path, NoCodec, Record, Value};
+    use structfs_serde_store::{from_value, to_value};
+    use structfs_service::*;
+    let supervisor = CleanupSupervisor::new(2).unwrap();
+    let owner = supervisor.owner(OwnerLimits::default()).unwrap();
+    let host = Arc::new(HeadlessHost::default());
+    assert!(host.open(&owner.handle(), "invalid", 0, 1024).is_err());
+    let session = host.open(&owner.handle(), "surface", 2, 1024).unwrap();
+    let router = Router::new(vec![Mount::new(
+        path!(""),
+        path!(""),
+        session.clone(),
+        Arc::new(BudgetAdmission {
+            budget: CallBudget::<String>::new(CallLimits::default()),
+            key: "session".into(),
+        }),
+    )])
+    .unwrap();
+    let client = router.client();
+    let initial: SessionStatus = from_value(
+        client
+            .read(&path!("status"))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_value(&NoCodec)
+            .unwrap(),
+    )
+    .unwrap();
+    let event = InputEnvelope {
+        version: 1,
+        session: initial.session,
+        sequence: 1,
+        input: Input::Key { text: "x".into() },
+    };
+    client
+        .write(&path!("input"), Record::parsed(to_value(&event).unwrap()))
+        .await
+        .unwrap();
+    let delivered: InputEnvelope = from_value(
+        client
+            .read(&path!("input/next"))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_value(&NoCodec)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(delivered.sequence, 1);
+    assert!(client.read(&path!("input/next")).await.is_err());
+    assert!(client
+        .write(&path!("processed"), Record::parsed(Value::Unsigned(2)))
+        .await
+        .is_err());
+    client
+        .write(&path!("processed"), Record::parsed(Value::Unsigned(1)))
+        .await
+        .unwrap();
+    let token = Token {
+        epoch: "e".into(),
+        revision: 1,
+    };
+    client
+        .write(
+            &path!("presented"),
+            Record::parsed(to_value(&token).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.status().processed, 1);
+    assert_eq!(session.status().rendered, Some(token));
+    assert!(client.read(&path!("unknown")).await.is_err());
+    assert!(client
+        .write(&path!("unknown"), Record::parsed(Value::Null))
+        .await
+        .is_err());
+    assert!(client
+        .write(&path!("release"), Record::parsed(Value::Bool(true)))
+        .await
+        .is_err());
+    assert!(session
+        .presented(Token {
+            epoch: "x".repeat(129),
+            revision: 2
+        })
+        .is_err());
+    assert!(session
+        .presented(Token {
+            epoch: "different".into(),
+            revision: 2
+        })
+        .is_err());
+    let pending_path = path!("input/next");
+    let pending = client.read(&pending_path);
+    tokio::pin!(pending);
+    assert!(tokio::time::timeout(Duration::from_millis(1), &mut pending)
+        .await
+        .is_err());
+    client
+        .write(&path!("release"), Record::parsed(Value::Null))
+        .await
+        .unwrap();
+    assert!(pending.await.is_err());
+    assert!(session
+        .presented(Token {
+            epoch: "e".into(),
+            revision: 2
+        })
+        .is_err());
+    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+}

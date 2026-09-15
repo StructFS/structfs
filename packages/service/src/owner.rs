@@ -300,6 +300,14 @@ impl Owner {
             p.release();
         }
     }
+    /// Close admissions and join all resources without a timeout. Dropping this
+    /// wait leaves cleanup owned by the supervisor. Failed cleanup must be
+    /// acknowledged before this can complete; use close for a bounded report.
+    pub async fn join(&self) -> CloseReport {
+        self.cancel();
+        self.handle.0.join().await;
+        self.handle.report()
+    }
     pub async fn close(&self, timeout: Duration) -> CloseReport {
         self.cancel();
         let _ = tokio::time::timeout(timeout, self.handle.0.join()).await;

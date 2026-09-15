@@ -28,6 +28,21 @@ use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{parse_macro_input, Expr, Lit, Token};
 
+struct Input {
+    root: syn::Path,
+    args: Punctuated<Expr, Token![,]>,
+}
+impl syn::parse::Parse for Input {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let root = input.parse()?;
+        input.parse::<Token![;]>()?;
+        Ok(Self {
+            root,
+            args: Punctuated::parse_terminated(input)?,
+        })
+    }
+}
+
 /// Build a `Path` from a mix of literal and runtime components.
 ///
 /// - **String literals** are split on `/` and each component is validated
@@ -39,11 +54,10 @@ use syn::{parse_macro_input, Expr, Lit, Token};
 ///
 /// Returns a `structfs_core_store::Path`.
 ///
-/// The expansion requires a direct dependency named `structfs-core-store`,
-/// including when this macro is imported through a facade or reexport.
+/// Implementation detail: invoke the hygienic `structfs_core_store::path!` facade.
 #[proc_macro]
 pub fn path(input: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(input with Punctuated::<Expr, Token![,]>::parse_terminated);
+    let Input { root, args } = parse_macro_input!(input as Input);
 
     let mut component_exprs = Vec::new();
 
@@ -91,7 +105,7 @@ pub fn path(input: TokenStream) -> TokenStream {
             other => {
                 // An explicit borrow enforces the validated type without consuming it.
                 component_exprs.push(quote! {{
-                    let component: &::structfs_core_store::PathComponent = &(#other);
+                    let component: &#root::PathComponent = &(#other);
                     ::std::string::String::from(component.validated_str())
                 }});
             }
@@ -102,7 +116,7 @@ pub fn path(input: TokenStream) -> TokenStream {
     // PathComponent values at their construction site. The constructor
     // also validates in release builds to protect direct callers.
     quote! {
-        ::structfs_core_store::Path::from_validated_components(
+        #root::Path::from_validated_components(
             ::std::vec![#(#component_exprs),*]
         )
     }

@@ -6,4 +6,4 @@ error[E0308]: mismatched types
   |
   = note: expected reference `&PathComponent`
              found reference `&PretendComponent`
-  = note: this error originates in the macro `path` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `$crate::__path` which comes from the expansion of the macro `path` (in Nightly builds, run with -Z macro-backtrace for more info)

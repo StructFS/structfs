@@ -82,3 +82,11 @@ To regenerate the cross-host fixtures after changing the probe or the
 wire format: `node test/record-fixture.ts` here, and
 `cargo test -p featherweight-runtime --test transcript -- --ignored regenerate`
 on the native side.
+
+## Hosting support boundary
+
+The 0.4 native core-Wasm recoverable-host API is not implemented by this adapter.
+It does not advertise host-state recovery or arbitrary ExecutionPolicy support.
+Its existing documented execution/teardown contract remains separate. Matching
+core import signatures is not a claim that native scheduling and limit policies
+are available here. Pin SDK/runtime pairs to the documented specification snapshot.

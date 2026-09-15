@@ -28,8 +28,7 @@ use wasmtime::{Config, Engine, Store};
 
 use featherweight_runtime::core_wasm::is_component;
 use featherweight_runtime::{
-    ArtifactLoader, BlockId, Metering, Namespace, NoOpStore, Result, Runtime, RuntimeError,
-    WasmBlockDriver,
+    ArtifactLoader, BlockId, Metering, NoOpStore, Result, Runtime, RuntimeError, WasmBlockDriver,
 };
 
 // Generate bindings from the component projection of the Block ABI
@@ -254,24 +253,28 @@ impl WasmBlockDriver for ComponentDriver {
         self.0.manifest()
     }
 
-    fn run(
-        &self,
-        id: BlockId,
-        namespace: Namespace,
-        format: Format,
-        metering: &Metering,
-        cancel: CancelToken,
-    ) -> Result<i32> {
-        self.0
-            .run(
-                id,
-                namespace,
-                MultiCodec::standard(),
-                format,
-                metering,
-                cancel,
-            )
-            .map(|()| 0)
+    fn execute(
+        self: Arc<Self>,
+        context: featherweight_runtime::DriverContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
+        Box::pin(async move {
+            // Joining the worker is required even after cancellation; the namespace
+            // and the component store remain owned until synchronous calls finish.
+            let task = tokio::task::spawn_blocking(move || {
+                self.0
+                    .run(
+                        context.id,
+                        context.namespace,
+                        MultiCodec::standard(),
+                        context.format,
+                        &context.metering,
+                        context.cancel,
+                    )
+                    .map(|()| 0)
+            });
+            task.await
+                .map_err(|e| RuntimeError::wasm("component task", e))?
+        })
     }
 }
 

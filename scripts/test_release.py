@@ -15,6 +15,14 @@ def metadata(*packages):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_status_distinguishes_missing_published_and_yanked(self):
+        packages = [package("absent"), package("live"), package("withdrawn")]
+        version = packages[0]["version"]
+        record = release.release_status(packages, lambda name: {} if name == "absent" else
+                                        {version: {"yanked": name == "withdrawn"}})
+        self.assertEqual([e["status"] for e in record["packages"].values()],
+                         ["unpublished", "published", "yanked"])
+
     def test_publication_policy(self):
         data = metadata(package("default"), package("private", []),
                         package("explicit", ["crates-io"]), package("other", ["internal"]))

@@ -85,7 +85,7 @@ ensure_coverage_data() {
     echo -e "${DIM}Running tests with coverage instrumentation...${NC}" >&2
 
     # Run tests once to generate profiling data, capture summary output
-    cargo llvm-cov --workspace 2>&1 | tee "$summary_file" | grep -E "^(running|test |TOTAL)" >&2 || true
+    cargo llvm-cov --workspace --all-features --locked 2>&1 | tee "$summary_file" | grep -E "^(running|test |TOTAL)" >&2 || true
 
     # Generate detailed line-by-line output without re-running tests
     echo -e "${DIM}Generating detailed coverage report...${NC}" >&2
@@ -265,10 +265,10 @@ generate_html() {
 
     if [[ "$skip_tests" != "true" ]]; then
         echo "Running tests with coverage instrumentation..."
-        cargo llvm-cov --workspace --html --output-dir "$COVERAGE_DIR"
+        cargo llvm-cov --workspace --all-features --locked --html --output-dir "$COVERAGE_DIR"
     else
         echo "Generating HTML from cached data..."
-        cargo llvm-cov --workspace --html --output-dir "$COVERAGE_DIR" --no-run
+        cargo llvm-cov --workspace --all-features --locked --html --output-dir "$COVERAGE_DIR" --no-run
     fi
 
     echo -e "${GREEN}HTML report generated at: $COVERAGE_DIR/html/index.html${NC}"
@@ -295,7 +295,7 @@ generate_lcov() {
     if [[ "$skip_tests" != "true" ]]; then
         echo "Running tests with coverage instrumentation..."
     fi
-    cargo llvm-cov --workspace --lcov --output-path "$COVERAGE_DIR/lcov.info"
+    cargo llvm-cov --workspace --all-features --locked --lcov --output-path "$COVERAGE_DIR/lcov.info"
 
     echo -e "${GREEN}LCOV report generated at: $COVERAGE_DIR/lcov.info${NC}"
 }
@@ -308,7 +308,7 @@ generate_json() {
     if [[ "$skip_tests" != "true" ]]; then
         echo "Running tests with coverage instrumentation..."
     fi
-    cargo llvm-cov --workspace --json --output-path "$COVERAGE_DIR/coverage.json"
+    cargo llvm-cov --workspace --all-features --locked --json --output-path "$COVERAGE_DIR/coverage.json"
 
     echo -e "${GREEN}JSON report generated at: $COVERAGE_DIR/coverage.json${NC}"
 }

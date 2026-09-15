@@ -1,20 +1,20 @@
-# Isotope 2026-09-12 specification candidate
+# Isotope 2026-09-14 specification candidate
 
-Status: frozen candidate for review; not tagged or published.
+Status: 0.4 implementation candidate; not tagged or published.
+Registry evidence is maintained in [release status](../docs/release-status.md).
 
-The normative source is `isotope/spec/`. This snapshot accompanies the StructFS
-and Featherweight 0.2.0 contracts. The implementation checkout now targets
-unreleased 0.3.0; see the project changelog. Isotope is a specification, not a Cargo package.
-Release it with the annotated tag `isotope/spec-2026-09-12` on the same reviewed
-commit as the implementing crates. Site builds copy the normative source; do not
+The normative source is `isotope/spec/`. This snapshot accompanies the StructFS and Featherweight 0.4.0 candidate.
+The previous 0.3 packages are published. Isotope is a specification, not a Cargo
+package. A future specification tag must identify the reviewed implementation
+commit; this work does not create or publish a tag. Site builds copy the normative source; do not
 edit generated site chapters independently.
 
 ## Independent version domains
 
 | Contract | Candidate |
 | --- | --- |
-| Isotope specification snapshot | 2026-09-12 |
-| StructFS / Featherweight crates | 0.2.0 baseline; 0.3.0 implementation development |
+| Isotope specification snapshot | 2026-09-14 |
+| StructFS / Featherweight crates | 0.4.0 candidate |
 | StructFS Value and canonical tagged JSON | v1 |
 | Core-Wasm binding | Spec 11 in this snapshot; exactly `structfs.read` and `structfs.write` imports |
 | Optional capability profiles | v1, discovered per provider |
@@ -48,3 +48,16 @@ The application fixtures use bounded fake network/process providers and a journa
 with explicitly limited recovery guarantees. Read the
 [application evidence](../docs/design/2026-09-12-application-profiles-and-fixtures.md)
 before transferring those claims to an application.
+
+## 0.4 contract additions and support
+
+Owned recoverable hosting is a native core-Wasm embedding API. The component
+adapter implements the full driver context with joined blocking execution; it
+and the browser host do not expose the new owned host-state recovery API. No
+adapter may claim it implements a policy merely because it accepts the same
+Wasm imports. Pin the 2026-09-14 snapshot with 0.4 runtime/SDKs; older handwritten
+server responses without explicit presence must be rebuilt or adapted.
+
+Value v1 and existing optional profile versions remain unchanged. Store conventions
+apply at exposed interfaces; internal snapshot and mutation representations remain
+implementation choices. See [0.4 migration](../docs/migration-0.4.md).

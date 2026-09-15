@@ -23,7 +23,6 @@ use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
 use crate::transcript::{BlockTranscript, PreambleProfile, TranscriptMode};
 use crate::turnstile::Turnstile;
-use structfs_handles::CancelToken;
 
 /// A loaded wasm artifact in some binding of the Block ABI: it serves
 /// its manifest pre-wiring and runs over the block's namespace.
@@ -42,58 +41,15 @@ pub trait WasmBlockDriver: Send + Sync + 'static {
         None
     }
 
-    /// Complete execution context. Legacy adapters inherit the blocking/async
-    /// bridge; new adapters override this method directly.
+    /// Execute with the full lifecycle, cancellation and accounting context.
+    /// Adapters must implement this directly; there is no implicit blocking bridge.
     fn execute(
         self: Arc<Self>,
         context: crate::DriverContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
-        self.run_async(
-            context.id,
-            context.namespace,
-            context.format,
-            context.metering,
-            context.cancel,
-        )
-    }
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>>;
 
-    /// The block's JSON manifest (spec 01), retrieved pre-wiring.
+    /// The block's JSON manifest, retrieved before wiring.
     fn manifest(&self) -> Result<Vec<u8>>;
-
-    /// Async execution entry point. Synchronous binding adapters use the
-    /// explicit blocking fallback; core-Wasm overrides this with Wasmtime fibers.
-    fn run_async(
-        self: Arc<Self>,
-        id: BlockId,
-        namespace: Namespace,
-        format: Format,
-        metering: Metering,
-        cancel: CancelToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
-        Box::pin(async move {
-            crate::turnstile::blocking(move || self.run(id, namespace, format, &metering, cancel))
-                .await
-                .map_err(|e| RuntimeError::wasm("driver task", e))?
-        })
-    }
-
-    /// Run the block over its namespace in the declared format; returns
-    /// the guest's exit code. The code is advisory per spec 11 — a
-    /// `shutdown/complete` the block wrote takes precedence.
-    fn run(
-        &self,
-        id: BlockId,
-        namespace: Namespace,
-        format: Format,
-        metering: &Metering,
-        _cancel: CancelToken,
-    ) -> Result<i32> {
-        let _ = (id, namespace, format, metering);
-        Err(RuntimeError::wasm(
-            "driver",
-            "synchronous execution is not supported",
-        ))
-    }
 }
 
 /// Recognizes and loads wasm artifacts for one binding of the Block ABI.
@@ -116,9 +72,9 @@ impl ArtifactLoader for CoreWasmLoader {
     }
 
     fn load(&self, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
-        Ok(Arc::new(CoreWasmDriver(Arc::new(CoreWasmBlock::new(
-            bytes,
-        )))))
+        Ok(Arc::new(CoreWasmDriver(Arc::new(
+            CoreWasmBlock::prepare_for_loader(bytes)?,
+        ))))
     }
 }
 
@@ -144,48 +100,8 @@ impl WasmBlockDriver for CoreWasmDriver {
         })
     }
 
-    fn run_async(
-        self: Arc<Self>,
-        id: BlockId,
-        namespace: Namespace,
-        format: Format,
-        metering: Metering,
-        cancel: CancelToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
-        Box::pin(async move {
-            self.0
-                .run_async(
-                    id,
-                    namespace,
-                    MultiCodec::standard(),
-                    format,
-                    &metering,
-                    cancel,
-                )
-                .await
-        })
-    }
-
     fn manifest(&self) -> Result<Vec<u8>> {
         self.0.manifest()
-    }
-
-    fn run(
-        &self,
-        id: BlockId,
-        namespace: Namespace,
-        format: Format,
-        metering: &Metering,
-        cancel: CancelToken,
-    ) -> Result<i32> {
-        self.0.run(
-            id,
-            namespace,
-            MultiCodec::standard(),
-            format,
-            metering,
-            cancel,
-        )
     }
 }
 
@@ -974,6 +890,8 @@ impl RuntimeInner {
 
     /// Load a wasm artifact through the registered binding loaders.
     fn load_artifact(&self, artifact: &str, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
+        // with_handle supports synchronous callers outside an entered runtime.
+        let _entered = self.ctx.handle.enter();
         let loaders = self
             .loaders
             .lock()

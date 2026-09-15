@@ -68,6 +68,23 @@ impl StateClient {
         let _ = h.release().await;
         Ok(descriptor.token)
     }
+    /// Conventional store assignment. Null deletes; non-Null values replace the
+    /// subtree. The internal batch API can still explicitly store Null. Paths
+    /// remain relative to this client's granted view; writes are never retried.
+    pub async fn write(&self, path: &Path, value: Value) -> Result<Token, ClientError> {
+        let mutation = if value.is_null() {
+            Mutation::Delete {
+                path: path.to_string(),
+            }
+        } else {
+            Mutation::Set {
+                path: path.to_string(),
+                value,
+            }
+        };
+        self.batch(None, vec![mutation]).await
+    }
+
     pub async fn data(&self, path: &Path) -> Result<Option<Value>, ClientError> {
         self.client
             .read(&structfs_core_store::path!("data").join(path))

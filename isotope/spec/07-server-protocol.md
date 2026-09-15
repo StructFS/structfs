@@ -84,6 +84,7 @@ The Block writes a Response to the `respond_to` path:
 ```json
 {
     "result": "ok",
+    "present": true,
     "value": {"id": 123, "name": "Alice"},
     "path": null
 }
@@ -103,20 +104,20 @@ The Block writes a Response to the `respond_to` path:
 ```json
 {
     "result": "ok",
+    "present": true,
     "value": {"id": 123, "name": "Alice"}
 }
 ```
 
-The `value` is what the caller's read returns. New servers MUST include
+The `value` is what the caller's read returns. Servers MUST include
 `"present": true` for present values, including Null. Absence is
 `{"result":"ok","present":false}` with no `value` field. True without a value,
 false with a value, and non-boolean presence markers are malformed responses.
 
-For compatibility, an unmarked response with a missing or Null value remains
-absent. Runtime `protocol::ok_value` emits explicit presence and
-`protocol::ok_absent` emits absence. Servers using `ok_value(Null)` to mean
-absence must migrate to `ok_absent()`. The reference guest's read responses also
-use explicit presence. This is an envelope extension, not an ABI import change.
+An unmarked read response is malformed. Runtime `protocol::ok_value` emits explicit
+presence and `protocol::ok_absent` emits absence. Update handwritten servers and
+rebuild guests that emitted historical unmarked responses. Presence describes a
+response; it does not impose a representation on internal implementation stores.
 
 ### Response for Write
 
