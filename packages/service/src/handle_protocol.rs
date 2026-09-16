@@ -1,10 +1,6 @@
 //! Join handle cleanup using the existing service owner and supervisor.
 use crate::{OwnerHandle, Registration, ResourceKind};
-use std::{
-    future::Future,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{future::Future, sync::Arc, time::Duration};
 use structfs_core_store::{DetachedFuture, Error, Path, Record, Value};
 use structfs_handles::{HandleCx, HandleProtocol};
 
@@ -42,20 +38,28 @@ where
 {
     type Handle = SupervisedHandle<P::Handle>;
     fn open(&self, cx: HandleCx, request: Value) -> Result<Self::Handle, Error> {
-        let slot = Arc::new(Mutex::new(None::<Arc<P::Handle>>));
-        // Hold the slot while opening: a simultaneous owner close must observe
-        // the eventual handle, even if it starts before open returns.
-        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-        let cleanup = slot.clone();
+        // The cleanup task must not block an executor worker while synchronous
+        // open is in progress. The channel retains late delivery through owner
+        // cancellation; an open error/panic closes it without delivering state.
+        let (deliver, opened) = tokio::sync::oneshot::channel::<Arc<P::Handle>>();
         let protocol = self.protocol.clone();
         let join = self.join.clone();
         let registration = self
             .owner
             .register(ResourceKind::Provider, 0, move || async move {
-                let value = cleanup.lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some(value) = value {
-                    protocol.close(value.clone());
+                if let Ok(value) = opened.await {
+                    let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        protocol.close(value.clone());
+                    }));
+                    // A shutdown-hook panic must not skip joining accepted work.
                     join(value).await?;
+                    if requested.is_err() {
+                        return Err(Error::store(
+                            "handle",
+                            "close",
+                            "shutdown hook panicked after cleanup joined",
+                        ));
+                    }
                 }
                 Ok(())
             })?;
@@ -66,8 +70,9 @@ where
             },
             request,
         )?);
-        *guard = Some(value.clone());
-        drop(guard);
+        // The owner retains the receiver until opening resolves, even after
+        // cancellation. Executor destruction is outside the hosting contract.
+        let _ = deliver.send(value.clone());
         Ok(SupervisedHandle {
             value,
             registration,

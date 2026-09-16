@@ -16,4 +16,4 @@ The [adoption-contract supplement](03-adoption-contracts.md) extends the 0.4
 candidate with joined handle cleanup, explicit persistence acknowledgement and
 recovery, streaming HTTP/SSE, names-only discovery, and structured codec diagnostics.
 
-Current candidate evidence: [supplement validation](../docs/release-validation-supplement-2026-09-15.md).
+Current candidate evidence: [supplement follow-up audit](../docs/ox-supplement-audit-2026-09-16.md).

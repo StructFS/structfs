@@ -16,6 +16,9 @@ completed abandoned tombstones. The conservative default does not infer completi
 It reserves a cleanup registration before invoking the inner protocol's open,
 uses that registration's cancellation token for parked reads, and runs inner
 close followed by the supplied producer-join callback under the existing owner.
+An awaited channel hands the opened handle to cleanup, so closing the owner
+during synchronous open does not block an executor worker. A panic in inner close
+still runs the join callback before reporting failure (with unwinding enabled).
 The callback must await accepted work and publish terminal status. The configured
 wait timeout returns an error while ownership remains with the supervisor.
 Failures remain in CloseReport until explicitly reconciled/acknowledged. Dropping

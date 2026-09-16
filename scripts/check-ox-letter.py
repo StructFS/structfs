@@ -17,6 +17,7 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ox", type=Path, help="Ox checkout (read only)")
+    parser.add_argument("--sse", action="store_true", help="Probe the supplement's SSE framing tests")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     source = args.ox.resolve() / "crates/horns-core/src"
@@ -24,10 +25,46 @@ def main():
     (output / "src").mkdir()
     hashes = {}
     patches = []
-    for name in ("subscription.rs", "path_serde.rs", "write.rs"):
+    names = ("subscription.rs", "path_serde.rs", "write.rs")
+    if args.sse:
+        source = args.ox.resolve() / "crates/ox-gate/src"
+        names = ("sse_framing.rs",)
+    for name in names:
         original = (source / name).read_text()
         hashes[name] = hashlib.sha256(original.encode()).hexdigest()
         migrated = original
+        if args.sse:
+            # Test-only shape adapter. Ox replaces malformed UTF-8; StructFS
+            # rejects it. This probe does not claim equivalence for that policy.
+            migrated = '''#[cfg(test)]
+const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(test)]
+#[derive(Debug)]
+struct FramingError { frames: Vec<String> }
+#[cfg(test)]
+struct SseFramer(structfs_http::sse::SseFramer);
+#[cfg(test)]
+impl Default for SseFramer {
+    fn default() -> Self { Self(structfs_http::sse::SseFramer::new(MAX_FRAME_BYTES)) }
+}
+#[cfg(test)]
+impl SseFramer {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, FramingError> {
+        let mut frames = Vec::new();
+        for result in self.0.push(bytes) {
+            match result {
+                Ok(frame) => frames.push(frame.data),
+                Err(_) => return Err(FramingError { frames }),
+            }
+        }
+        Ok(frames)
+    }
+    fn finish(&mut self) -> Vec<String> {
+        self.0.finish().into_iter().map(|frame|
+            frame.expect("Ox probe fixtures require valid UTF-8").data).collect()
+    }
+}
+''' + original[original.index("#[cfg(test)]"):]
         if name == "subscription.rs":
             begin = migrated.index("                let plen = prefix.len();")
             end = migrated.index("\n            }", begin)
@@ -43,7 +80,7 @@ def main():
         patches.extend(difflib.unified_diff(original.splitlines(True), migrated.splitlines(True),
                                            fromfile=f"a/{name}", tofile=f"b/{name}"))
     (output / "migration.patch").write_text("".join(patches))
-    (output / "src/lib.rs").write_text("pub mod subscription;\npub mod path_serde;\npub mod write;\n")
+    (output / "src/lib.rs").write_text("".join(f"pub mod {Path(name).stem};\n" for name in names))
     core_path = json.dumps(str(root / "packages/core-store"))
     (output / "Cargo.toml").write_text(f'''[package]
 name = "ox-letter-adoption-probe"
@@ -56,12 +93,18 @@ serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 tokio = {{ version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }}
 ''')
+    if args.sse:
+        with (output / "Cargo.toml").open("a") as manifest:
+            manifest.write("structfs-http = { path = "
+                           + json.dumps(str(root / "packages/http"))
+                           + ', default-features = false }\n')
     # Reuse the candidate's dependency versions. Cargo prunes this copied lockfile
     # to the probe's graph; it never changes either repository's lockfile.
     (output / "Cargo.lock").write_bytes((root / "Cargo.lock").read_bytes())
     provenance = {
         "ox_head": subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip(),
         "source_sha256": hashes,
+        "probe": "sse" if args.sse else "subscription",
     }
     print(f"Probe: {output}", flush=True)
     with (output / "cargo-test.log").open("w") as log:

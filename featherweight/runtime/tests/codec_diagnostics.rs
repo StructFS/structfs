@@ -46,6 +46,20 @@ impl Writer for Host {
         }
     }
 }
+#[async_trait::async_trait]
+impl structfs_core_store::AsyncReader for Host {
+    async fn read_async(&mut self, p: &Path) -> Result<Option<Record>, Error> {
+        tokio::task::yield_now().await;
+        self.read(p)
+    }
+}
+#[async_trait::async_trait]
+impl structfs_core_store::AsyncWriter for Host {
+    async fn write_async(&mut self, p: &Path, r: Record) -> Result<Path, Error> {
+        tokio::task::yield_now().await;
+        self.write(p, r)
+    }
+}
 #[tokio::test]
 async fn codec_details_cross_read_write_imports_and_serving_envelopes() {
     let engine = CoreWasmEngine::new(1).unwrap();
@@ -71,7 +85,7 @@ async fn codec_details_cross_read_write_imports_and_serving_envelopes() {
                 local.get $status))"#
         );
         let code = Arc::new(engine.prepare(wat.into_bytes()).await.unwrap());
-        for kind in 0..3 {
+        for (kind, asynchronous) in (0..3).flat_map(|kind| [(kind, false), (kind, true)]) {
             let host = Host {
                 kind,
                 captured: None,
@@ -80,15 +94,24 @@ async fn codec_details_cross_read_write_imports_and_serving_envelopes() {
             let expected = original.codec_diagnostic().unwrap();
             let decoded = decode_read_response(error_to_response(&original)).unwrap_err();
             assert_eq!(decoded.codec_diagnostic(), Some(expected.clone()));
-            let mut run = code
-                .start_sync(
+            let mut run = if asynchronous {
+                code.start_async(
                     &supervisor,
                     host,
                     JsonCodec,
                     Format::JSON,
                     ExecutionPolicy::default(),
                 )
-                .unwrap();
+            } else {
+                code.start_sync(
+                    &supervisor,
+                    host,
+                    JsonCodec,
+                    Format::JSON,
+                    ExecutionPolicy::default(),
+                )
+            }
+            .unwrap();
             let outcome = run.join().await.unwrap();
             assert_eq!(outcome.result.unwrap(), if kind == 1 { -8 } else { -9 });
             let captured = outcome.host.captured.unwrap();

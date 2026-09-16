@@ -40,3 +40,5 @@ Read runtime status/protocol and guest SDK: codec detail is reduced to text.
 
 See [supplement validation](../docs/release-validation-supplement-2026-09-15.md)
 for the final quality, package, guest, browser and site evidence.
+The [follow-up audit](../docs/ox-supplement-audit-2026-09-16.md) closes the
+parked-reader, polled-abandonment, late-open and async-import evidence gaps.

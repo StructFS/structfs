@@ -1,0 +1,71 @@
+{
+  "base_commit": "c68b4174453bfabec6b32d1d696417f3162e989b",
+  "source_files_sha256": {
+    "docs/design/2026-09-15-adoption-contracts.md": "8a99822374576bc099d2897a31389298a7b2c10a82c69b9edb263e9b19b03298",
+    "docs/ox-supplement-audit-2026-09-16.md": "b0a445dd96787c80ce4d4afeb5ea22a31c64d3bcfde7687850226da5bba59a8c",
+    "docs/release-validation-supplement-2026-09-15.md": "f21f88617fefa3de5415666aa7884a3510b46dcbea714fc8d6ecb370881e0f7c",
+    "featherweight/runtime/tests/codec_diagnostics.rs": "1257c9cab24ddb328794c7ba8e17a97b1bf70d2a9c4c2140bf3d1ed66c9468c6",
+    "packages/service/src/handle_protocol.rs": "865a43976935aa08fc19795f01b94bc62cb4824cf1f730207231c22ee9182947",
+    "packages/service/tests/handle_cleanup.rs": "f8b4e34a7147f4e3d3a3cdc752c40f0540351e958309bf9b1bbadd0f2acf9080",
+    "plans/00-overview.md": "f6f067a334400ad6a975b7069caeda2fa42209e430861b0cc0766e40fc9742eb",
+    "plans/03-adoption-contracts.md": "30d7470f38b41114e7f5b8551c2d8143bfff18b352e0032db29c0ba0c9d8cf0a",
+    "scripts/check-ox-letter.py": "c6b3478c399e8653d9b834845507fd898a4d3fcab74125a4c07b7e7fe3118354"
+  },
+  "archive_sha256": {
+    "target/package/structfs-ll-store-0.4.0.crate": "28946390ddc09feebb1e47eb5778b40a8f827065627dd5b88ef494d6eba1a1a2",
+    "target/package/structfs-path-validation-0.4.0.crate": "dcca571d4255c831482d3a957e1949e5c8b657c5ada1f00600ec2acb575f5729",
+    "target/package/structfs-path-macro-0.4.0.crate": "7d2f7ef7ea2355866acdd4fb37514d9946bc18bb996a46083c0b7d85e215ce71",
+    "target/package/structfs-core-store-0.4.0.crate": "3d562a9e2f4fa3e8c97f25d40d7b9084011142f916a70173c993f25585767917",
+    "target/package/namecode-0.1.1.crate": "024ab590809028c2337fa5fa2ec1fcb47c590efe3655a919ef3aedcf12754239",
+    "target/package/structfs-serde-store-0.4.0.crate": "2cb372b29da1512c7ac50094aec2124eb18db4ee7555147ebfcf1bb58cf5a941",
+    "target/package/structfs-json-store-0.4.0.crate": "ae397560e83b410bb6229c472ebc06cb5b804cc1123086e7ebf6aa0ee2b9bc86",
+    "target/package/structfs-handles-0.4.0.crate": "0f8059a9914f41e9700037b692bbd6289a3bf653d96faf8d26a4b343470a3176",
+    "target/package/structfs-service-0.4.0.crate": "33e7b03c5e7714233ead2b34d322bb3f233ab6f767b3573c591432d75c2883c9",
+    "target/package/structfs-state-0.4.0.crate": "d11cb025893722a978a8fe437b43170a580a2053ea3f7c4f926bcfb00d57a7f7",
+    "target/package/structfs-profiles-0.4.0.crate": "085f65eb5bc41e2812ee8fe76bc1656fe77ca80d362036aa01805dff726c7d24",
+    "target/package/structfs-http-0.4.0.crate": "c43054cbda1e641fc48d0e5e20abf2c47bd0df8206f16d55dc0b0aea05f2dd01",
+    "target/package/structfs-repl-0.4.0.crate": "0ae91e4cc89d78a6e01af4036f38c9ea918fbc2b63d5b421fece117f647ae5bf",
+    "target/package/structfs-sys-0.4.0.crate": "01f15b2cd82fdf6659998d1844c2156028e5ed32674a8b459dd96df5d3c59485",
+    "target/package/structfs-0.4.0.crate": "6604a4007d32b483dcc78b505c4b75a1eed9656745867d0c3de31c2a9fe3c361",
+    "target/package/featherweight-0.4.0.crate": "2ca430ca32e41cae33c2b9bb2ca6963ff8270e69319cf47222960514a093c53e",
+    "target/package/featherweight-component-0.4.0.crate": "8f39c985c0d11363f5909bd72cace13d7ef9b6146768f3976bdedf98fff2c1ba",
+    "target/package/featherweight-runtime-0.4.0.crate": "598e2548844db41f586439ce2bbed6894ca60112352f40cdc318eb975b3dba91",
+    "target/package/featherweight-wasi-0.4.0.crate": "a471f27bd9ea465c2dffa36ca83dc43845560042d81ff773decefa82bea67cf2",
+    "target/package/featherweight-guest-0.4.0.crate": "2aaf243137e0bab39ca8a295729d9ee6d2cacba4251a37c134cb44f8a66f5da0"
+  },
+  "quality": {
+    "exit_code": 0,
+    "passed": 1389,
+    "ignored": 24,
+    "regions_percent": 90.03,
+    "lines_percent": 89.49
+  },
+  "release_gate_exit_code": 0,
+  "browser_tests_passed": 21,
+  "ox_probes": [
+    {
+      "ox_head": "2bcc9e635da08331dc3c13cdd217f852afc2da8f",
+      "source_sha256": {
+        "sse_framing.rs": "784d906705a6366eee62587eb6cef571a2213350f2cf45e858c4cc18b49261aa"
+      },
+      "probe": "sse",
+      "cargo_test_exit_code": 0
+    },
+    {
+      "ox_head": "2bcc9e635da08331dc3c13cdd217f852afc2da8f",
+      "source_sha256": {
+        "subscription.rs": "8bd3f99cb7a566ae810797666572762ec04efd6d6a21b1c564537f23ba7a8337",
+        "path_serde.rs": "72ffc50331ff8cd0c009153825b46e177a4f6f85374245b48d8ffa089fc14abf",
+        "write.rs": "648e71d87d7f6cfabc88555fd2e6d481a71d30af02b7970cd83c350443a1c348"
+      },
+      "probe": "subscription",
+      "cargo_test_exit_code": 0
+    }
+  ],
+  "logs_sha256": {
+    "local/final-audit-quality.log": "5a8399eeff8192cfb3a56cd6aac680085e0f4d60472a1bd31241f0652d9ff193",
+    "/private/tmp/structfs-final-audit-release.log": "de6f05428690e454ec0e4f18d7ce1af621c803f848bc5400b5bee5425f838546",
+    "local/final-audit-ox-sse.log": "65ec4b045d00d1f72bf79bb721921e484eadc9e93e3a686bb2ce7db5524021ca",
+    "local/final-audit-ox-original.log": "80904498b4535c39bdacd0b6a110644c8a29b65d5b74d852b3e4d564359a9b66"
+  }
+}
