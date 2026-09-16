@@ -40,3 +40,16 @@ abandons delivery. The opener supplies a host-owned release callback.
 
 Keep the supervisor and Tokio runtime alive through shutdown. Cleanup errors and
 panics remain reported and charged until the host reconciles them explicitly.
+
+`SupervisedProtocol` connects `structfs_handles::HandleStore` to an existing owner.
+Supply the inner protocol, owner handle, wait timeout, and a callback that joins
+producer work and publishes terminal state. Null-write release waits for cleanup;
+abandoned release futures and final store Drop leave cleanup supervised. Timeouts
+and failures remain visible in the owner report. Inspect and reconcile failures
+before acknowledging them.
+
+`OwnedTail::push_batch` accepts a whole batch atomically or rejects it.
+`read_bounded` limits response payload bytes as well as item count. Encoding and
+consumer-copy budgets remain separate. Run `cargo run -p structfs-service
+--example typed_tail` for typed events, two-reader acknowledgement, backpressure,
+terminal status and a bounded encoded response.

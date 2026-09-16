@@ -58,6 +58,33 @@ pub trait Reader: Send + Sync {
     /// or `Err` if an error occurred.
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error>;
 
+    /// Enumerate one names-only page. Override for bounded large-directory
+    /// discovery; the default materializes `read_children` before slicing.
+    /// A zero limit or an offset past the end is invalid. Preserve missing
+    /// versus present-but-empty. `next` must advance when more names remain.
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        if limit == 0 {
+            return Err(Error::conflict("child page limit must be positive"));
+        }
+        let Some(names) = self.read_children(from)? else {
+            return Ok(None);
+        };
+        if offset > names.len() {
+            return Err(Error::conflict("child cursor past end"));
+        }
+        let end = offset.saturating_add(limit).min(names.len());
+        let next = (end < names.len()).then_some(end);
+        Ok(Some(crate::ChildPage {
+            names: names.into_iter().skip(offset).take(limit).collect(),
+            next,
+        }))
+    }
+
     /// Enumerate the child names directly under a path.
     ///
     /// Returns `Ok(None)` if the path doesn't exist, and `Ok(Some(names))`
@@ -184,6 +211,14 @@ impl<T: Reader + ?Sized> Reader for &mut T {
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         (*self).read_children(from)
     }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        (*self).read_children_page(from, offset, limit)
+    }
 }
 
 impl<T: Writer + ?Sized> Writer for &mut T {
@@ -199,6 +234,14 @@ impl<T: Reader + ?Sized> Reader for Box<T> {
 
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         self.as_mut().read_children(from)
+    }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        self.as_mut().read_children_page(from, offset, limit)
     }
 }
 

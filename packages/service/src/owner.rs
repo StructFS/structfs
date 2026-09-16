@@ -583,6 +583,16 @@ impl<T> OwnedResource<T> {
     }
 }
 impl Registration {
+    /// Cleanup has completed (or a recorded failure was explicitly acknowledged).
+    pub fn is_complete(&self) -> bool {
+        !self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .contains_key(&self.id)
+    }
     pub fn id(&self) -> ResourceId {
         self.id
     }

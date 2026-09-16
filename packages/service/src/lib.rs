@@ -3,7 +3,9 @@
 //! `BlockingStore` for blocking I/O and `ImmediateStore` only for short local work.
 mod adapters;
 mod admission;
+mod handle_protocol;
 mod owner;
+pub use handle_protocol::{SupervisedHandle, SupervisedProtocol};
 mod retained;
 pub use adapters::{BlockingStore, DetachedProvider, ImmediateStore};
 pub use admission::{CallBudget, CallBudgetSnapshot, CallLimits, CallMetrics, CallUsage};

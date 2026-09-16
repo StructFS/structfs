@@ -427,3 +427,36 @@ async fn capacity_reclamation_preserves_unacknowledged_failures() {
         .unwrap();
     assert!(supervisor.owner(OwnerLimits::default()).is_ok());
 }
+
+#[tokio::test]
+async fn tail_batches_are_atomic_and_read_pages_bound_payload_bytes() {
+    let supervisor = CleanupSupervisor::new(1).unwrap();
+    let owner = supervisor.owner(OwnerLimits::default()).unwrap();
+    let tail = OwnedTail::new(&owner.handle(), 3, 16).unwrap();
+    assert_eq!(
+        tail.push_batch(vec![b"one".to_vec(), b"two".to_vec()])
+            .unwrap(),
+        0..2
+    );
+    assert!(tail
+        .push_batch(vec![b"third".to_vec(), b"fourth".to_vec()])
+        .is_err());
+    tail.finish();
+    let page = tail
+        .read_bounded(0, 3, 3, &CancelToken::new())
+        .await
+        .unwrap();
+    assert_eq!(page.items, vec![b"one".to_vec()]);
+    assert_eq!(page.next, 1);
+    assert!(!page.done);
+    let page = tail
+        .read_bounded(1, 3, 3, &CancelToken::new())
+        .await
+        .unwrap();
+    assert!(page.done);
+    assert_eq!(page.next, 2);
+    assert!(tail
+        .read_bounded(0, 3, 2, &CancelToken::new())
+        .await
+        .is_err());
+}

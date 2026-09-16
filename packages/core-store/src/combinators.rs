@@ -32,6 +32,14 @@ impl<S: Reader> Reader for ReadOnly<S> {
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         self.0.read_children(from)
     }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        self.0.read_children_page(from, offset, limit)
+    }
 }
 
 impl<S: Reader> Writer for ReadOnly<S> {
@@ -85,6 +93,17 @@ impl<A: Reader, B: Reader> Reader for Cascade<A, B> {
             None => self.fallback.read_children(from),
         }
     }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        match self.primary.read_children_page(from, offset, limit)? {
+            Some(children) => Ok(Some(children)),
+            None => self.fallback.read_children_page(from, offset, limit),
+        }
+    }
 }
 
 impl<A: Writer, B: Send + Sync> Writer for Cascade<A, B> {
@@ -136,6 +155,14 @@ impl<S: Reader> Reader for Shared<S> {
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         self.lock().read_children(from)
     }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        self.lock().read_children_page(from, offset, limit)
+    }
 }
 
 impl<S: Writer> Writer for Shared<S> {
@@ -144,7 +171,12 @@ impl<S: Writer> Writer for Shared<S> {
     }
 }
 
-/// A store that redacts sensitive paths on read.
+/// A store that redacts directly requested paths on read.
+///
+/// **Not a subtree security boundary:** matching applies to the requested path
+/// only. Reading an ancestor returns its original contents, including masked
+/// descendants. Child names remain visible. Use capability scoping to prevent
+/// unauthorized ancestor reads; do not use this wrapper to sanitize snapshots.
 ///
 /// Paths matching any pattern read back as the mask value instead of
 /// their contents; existence is preserved (a masked path that exists
@@ -203,6 +235,16 @@ impl<S: Reader> Reader for Masked<S> {
         // under a masked prefix.
         self.inner.read_children(from)
     }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        // Child names are structure, not content; they stay visible even
+        // under a masked prefix.
+        self.inner.read_children_page(from, offset, limit)
+    }
 }
 
 impl<S: Writer> Writer for Masked<S> {
@@ -241,6 +283,15 @@ impl<S: Reader> Reader for Rooted<S> {
 
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         self.inner.read_children(&self.root.join(from))
+    }
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        self.inner
+            .read_children_page(&self.root.join(from), offset, limit)
     }
 }
 

@@ -93,6 +93,38 @@ impl Reader for MemoryStore {
             .map(Record::parsed))
     }
 
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        if limit == 0 {
+            return Err(Error::conflict("child page limit must be positive"));
+        }
+        let Some(value) = self.root.as_ref().and_then(|root| root.get(from)) else {
+            return Ok(None);
+        };
+        let len = match value {
+            Value::Map(m) => m.len(),
+            Value::Array(a) => a.len(),
+            _ => 0,
+        };
+        if offset > len {
+            return Err(Error::conflict("child cursor past end"));
+        }
+        let end = offset.saturating_add(limit).min(len);
+        let names = match value {
+            Value::Map(m) => m.keys().skip(offset).take(limit).cloned().collect(),
+            Value::Array(_) => (offset..end).map(|n| n.to_string()).collect(),
+            _ => Vec::new(),
+        };
+        Ok(Some(crate::ChildPage {
+            names,
+            next: (end < len).then_some(end),
+        }))
+    }
+
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         Ok(self
             .root

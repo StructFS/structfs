@@ -495,3 +495,7 @@ accepted. Diagnostics are not machine-readable error codes; richer profile fault
 are typed Value envelopes. Existing path-less error envelopes cannot reconstruct
 every native path error. See [protocol](06-protocol.md) and
 [application profiles](14-capability-profiles.md).
+
+Error envelopes may include optional `error.codec` detail (`kind`, `operation`,
+`format`, and original codec `message`). Codec resource limits use error type
+`resource_limit`; callers that ignore optional detail retain the diagnostic text.

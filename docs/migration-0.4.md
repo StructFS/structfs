@@ -93,3 +93,18 @@ Direct callers of the proc macro should use the core/facade macro instead.
 Server read responses must include present:true with a value or present:false
 without one. Unmarked responses are rejected. Rebuild older guests and update
 handwritten servers; use ok_value and ok_absent rather than handwritten envelopes.
+
+## Additional adoption contracts
+
+The [supplement design](design/2026-09-15-adoption-contracts.md) specifies joined
+handle cleanup, file acknowledgement/recovery, streaming HTTP/SSE, paged child-name
+reads, codec diagnostics and typed retained streams. BackedStore now stages writes
+and fences retries after save failures; call recover to reconcile. JSONL files
+must end in a newline. Buffered persistence does not promise power-loss durability;
+select Synced explicitly and provide an existing parent directory.
+
+HandleProtocol close requests cleanup; close_wait acknowledges it. Asynchronous
+implementations must retain cleanup under supervision. SupervisedProtocol supplies
+this integration. Rust guest HostError adds optional codec detail; codec-limit
+failures now carry resource-limit status. Rebuild guests to consume structured
+information. LazyRecord errors remain retryable, with serialized initialization.

@@ -36,10 +36,11 @@
 // ── Core: always available ──────────────────────────────────────────
 
 pub use structfs_core_store::{
-    matches_prefix_suffix, Bytes, Cascade, Codec, CodecOperation, CoreToLL, Error, Format, LLError,
-    LLPath, LLReader, LLStore, LLToCore, LLWriter, LazyRecord, Masked, MemoryStore, NoCodec, Path,
-    PathComponent, PathError, PathPattern, PathTrie, ReadOnly, Reader, Record, Reference, Rooted,
-    Shared, Store, TypeDescriptor, TypeInfo, Value, Writer,
+    matches_prefix_suffix, Bytes, Cascade, ChildNames, ChildPage, Codec, CodecDiagnostic,
+    CodecOperation, CoreToLL, Error, Format, LLError, LLPath, LLReader, LLStore, LLToCore,
+    LLWriter, LazyRecord, Masked, MemoryStore, NoCodec, Path, PathComponent, PathError,
+    PathPattern, PathTrie, ReadOnly, Reader, Record, Reference, Rooted, Shared, Store,
+    TypeDescriptor, TypeInfo, Value, Writer,
 };
 
 /// Path macro for constructing validated [`Path`] values from string literals.
@@ -155,3 +156,6 @@ pub use structfs_state as state;
 
 #[cfg(feature = "profiles")]
 pub use structfs_profiles as profiles;
+
+#[cfg(feature = "http-streaming")]
+pub use structfs_http::{sse, streaming};

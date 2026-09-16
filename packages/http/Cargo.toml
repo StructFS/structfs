@@ -12,6 +12,7 @@ categories = ["web-programming::http-client"]
 
 [features]
 default = ["blocking"]
+streaming = ["dep:reqwest", "dep:bytes"]
 blocking = ["dep:reqwest", "reqwest/blocking", "dep:structfs-handles", "dep:tokio"]
 
 [dependencies]
@@ -24,9 +25,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true, optional = true }
 http = { workspace = true }
+bytes = { version = "1", optional = true }
 url = { workspace = true }
 collection_literals = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 wiremock = { workspace = true }

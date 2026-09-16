@@ -457,3 +457,73 @@ mod tests {
         ));
     }
 }
+
+/// Optional, portable codec diagnostic. Unknown kinds remain printable and may
+/// be ignored by older readers. This is diagnostic data, not provider identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodecDiagnostic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub kind: String,
+    pub operation: Option<String>,
+    pub format: Format,
+}
+impl Error {
+    pub fn codec_diagnostic(&self) -> Option<CodecDiagnostic> {
+        match self {
+            Self::Codec {
+                kind,
+                operation,
+                format,
+                message,
+            } => Some(CodecDiagnostic {
+                message: Some(message.clone()),
+                kind: kind.as_str().into(),
+                operation: Some(operation.to_string()),
+                format: format.clone(),
+            }),
+            Self::UnsupportedFormat(format) => Some(CodecDiagnostic {
+                message: None,
+                kind: "unsupported_format".into(),
+                operation: None,
+                format: format.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+impl CodecDiagnostic {
+    pub fn into_error(self, message: String) -> Option<Error> {
+        if self.kind == "unsupported_format" {
+            return Some(Error::UnsupportedFormat(self.format));
+        }
+        let kind = match self.kind.as_str() {
+            "unsupported_profile" => CodecErrorKind::UnsupportedProfile,
+            "unsupported_version" => CodecErrorKind::UnsupportedVersion,
+            "syntax" => CodecErrorKind::Syntax,
+            "invalid_unicode" => CodecErrorKind::InvalidUnicode,
+            "invalid_node" => CodecErrorKind::InvalidNode,
+            "invalid_base64" => CodecErrorKind::InvalidBase64,
+            "duplicate_key" => CodecErrorKind::DuplicateKey,
+            "out_of_range" => CodecErrorKind::OutOfRange,
+            "unsupported_value" => CodecErrorKind::UnsupportedValue,
+            "type_mismatch" => CodecErrorKind::TypeMismatch,
+            "ambiguous_option" => CodecErrorKind::AmbiguousOption,
+            "noncanonical" => CodecErrorKind::Noncanonical,
+            "resource_limit" => CodecErrorKind::ResourceLimit,
+            "io" => CodecErrorKind::Io,
+            _ => return None,
+        };
+        let operation = match self.operation.as_deref() {
+            Some("encode") => CodecOperation::Encode,
+            Some("decode") => CodecOperation::Decode,
+            _ => return None,
+        };
+        Some(Error::Codec {
+            kind,
+            operation,
+            format: self.format,
+            message: self.message.unwrap_or(message),
+        })
+    }
+}

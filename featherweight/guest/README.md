@@ -83,3 +83,9 @@ convention; the Value and ABI layers distinguish present Null from absence.
 `sdk::read_typed` and `sdk::write_typed` preserve `HostError { status, message }`.
 Value/profile helpers use that typed host error; existing `structfs_read` and
 `structfs_write` remain diagnostic-only compatibility wrappers.
+
+The Rust SDK's `HostError` includes optional codec diagnostics decoded from the
+versioned UTF-8 error envelope. Plain diagnostic text remains accepted. Codec
+resource limits use status -8; other codec failures use -9 with optional kind,
+operation and format detail. Guests that ignore the detail still receive a
+printable diagnostic message.

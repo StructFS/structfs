@@ -29,3 +29,14 @@ With `async`, SharedReader and SharedWriter provide object-safe shared access wi
 owned arguments and Send + 'static futures. DetachedShared holds its mutex only
 while constructing an operation. Acceptance and future-drop semantics remain
 provider-specific. matches_prefix_suffix and PathPattern::matches allocate nothing.
+
+`ChildNames` projects names-only discovery onto reads at
+`offset/limit/target...`, returning `{names, next}`. Mount it at the provider
+boundary before async/service adapters. Page count and name-byte limits bound
+responses; large providers should override `Reader::read_children_page` to avoid
+materializing all names. MemoryStore pages directly. Cursors do not pin snapshots.
+
+`Masked` redacts directly requested paths only. It does not remove matching
+children inside an ancestor read and is not a subtree-security boundary.
+`LazyRecord` serializes initialization; decode failures are retryable and the
+first successful codec determines the cached value.

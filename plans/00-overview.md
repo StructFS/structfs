@@ -11,3 +11,9 @@ construction, store conventions, recoverable execution, and consistent compositi
 without a backward-compatibility constraint.
 
 See [final validation](../docs/release-validation-2026-09-15.md) for checks and artifact identities.
+
+The [adoption-contract supplement](03-adoption-contracts.md) extends the 0.4
+candidate with joined handle cleanup, explicit persistence acknowledgement and
+recovery, streaming HTTP/SSE, names-only discovery, and structured codec diagnostics.
+
+Current candidate evidence: [supplement validation](../docs/release-validation-supplement-2026-09-15.md).

@@ -109,3 +109,8 @@ pub use async_bridge::{AsyncCoreToLL, AsyncLLToCore};
 // Re-export async LL types when async feature is enabled
 #[cfg(feature = "async")]
 pub use structfs_ll_store::{AsyncLLReader, AsyncLLStore, AsyncLLWriter, SyncToAsyncLL};
+
+mod children;
+pub use children::{ChildNames, ChildPage};
+
+pub use error::CodecDiagnostic;

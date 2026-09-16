@@ -385,3 +385,43 @@ async fn sync_adapter_and_raw_payload_accounting() {
         Err(Error::Overloaded { .. })
     ));
 }
+
+#[tokio::test]
+async fn names_only_projection_survives_service_mount_and_cancellation() {
+    use structfs_core_store::ChildNames;
+    struct RawDirectory;
+    impl Reader for RawDirectory {
+        fn read(&mut self, _: &Path) -> Result<Option<Record>, Error> {
+            panic!("record materialization forbidden")
+        }
+        fn read_children(&mut self, p: &Path) -> Result<Option<Vec<String>>, Error> {
+            assert_eq!(p, &path!("folder"));
+            Ok(Some(vec!["child".into()]))
+        }
+    }
+    let projection = ChildNames::new(RawDirectory, 16, 1024).unwrap();
+    let router = Router::new(vec![mount(
+        Arc::new(BlockingStore::new(projection)),
+        budget(2),
+        path!("names"),
+        path!(""),
+    )])
+    .unwrap();
+    let client = router.client();
+    let record = client
+        .read(&path!("names/0/16/folder"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.as_value().unwrap().get(&path!("names")),
+        Some(&Value::Array(vec![Value::from("child")]))
+    );
+    let context = CallContext::default();
+    context.cancellation.cancel();
+    assert!(client
+        .with_context(context)
+        .read(&path!("names/0/16/folder"))
+        .await
+        .is_err());
+}

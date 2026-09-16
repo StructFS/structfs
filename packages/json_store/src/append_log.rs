@@ -28,23 +28,39 @@ pub trait AppendBacking: Send + Sync {
     /// Load all previously appended entries, in order.
     fn load(&mut self) -> Result<Vec<Value>, Error>;
 
-    /// Durably append one entry.
+    /// Append at the backing's documented acknowledgement level. Errors may
+    /// follow a partial or complete append; they do not imply rollback.
     fn append(&mut self, entry: &Value) -> Result<(), Error>;
 }
 
-/// JSON-lines file persistence: one entry per line, appended in place.
+/// JSON-lines file persistence: one entry per newline-terminated record.
+/// Buffered mode acknowledges OS writes; Synced mode synchronizes the file and
+/// parent directory (including file creation). Synced mode requires an existing
+/// parent. Partial trailing records are rejected on load and before append;
+/// repair requires an explicit operator decision, never silent truncation.
+/// Use a single serialized writer. An error can leave an unacknowledged entry.
 pub struct JsonlFileBacking {
     path: PathBuf,
+    durability: crate::persist::Durability,
 }
 
 impl JsonlFileBacking {
     /// Persist to the given file path. The file need not exist yet;
     /// parent directories are created on first append.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            durability: crate::persist::Durability::Buffered,
+        }
     }
 }
 
+impl JsonlFileBacking {
+    pub fn with_durability(mut self, durability: crate::persist::Durability) -> Self {
+        self.durability = durability;
+        self
+    }
+}
 impl AppendBacking for JsonlFileBacking {
     fn load(&mut self) -> Result<Vec<Value>, Error> {
         let text = match std::fs::read_to_string(&self.path) {
@@ -52,6 +68,11 @@ impl AppendBacking for JsonlFileBacking {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(Error::Io(e)),
         };
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err(Error::conflict(
+                "incomplete JSONL tail; explicitly repair before reopening",
+            ));
+        }
         let mut entries = Vec::new();
         for (i, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
@@ -69,19 +90,7 @@ impl AppendBacking for JsonlFileBacking {
     }
 
     fn append(&mut self, entry: &Value) -> Result<(), Error> {
-        if let Some(parent) = self.path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let line = serde_json::to_string(entry)
-            .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        writeln!(file, "{line}")?;
-        Ok(())
+        self.append_with(entry, |_| Ok(()))
     }
 }
 
@@ -115,13 +124,30 @@ impl AppendBacking for MemoryAppendBacking {
 pub struct LogStore<B: AppendBacking> {
     entries: Vec<Value>,
     backing: B,
+    needs_recovery: bool,
 }
 
 impl<B: AppendBacking> LogStore<B> {
     /// Open a log, loading existing entries from the backing.
     pub fn open(mut backing: B) -> Result<Self, Error> {
         let entries = backing.load()?;
-        Ok(Self { entries, backing })
+        Ok(Self {
+            entries,
+            backing,
+            needs_recovery: false,
+        })
+    }
+
+    /// Adopt readable backing state after an ambiguous append. This may include
+    /// unacknowledged entries; callers must reconcile their own operation IDs.
+    pub fn recover(&mut self) -> Result<(), Error> {
+        self.needs_recovery = true;
+        self.entries = self.backing.load()?;
+        self.needs_recovery = false;
+        Ok(())
+    }
+    pub fn needs_recovery(&self) -> bool {
+        self.needs_recovery
     }
 
     /// Number of entries.
@@ -180,9 +206,15 @@ impl<B: AppendBacking> Writer for LogStore<B> {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         if to.len() == 1 && &to[0] == "append" {
             let entry = data.into_value(&structfs_core_store::NoCodec)?;
-            // Durable before visible: the backing accepts the entry
-            // before it appears in reads.
+            if self.needs_recovery {
+                return Err(Error::conflict(
+                    "append failed; recover backing before writing",
+                ));
+            }
+            // Acknowledged before visible, at the backing's declared level.
+            self.needs_recovery = true;
             self.backing.append(&entry)?;
+            self.needs_recovery = false;
             let index = self.entries.len();
             self.entries.push(entry);
             return Ok(Path::from_components(vec![
@@ -300,5 +332,121 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = LogStore::open(JsonlFileBacking::new(dir.path().join("nope.jsonl"))).unwrap();
         assert!(log.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::Durability;
+    use structfs_core_store::path;
+    #[test]
+    fn partial_tail_is_never_silently_adopted_or_extended() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("log");
+        let mut backing = JsonlFileBacking::new(&file).with_durability(Durability::Synced);
+        backing.append(&Value::Integer(1)).unwrap();
+        assert_eq!(backing.load().unwrap(), vec![Value::Integer(1)]);
+        for tail in ["2", "{", "\"incomplete"] {
+            std::fs::write(&file, format!("1\n{tail}")).unwrap();
+            assert!(backing.load().is_err());
+            assert!(backing.append(&Value::Null).is_err());
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                format!("1\n{tail}")
+            );
+        }
+    }
+    #[test]
+    fn ambiguous_append_requires_reconciliation_without_duplicate_retry() {
+        struct Ambiguous(Vec<Value>);
+        impl AppendBacking for Ambiguous {
+            fn load(&mut self) -> Result<Vec<Value>, Error> {
+                Ok(self.0.clone())
+            }
+            fn append(&mut self, v: &Value) -> Result<(), Error> {
+                self.0.push(v.clone());
+                Err(Error::Io(std::io::Error::other("sync failed")))
+            }
+        }
+        let mut log = LogStore::open(Ambiguous(vec![])).unwrap();
+        assert!(log
+            .write(&path!("append"), Record::parsed(Value::Null))
+            .is_err());
+        assert!(log.is_empty());
+        assert!(log.needs_recovery());
+        assert!(log
+            .write(&path!("append"), Record::parsed(Value::Null))
+            .is_err());
+        log.recover().unwrap();
+        assert_eq!(log.len(), 1);
+    }
+}
+
+impl JsonlFileBacking {
+    fn append_with(
+        &mut self,
+        entry: &Value,
+        mut before: impl FnMut(&str) -> std::io::Result<()>,
+    ) -> Result<(), Error> {
+        if self.durability == crate::persist::Durability::Buffered {
+            std::fs::create_dir_all(crate::persist::parent(&self.path))?;
+        }
+        let line = serde_json::to_string(entry)
+            .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&self.path)?;
+        use std::io::{Read, Seek, SeekFrom};
+        if file.metadata()?.len() > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            let mut last = [0];
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                return Err(Error::conflict(
+                    "incomplete JSONL tail; explicitly repair before append",
+                ));
+            }
+        }
+        before("write")?;
+        writeln!(file, "{line}")?;
+        if self.durability == crate::persist::Durability::Synced {
+            before("sync")?;
+            file.sync_all()?;
+            before("directory_sync")?;
+            crate::persist::sync_parent(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod append_failures {
+    use super::*;
+    #[test]
+    fn write_and_sync_errors_expose_the_actual_reopen_boundary() {
+        for stage in ["write", "sync", "directory_sync"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut backing = JsonlFileBacking::new(dir.path().join("log"))
+                .with_durability(crate::Durability::Synced);
+            let mut order = Vec::new();
+            assert!(backing
+                .append_with(&Value::Integer(1), |point| {
+                    order.push(point.to_owned());
+                    if point == stage {
+                        Err(std::io::Error::other("injected"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err());
+            assert_eq!(order.last().unwrap(), stage);
+            assert_eq!(
+                backing.load().unwrap().len(),
+                if stage == "write" { 0 } else { 1 }
+            );
+        }
     }
 }

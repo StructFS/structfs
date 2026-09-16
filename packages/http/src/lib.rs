@@ -65,6 +65,9 @@ pub mod executor;
 pub mod handle;
 #[cfg(feature = "blocking")]
 mod handle_broker;
+pub mod sse;
+#[cfg(feature = "streaming")]
+pub mod streaming;
 pub mod types;
 
 #[cfg(feature = "blocking")]

@@ -109,6 +109,11 @@ impl OwnedTail {
         })
     }
     pub fn push(&self, value: Vec<u8>) -> Result<u64, Error> {
+        self.push_batch(vec![value]).map(|range| range.start)
+    }
+    /// Accept all items atomically or none. Capacity counts retained allocations;
+    /// rejection reaches the producer before any cursor or item is published.
+    pub fn push_batch(&self, values: Vec<Vec<u8>>) -> Result<std::ops::Range<u64>, Error> {
         if self.registration.cancellation().is_cancelled() {
             return Err(Error::cancelled("tail released"));
         }
@@ -116,22 +121,26 @@ impl OwnedTail {
         if s.done {
             return Err(Error::cancelled("tail finished"));
         }
-        if s.items.len() >= self.max_items
-            || value.capacity() > self.max_bytes.saturating_sub(s.bytes)
+        let bytes = values
+            .iter()
+            .try_fold(0usize, |n, v| n.checked_add(v.capacity()))
+            .ok_or_else(|| Error::overloaded("tail byte count overflow"))?;
+        if values.len() > self.max_items.saturating_sub(s.items.len())
+            || bytes > self.max_bytes.saturating_sub(s.bytes)
         {
             return Err(Error::overloaded("tail capacity exhausted"));
         }
         let next = s
             .next
-            .checked_add(1)
+            .checked_add(values.len() as u64)
             .ok_or_else(|| Error::overloaded("tail cursor exhausted"))?;
-        let seq = s.next;
+        let first = s.next;
         s.next = next;
-        s.bytes += value.capacity();
-        s.items.push_back(value);
+        s.bytes += bytes;
+        s.items.extend(values);
         drop(s);
         self.inner.gate.notify();
-        Ok(seq)
+        Ok(first..next)
     }
     pub fn finish(&self) {
         self.inner
@@ -166,6 +175,19 @@ impl OwnedTail {
         max_items: usize,
         cancel: &CancelToken,
     ) -> Result<TailRead, Error> {
+        self.read_bounded(cursor, max_items, usize::MAX, cancel)
+            .await
+    }
+    /// Bound both returned item count and payload bytes before cloning. If the
+    /// first item cannot fit, fail rather than return a non-advancing empty page.
+    /// Encoding overhead remains the transport's separate responsibility.
+    pub async fn read_bounded(
+        &self,
+        cursor: u64,
+        max_items: usize,
+        max_bytes: usize,
+        cancel: &CancelToken,
+    ) -> Result<TailRead, Error> {
         if max_items == 0 {
             return Err(Error::conflict("tail page must contain at least one item"));
         }
@@ -181,13 +203,25 @@ impl OwnedTail {
             if cursor == s.next && !s.done {
                 return None;
             }
-            let items: Vec<_> = s
+            let mut items = Vec::new();
+            let mut bytes = 0usize;
+            for item in s
                 .items
                 .iter()
                 .skip((cursor - s.first) as usize)
                 .take(max_items)
-                .cloned()
-                .collect();
+            {
+                if item.len() > max_bytes.saturating_sub(bytes) {
+                    if items.is_empty() {
+                        return Some(Err(Error::resource_limit(
+                            "tail item exceeds page byte limit",
+                        )));
+                    }
+                    break;
+                }
+                bytes += item.len();
+                items.push(item.clone());
+            }
             let next = cursor + items.len() as u64;
             Some(Ok(TailRead {
                 items,

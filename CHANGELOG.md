@@ -2,6 +2,12 @@
 
 ## 0.4.0
 
+- Address the Ox supplement: supervised handle release, explicit file durability
+  and failed-save recovery, streaming HTTP and bounded SSE framing, names-only
+  read projections, structured guest codec diagnostics, atomic retained-tail
+  batches, and corrected lazy-decode/masking contracts.
+
+
 - Recoverable prepared execution for synchronous and asynchronous host stores,
   with explicit execution owners, joined state recovery, supervisor retention,
   engine-wide epoch cadence, and configurable growth-denial behavior.

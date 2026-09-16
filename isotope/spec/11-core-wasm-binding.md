@@ -172,6 +172,15 @@ JSON media type, CBOR and FlexBuffers according to the
 [Value v1 codec contracts](../../docs/specs/structfs-value-v1.md).
 Do not infer support for another MIME type from the general protocol. ABI status
 1 remains absence; status 0 with encoded Null remains present. Negative status
-codes preserve categories, while their UTF-8 diagnostics do not preserve all
-native codec error fields. Typed profile faults can use successful Value reply
+codes preserve categories; optional UTF-8 codec envelopes preserve structured
+native codec diagnostics as described below. Typed profile faults can use successful Value reply
 envelopes to retain additional structure.
+
+### Optional codec diagnostics
+
+Codec failures MAY use a UTF-8 JSON diagnostic envelope with `structfs_error: 1`,
+`message` and `codec` fields. Codec detail carries `kind`, optional `operation`,
+`format`, and optional original codec `message`. Readers MUST retain a printable
+message when they ignore optional detail or an unknown kind. The updated Rust SDK
+exposes this detail on HostError. Ordinary diagnostic text remains valid.
+Codec resource-limit failures use status -8; other codec failures use -9.

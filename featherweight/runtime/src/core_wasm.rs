@@ -46,8 +46,24 @@ fn status_of(error: &StoreError) -> i32 {
         StoreError::DeadlineExceeded { .. } => status::DEADLINE_EXCEEDED,
         StoreError::Cancelled { .. } => status::CANCELLED,
         StoreError::Path(_) => status::INVALID_PATH,
-        StoreError::ResourceLimit { .. } => status::RESOURCE_LIMIT,
+        StoreError::ResourceLimit { .. }
+        | StoreError::Codec {
+            kind: structfs_core_store::CodecErrorKind::ResourceLimit,
+            ..
+        } => status::RESOURCE_LIMIT,
         _ => status::OTHER,
+    }
+}
+
+/// UTF-8 diagnostics remain readable to old guests. Updated SDKs recognize the
+/// versioned JSON envelope only for codec errors; other errors remain plain text.
+fn host_diagnostic(error: &StoreError) -> String {
+    match error.codec_diagnostic() {
+        Some(codec) => {
+            serde_json::json!({"structfs_error": 1, "message": error.to_string(), "codec": codec})
+                .to_string()
+        }
+        None => error.to_string(),
     }
 }
 
@@ -587,14 +603,14 @@ impl CoreWasmBlock {
                                 }
                                 Err(e) => {
                                     let code = status_of(&e);
-                                    deliver(&mut caller, ret_ptr, e.to_string().as_bytes())?;
+                                    deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
                                     Ok(code)
                                 }
                             }
                         }
                         Err(e) => {
                             let code = status_of(&e);
-                            deliver(&mut caller, ret_ptr, e.to_string().as_bytes())?;
+                            deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
                             Ok(code)
                         }
                     }
@@ -633,7 +649,7 @@ impl CoreWasmBlock {
                         Ok(value) => value,
                         Err(e) => {
                             let code = status_of(&e);
-                            deliver(&mut caller, ret_ptr, e.to_string().as_bytes())?;
+                            deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
                             return Ok(code);
                         }
                     };
@@ -646,7 +662,7 @@ impl CoreWasmBlock {
                         }
                         Err(e) => {
                             let code = status_of(&e);
-                            deliver(&mut caller, ret_ptr, e.to_string().as_bytes())?;
+                            deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
                             Ok(code)
                         }
                     }
@@ -701,7 +717,7 @@ impl CoreWasmBlock {
                                         deliver_async(
                                             &mut caller,
                                             ret_ptr,
-                                            e.to_string().as_bytes(),
+                                            host_diagnostic(&e).as_bytes(),
                                         )
                                         .await?;
                                         Ok(code)
@@ -710,7 +726,7 @@ impl CoreWasmBlock {
                             }
                             Err(e) => {
                                 let code = status_of(&e);
-                                deliver_async(&mut caller, ret_ptr, e.to_string().as_bytes())
+                                deliver_async(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())
                                     .await?;
                                 Ok(code)
                             }
@@ -747,7 +763,7 @@ impl CoreWasmBlock {
                         Ok(value) => value,
                         Err(e) => {
                             let code = status_of(&e);
-                            deliver_async(&mut caller, ret_ptr, e.to_string().as_bytes()).await?;
+                            deliver_async(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes()).await?;
                             return Ok(code);
                         }
                     };
@@ -760,7 +776,7 @@ impl CoreWasmBlock {
                         }
                         Err(e) => {
                             let code = status_of(&e);
-                            deliver_async(&mut caller, ret_ptr, e.to_string().as_bytes()).await?;
+                            deliver_async(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes()).await?;
                             Ok(code)
                         }
                     }

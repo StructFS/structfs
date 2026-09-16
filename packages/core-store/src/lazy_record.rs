@@ -3,7 +3,7 @@
 //! This type is useful when you might or might not need to parse data.
 //! It caches the parsed result, so repeated access is cheap.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
 
@@ -48,6 +48,7 @@ pub struct LazyRecord {
     raw: Option<(Bytes, Format)>,
     /// The parsed value, populated on first access to `value()`.
     parsed: OnceLock<Value>,
+    decoding: Mutex<()>,
 }
 
 impl LazyRecord {
@@ -58,6 +59,7 @@ impl LazyRecord {
         Self {
             raw: Some((bytes, format)),
             parsed: OnceLock::new(),
+            decoding: Mutex::new(()),
         }
     }
 
@@ -71,6 +73,7 @@ impl LazyRecord {
         Self {
             raw: None,
             parsed: lock,
+            decoding: Mutex::new(()),
         }
     }
 
@@ -83,6 +86,7 @@ impl LazyRecord {
         Self {
             raw: Some((bytes, format)),
             parsed: lock,
+            decoding: Mutex::new(()),
         }
     }
 
@@ -90,6 +94,10 @@ impl LazyRecord {
     ///
     /// This method is thread-safe. If multiple threads call it concurrently,
     /// only one will actually parse; others will wait and get the cached result.
+    ///
+    /// Decode errors are not cached; later calls retry. The first successful
+    /// codec determines the cached value. A codec must not recursively decode
+    /// this same record.
     ///
     /// # Errors
     ///
@@ -107,6 +115,12 @@ impl LazyRecord {
             return Ok(v);
         }
 
+        // Serialize fallible initialization; errors are not cached. A later call
+        // can retry with another codec. A panicked decoder publishes no value.
+        let _guard = self.decoding.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(value) = self.parsed.get() {
+            return Ok(value);
+        }
         // Slow path: need to parse
         let (bytes, format) = self.raw.as_ref().ok_or_else(|| {
             Error::store(
@@ -192,6 +206,7 @@ impl Clone for LazyRecord {
         Self {
             raw: self.raw.clone(),
             parsed,
+            decoding: Mutex::new(()),
         }
     }
 }

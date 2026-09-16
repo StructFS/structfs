@@ -85,7 +85,9 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     run(["cargo", "run", "--locked", "--offline", "-p", "structfs",
          "--features", "json", "--example", "quickstart"], stage, env=env)
     run(["cargo", "test", "--offline", "-p", "featherweight", "-p", "featherweight-runtime", "-p", "structfs-handles",
-         "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
+         "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-json-store", "-p", "featherweight-guest", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
+    run(["cargo", "test", "--locked", "--offline", "-p", "structfs-http", "--all-features"], stage, env=env)
+    run(["cargo", "run", "--locked", "--offline", "-p", "structfs-service", "--example", "typed_tail"], stage, env=env)
     import sys
     run([sys.executable, str(stage / dirs["structfs-serde-store"] /
          "tests/reference_value_v1.py")], stage, env=env)

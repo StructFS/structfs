@@ -1,5 +1,9 @@
 # 0.4 candidate validation — 2026-09-15
 
+Historical validation of the original-letter revision (`ef02a92`). The later
+[supplement validation](release-validation-supplement-2026-09-15.md) supersedes
+this record for the current release candidate.
+
 The [holistic plan](../plans/02-coherent-contracts.md) is implemented for the
 StructFS/Featherweight 0.4.0 candidate and Isotope 2026-09-14 specification candidate.
 [Implementation decisions](design/2026-09-14-coherent-contracts.md) and

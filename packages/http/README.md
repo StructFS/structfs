@@ -104,3 +104,17 @@ response.is_server_error(); // 5xx
 errors. The default `blocking` feature adds native HTTP stores, ReqwestExecutor,
 and native executor dependencies. Keep it behind target-specific dependencies in
 browser-shared code. See the [platform matrix](../../docs/platforms.md).
+
+## Incremental responses
+
+Enable `streaming` for `streaming::AsyncReqwestExecutor`. It implements
+`AsyncHttpExecutor`, returning status/headers before a pull-based `ByteStream`.
+Dropping the response abandons the body; `read_limited` explicitly buffers at most
+a configured byte count, useful for bounded error responses. Query parameters,
+headers, method and optional JSON body are forwarded.
+
+`sse::SseFramer` is independently available without native HTTP. It handles chunk
+and UTF-8 boundaries, multiline data, CRLF/LF/CR and comments with a configured
+frame limit. EOF emits pending data. Errors are terminal but completed frames
+before a later error remain in output order. It has no provider dialect or
+reconnection policy. Budget output queues separately from per-frame retention.

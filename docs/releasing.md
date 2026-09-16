@@ -12,7 +12,7 @@ records describe their dated workloads and do not certify this revision. See
 
 ## Candidate verification
 
-For the 0.3 release, acceptance is local: the complete release dry-run, rebuilt
+For the 0.4 release, acceptance is local: the complete release dry-run, rebuilt
 browser-host tests, and review of the resulting artifacts. Remote CI status is not
 a prerequisite for this release. This does not claim validation on other hosts.
 

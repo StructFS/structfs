@@ -15,14 +15,16 @@
 //!   handles cannot be overwritten.
 //! - A Null write to `outstanding/{id}` **releases** the handle: its
 //!   cancel token fires (failing parked reads), `close` runs, and the
-//!   entry is removed. Releasing an unknown handle is a no-op (idempotent).
+//!   entry becomes inaccessible immediately. Acknowledgement awaits `close_wait`.
+//!   Pending/failed cleanup remains available to repeated releases. Unknown
+//!   handles are a no-op. Abandoning a wait does not undo the release request.
 //! - Reads and writes below a released or unknown handle see `None` /
 //!   `NotFound`.
 //! - Reading the root (or `outstanding`) lists live handle paths.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use structfs_core_store::{
     DetachedFuture, DetachedReader, DetachedWriter, Error, NoCodec, Path, Record, Value,
@@ -70,6 +72,20 @@ pub trait HandleProtocol: Send + Sync + 'static {
         let _ = handle;
     }
 
+    /// Wait for cleanup requested by `close`. Must be repeatable and safe to
+    /// abandon: unfinished cleanup belongs to a supervisor, not this future.
+    /// The default is suitable only when `close` completes cleanup synchronously.
+    fn close_wait(&self, _handle: Arc<Self::Handle>) -> DetachedFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Whether requested cleanup completed successfully. Allows abandoned release
+    /// tombstones to be reaped on the next operation. Failure remains false until
+    /// explicitly acknowledged by the cleanup owner.
+    fn close_complete(&self, _handle: &Self::Handle) -> bool {
+        false
+    }
+
     /// Optional documentation served at `docs`.
     fn docs(&self) -> Option<Value> {
         None
@@ -79,6 +95,7 @@ pub trait HandleProtocol: Send + Sync + 'static {
 struct Entry<H> {
     handle: Arc<H>,
     cancel: CancelToken,
+    close: Arc<Once>,
 }
 
 struct Inner<P: HandleProtocol> {
@@ -97,7 +114,7 @@ impl<P: HandleProtocol> Drop for Inner<P> {
         let entries = std::mem::take(self.entries.get_mut().unwrap_or_else(|e| e.into_inner()));
         for (_, entry) in entries {
             entry.cancel.cancel();
-            self.protocol.close(entry.handle);
+            entry.close.call_once(|| self.protocol.close(entry.handle));
         }
     }
 }
@@ -133,7 +150,13 @@ impl<P: HandleProtocol> HandleStore<P> {
     }
 
     fn lock_entries(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Entry<P::Handle>>> {
-        self.inner.entries.lock().unwrap_or_else(|e| e.into_inner())
+        let mut entries = self.inner.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|_, entry| {
+            !(entry.cancel.is_cancelled()
+                && entry.close.is_completed()
+                && self.inner.protocol.close_complete(&entry.handle))
+        });
+        entries
     }
 
     /// The handle path for an id: `outstanding/{id}`.
@@ -143,14 +166,21 @@ impl<P: HandleProtocol> HandleStore<P> {
 
     /// Number of live handles.
     pub fn live_handles(&self) -> usize {
-        self.lock_entries().len()
+        self.lock_entries()
+            .values()
+            .filter(|e| !e.cancel.is_cancelled())
+            .count()
     }
 
     /// The ids of all live handles, ascending.
     ///
     /// For meta/introspection lenses layered over a handle store.
     pub fn handle_ids(&self) -> Vec<u64> {
-        self.lock_entries().keys().copied().collect()
+        self.lock_entries()
+            .iter()
+            .filter(|(_, e)| !e.cancel.is_cancelled())
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// The protocol state of a live handle, if present.
@@ -176,30 +206,51 @@ impl<P: HandleProtocol> HandleStore<P> {
             Entry {
                 handle: Arc::new(handle),
                 cancel,
+                close: Arc::new(Once::new()),
             },
         );
         Ok(Self::handle_path(id))
     }
 
-    fn release(&self, id: u64) {
-        let entry = self.lock_entries().remove(&id);
-        if let Some(entry) = entry {
-            // Cancel first so parked reads fail, then let the protocol
-            // tear down. Writes are unaffected by cancellation.
+    fn release(&self, id: u64) -> DetachedFuture<()> {
+        // Retain a tombstone until successful cleanup so repeated/concurrent
+        // releases wait for the same producer rather than acknowledge early.
+        let entry = self.lock_entries().get(&id).map(|entry| {
             entry.cancel.cancel();
-            self.inner.protocol.close(entry.handle);
-        }
+            (entry.handle.clone(), entry.close.clone())
+        });
+        let Some((handle, close)) = entry else {
+            return Box::pin(async { Ok(()) });
+        };
+        close.call_once(|| self.inner.protocol.close(handle.clone()));
+        let wait = self.inner.protocol.close_wait(handle);
+        let inner = Arc::downgrade(&self.inner);
+        Box::pin(async move {
+            wait.await?;
+            if let Some(inner) = inner.upgrade() {
+                inner
+                    .entries
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id);
+            }
+            Ok(())
+        })
     }
 
     fn get(&self, id: u64) -> Option<Arc<P::Handle>> {
-        self.lock_entries().get(&id).map(|e| e.handle.clone())
+        self.lock_entries()
+            .get(&id)
+            .filter(|e| !e.cancel.is_cancelled())
+            .map(|e| e.handle.clone())
     }
 
     fn listing(&self) -> Value {
         let items: Vec<Value> = self
             .lock_entries()
-            .keys()
-            .map(|id| Value::String(Self::handle_path(*id).to_string()))
+            .iter()
+            .filter(|(_, entry)| !entry.cancel.is_cancelled())
+            .map(|(id, _)| Value::String(Self::handle_path(*id).to_string()))
             .collect();
         let mut map = BTreeMap::new();
         map.insert("items".to_string(), Value::Array(items));
@@ -262,8 +313,12 @@ impl<P: HandleProtocol> DetachedWriter for HandleStore<P> {
             let result = match data.into_value(&NoCodec) {
                 Err(e) => Err(e),
                 Ok(value) if value.is_null() => {
-                    self.release(id);
-                    Ok(to.clone())
+                    let wait = self.release(id);
+                    let path = to.clone();
+                    return Box::pin(async move {
+                        wait.await?;
+                        Ok(path)
+                    });
                 }
                 Ok(_) => Err(Error::conflict(format!(
                     "cannot overwrite outstanding handle {}; write Null to release it",

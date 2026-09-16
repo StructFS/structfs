@@ -61,3 +61,7 @@ server responses without explicit presence must be rebuilt or adapted.
 Value v1 and existing optional profile versions remain unchanged. Store conventions
 apply at exposed interfaces; internal snapshot and mutation representations remain
 implementation choices. See [0.4 migration](../docs/migration-0.4.md).
+
+The September 15 adoption supplement adds optional codec diagnostics and joined
+handle cleanup integration. See [supplement validation](../docs/release-validation-supplement-2026-09-15.md)
+for the current candidate evidence, including file-recovery tests and their limits.

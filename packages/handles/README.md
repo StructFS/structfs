@@ -22,3 +22,10 @@ Disable default features for portable cancellation, gates, streams and handle
 stores. `sync-bridge` (default) adds the native blocking bridge's Tokio runtime
 requirement; it does not require the multi-thread executor. See the
 [platform matrix](../../docs/platforms.md) for tested combinations.
+
+Explicit Null-write release makes a handle inaccessible immediately, requests
+`HandleProtocol::close` once, then awaits `close_wait`. Repeated releases await
+pending cleanup. Asynchronous cleanup must outlive abandoned wait futures; use
+`structfs_service::SupervisedProtocol` to connect it to an existing cleanup owner.
+The default close_wait is only for synchronous cleanup. Final store Drop requests
+cleanup; the supervisor must remain alive through drain.

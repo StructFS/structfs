@@ -138,7 +138,7 @@ pub fn err_response(error_type: &str, message: &str, retryable: bool) -> Value {
 /// Errors are expressed in store-level terms only — the caller must not be
 /// able to tell what implementation is behind the path.
 pub fn error_to_response(error: &Error) -> Value {
-    match error {
+    let mut response = match error {
         Error::NoRoute { .. } | Error::NotFound { .. } => {
             err_response("not_found", &error.to_string(), false)
         }
@@ -151,11 +151,39 @@ pub fn error_to_response(error: &Error) -> Value {
         Error::ResourceLimit { .. } => err_response("resource_limit", &error.to_string(), false),
         Error::DeadlineExceeded { .. } => err_response("timeout", &error.to_string(), true),
         Error::Conflict { .. } => err_response("conflict", &error.to_string(), false),
+        Error::Codec {
+            kind: structfs_core_store::CodecErrorKind::ResourceLimit,
+            ..
+        } => err_response("resource_limit", &error.to_string(), false),
         _ => err_response("store_error", &error.to_string(), false),
+    };
+    if let Some(detail) = error.codec_diagnostic() {
+        if let Value::Map(root) = &mut response {
+            if let Some(Value::Map(fields)) = root.get_mut("error") {
+                if let Ok(value) = structfs_serde_store::to_value(&detail) {
+                    fields.insert("codec".into(), value);
+                }
+            }
+        }
     }
+    response
 }
 
 fn decode_error(map: &BTreeMap<String, Value>) -> Error {
+    if let Some(Value::Map(fields)) = map.get("error") {
+        if let (Some(detail), Some(Value::String(message))) =
+            (fields.get("codec"), fields.get("message"))
+        {
+            if let Ok(detail) = structfs_serde_store::from_value::<
+                structfs_core_store::CodecDiagnostic,
+            >(detail.clone())
+            {
+                if let Some(error) = detail.into_error(message.clone()) {
+                    return error;
+                }
+            }
+        }
+    }
     let (error_type, message) = match map.get("error") {
         Some(Value::Map(error)) => (
             match error.get("type") {

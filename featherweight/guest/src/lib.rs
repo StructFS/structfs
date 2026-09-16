@@ -65,11 +65,43 @@ pub mod sdk {
         write_typed(path, &bytes).map_err(ValueError::Host)
     }
 
+    /// Optional versioned codec detail. Unknown kind strings remain available.
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+    pub struct CodecDiagnostic {
+        pub kind: String,
+        pub operation: Option<String>,
+        pub format: String,
+    }
     /// ABI status category and diagnostic, preserved without string matching.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct HostError {
         pub status: i32,
         pub message: String,
+        pub codec: Option<CodecDiagnostic>,
+    }
+    impl HostError {
+        pub fn from_diagnostic(status: i32, message: String) -> Self {
+            #[derive(serde::Deserialize)]
+            struct Envelope {
+                structfs_error: u32,
+                message: String,
+                codec: CodecDiagnostic,
+            }
+            if let Ok(envelope) = serde_json::from_str::<Envelope>(&message) {
+                if envelope.structfs_error == 1 {
+                    return Self {
+                        status,
+                        message: envelope.message,
+                        codec: Some(envelope.codec),
+                    };
+                }
+            }
+            Self {
+                status,
+                message,
+                codec: None,
+            }
+        }
     }
     impl std::fmt::Display for HostError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -130,10 +162,7 @@ pub mod sdk {
         match status {
             0 => Ok(Some(take(ret))),
             1 => Ok(None),
-            _ => Err(HostError {
-                status,
-                message: message(ret),
-            }),
+            _ => Err(HostError::from_diagnostic(status, message(ret))),
         }
     }
 
@@ -151,10 +180,7 @@ pub mod sdk {
         };
         match status {
             0 => Ok(message(ret)),
-            _ => Err(HostError {
-                status,
-                message: message(ret),
-            }),
+            _ => Err(HostError::from_diagnostic(status, message(ret))),
         }
     }
     /// Compatibility wrapper returning only diagnostic text.
@@ -278,3 +304,26 @@ pub mod state;
 
 #[cfg(feature = "profiles")]
 pub use structfs_profiles as profiles;
+
+#[cfg(test)]
+mod codec_diagnostic_tests {
+    use super::sdk::HostError;
+    #[test]
+    fn updated_sdk_reads_optional_detail_and_old_text() {
+        for kind in ["type_mismatch", "resource_limit", "unsupported_format"] {
+            let error = HostError::from_diagnostic(
+                -8,
+                serde_json::json!({
+                    "structfs_error":1,"message":"original diagnostic",
+                    "codec":{"kind":kind,"operation":"decode","format":"application/json"}
+                })
+                .to_string(),
+            );
+            assert_eq!(error.message, "original diagnostic");
+            assert_eq!(error.codec.unwrap().kind, kind);
+        }
+        let error = HostError::from_diagnostic(-9, "old diagnostic".into());
+        assert_eq!(error.message, "old diagnostic");
+        assert!(error.codec.is_none());
+    }
+}
