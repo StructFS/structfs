@@ -7,7 +7,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! structfs-ll-store = { version = "0.1", features = ["async"] }
+//! structfs-ll-store = { version = "0.4", features = ["async"] }
 //! ```
 
 use async_trait::async_trait;
@@ -122,18 +122,25 @@ impl<T: AsyncLLWriter + ?Sized> AsyncLLWriter for Box<T> {
     }
 }
 
-/// Adapter to wrap a sync `LLReader` for async use.
+/// Adapter to wrap a sync `LLReader`/`LLWriter` for async use.
 ///
-/// This uses `spawn_blocking` internally, so it's suitable for stores
-/// that do blocking I/O.
+/// Each async operation takes the inner `Mutex` and runs the sync operation
+/// **inline on the calling task** — there is no `spawn_blocking` and no
+/// thread hop. That makes it suitable for stores whose operations are short
+/// (in-memory, cheap computation); a store that blocks on I/O will block
+/// the executor and deserves a purpose-built async implementation.
+///
+/// Lock poisoning is recovered from: if a previous operation panicked while
+/// holding the lock, the next operation proceeds against the store as it
+/// was left (the same policy as `Shared`/`SyncToAsync` in core-store).
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use structfs_ll_store::{SyncToAsyncLLReader, LLReader};
+/// use structfs_ll_store::{SyncToAsyncLL, LLReader};
 ///
 /// let sync_store = MySyncStore::new();
-/// let async_store = SyncToAsyncLLReader::new(sync_store);
+/// let async_store = SyncToAsyncLL::new(sync_store);
 /// ```
 pub struct SyncToAsyncLL<T> {
     inner: std::sync::Arc<std::sync::Mutex<T>>,
@@ -151,6 +158,13 @@ impl<T> SyncToAsyncLL<T> {
     pub fn inner(&self) -> &std::sync::Mutex<T> {
         &self.inner
     }
+
+    /// Lock the inner store, recovering from poisoning.
+    fn lock(&self) -> std::sync::MutexGuard<'_, T> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl<T> Clone for SyncToAsyncLL<T> {
@@ -164,36 +178,15 @@ impl<T> Clone for SyncToAsyncLL<T> {
 #[async_trait]
 impl<T: crate::LLReader + Send + 'static> AsyncLLReader for SyncToAsyncLL<T> {
     async fn ll_read_async(&mut self, path: &[&[u8]]) -> Result<Option<Bytes>, LLError> {
-        // Clone path components for the blocking task
-        let path_owned: Vec<Vec<u8>> = path.iter().map(|c| c.to_vec()).collect();
-        let inner = self.inner.clone();
-
-        // Note: In a real implementation, you'd use tokio::task::spawn_blocking
-        // For now, we just run synchronously (safe for tests and simple cases)
-        let mut guard = inner.lock().map_err(|_| LLError::Protocol {
-            code: 100,
-            detail: Bytes::from_static(b"lock poisoned"),
-        })?;
-
-        let refs: Vec<&[u8]> = path_owned.iter().map(|v| v.as_slice()).collect();
-        guard.ll_read(&refs)
+        // The borrowed components outlive the (inline, non-suspending) call.
+        self.lock().ll_read(path)
     }
 }
 
 #[async_trait]
 impl<T: crate::LLWriter + Send + 'static> AsyncLLWriter for SyncToAsyncLL<T> {
     async fn ll_write_async(&mut self, path: &[&[u8]], data: Bytes) -> Result<LLPath, LLError> {
-        // Clone path components for the blocking task
-        let path_owned: Vec<Vec<u8>> = path.iter().map(|c| c.to_vec()).collect();
-        let inner = self.inner.clone();
-
-        let mut guard = inner.lock().map_err(|_| LLError::Protocol {
-            code: 100,
-            detail: Bytes::from_static(b"lock poisoned"),
-        })?;
-
-        let refs: Vec<&[u8]> = path_owned.iter().map(|v| v.as_slice()).collect();
-        guard.ll_write(&refs, data)
+        self.lock().ll_write(path, data)
     }
 }
 
@@ -299,5 +292,28 @@ mod tests {
 
         let result = async_store.ll_read_async(&[b"key"]).await.unwrap();
         assert_eq!(result, Some(Bytes::from_static(b"value")));
+    }
+
+    #[tokio::test]
+    async fn sync_to_async_recovers_from_poisoned_lock() {
+        struct Store;
+        impl crate::LLReader for Store {
+            fn ll_read(&mut self, _: &[&[u8]]) -> Result<Option<Bytes>, LLError> {
+                Ok(Some(Bytes::from_static(b"alive")))
+            }
+        }
+        let store = SyncToAsyncLL::new(Store);
+        let poisoner = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.inner().lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(store.inner().is_poisoned());
+        let mut store = store;
+        assert_eq!(
+            store.ll_read_async(&[b"k"]).await.unwrap(),
+            Some(Bytes::from_static(b"alive"))
+        );
     }
 }

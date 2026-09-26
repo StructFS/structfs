@@ -29,6 +29,10 @@ pub use errno::Errno;
 pub use files::MemFiles;
 
 /// Map a typed store error onto a WASI errno (spec 10's table).
+///
+/// This crate depends only on core-store, so the table is written out
+/// here; `featherweight-runtime`'s tests check it against the runtime's
+/// `ErrorKind` taxonomy for every error variant, so the two cannot drift.
 pub fn errno_from_error(error: &Error) -> Errno {
     match error {
         Error::NotFound { .. } | Error::NoRoute { .. } => errno::NOENT,
@@ -37,7 +41,7 @@ pub fn errno_from_error(error: &Error) -> Errno {
         Error::DeadlineExceeded { .. } => errno::TIMEDOUT,
         Error::Conflict { .. } => errno::EXIST,
         Error::Cancelled { .. } => errno::INTR,
-        Error::Path(_) => errno::INVAL,
+        Error::Path(_) | Error::InvalidArgument { .. } => errno::INVAL,
         _ => errno::IO,
     }
 }
@@ -52,7 +56,11 @@ pub const SEEK_CUR: u8 = 1;
 pub const SEEK_END: u8 = 2;
 
 /// Open flags for [`WasiIso::path_open`] (the preview1 subset).
+///
+/// Build from `default()` (nothing set) plus the `with_*` setters; more
+/// preview1 flags may be added.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct OpenFlags {
     pub read: bool,
     pub write: bool,
@@ -62,6 +70,29 @@ pub struct OpenFlags {
     pub truncate: bool,
     /// All writes go to the end.
     pub append: bool,
+}
+
+impl OpenFlags {
+    pub fn with_read(mut self, read: bool) -> Self {
+        self.read = read;
+        self
+    }
+    pub fn with_write(mut self, write: bool) -> Self {
+        self.write = write;
+        self
+    }
+    pub fn with_create(mut self, create: bool) -> Self {
+        self.create = create;
+        self
+    }
+    pub fn with_truncate(mut self, truncate: bool) -> Self {
+        self.truncate = truncate;
+        self
+    }
+    pub fn with_append(mut self, append: bool) -> Self {
+        self.append = append;
+        self
+    }
 }
 
 /// One file-descriptor table entry.
@@ -276,7 +307,7 @@ impl<S: Reader + Writer> WasiIso<S> {
     }
 
     fn file_len(&mut self, path: &Path) -> Result<Option<u64>, Errno> {
-        match self.read_value(&path.child(PathComponent::try_new("len").unwrap()))? {
+        match self.read_value(&path.join(&path!("len")))? {
             Some(Value::Integer(len)) if len >= 0 => Ok(Some(len as u64)),
             Some(_) => Err(errno::IO),
             None => Ok(None),
@@ -344,9 +375,9 @@ impl<S: Reader + Writer> WasiIso<S> {
             _ => return Err(errno::BADF),
         };
         let range = path
-            .child(PathComponent::try_new("at").unwrap())
+            .join(&path!("at"))
             .child(PathComponent::from(offset))
-            .child(PathComponent::try_new("len").unwrap())
+            .join(&path!("len"))
             .child(PathComponent::from(max as u64));
         let bytes = match self.read_value(&range)? {
             Some(Value::Bytes(bytes)) => bytes,
@@ -372,10 +403,9 @@ impl<S: Reader + Writer> WasiIso<S> {
             _ => return Err(errno::BADF),
         };
         let target = if append {
-            path.child(PathComponent::try_new("append").unwrap())
+            path.join(&path!("append"))
         } else {
-            path.child(PathComponent::try_new("at").unwrap())
-                .child(PathComponent::from(offset))
+            path.join(&path!("at")).child(PathComponent::from(offset))
         };
         self.store
             .write(&target, Record::parsed(Value::Bytes(bytes.to_vec())))
@@ -836,6 +866,10 @@ mod tests {
         );
         assert_eq!(errno_from_error(&Error::conflict("dup")), errno::EXIST);
         assert_eq!(errno_from_error(&Error::cancelled("gone")), errno::INTR);
+        assert_eq!(
+            errno_from_error(&Error::invalid_argument("zero limit")),
+            errno::INVAL
+        );
         assert_eq!(
             errno_from_error(&Error::store("s", "op", "weird")),
             errno::IO

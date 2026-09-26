@@ -2,22 +2,23 @@
 //!
 //! A `BlockCell` is the single shared state record for one block instance:
 //! lifecycle state, the server-protocol request queue, response
-//! correlation, and shutdown flags. Everything that touches a block —
-//! the runtime, its namespace, its `/iso/` surface, and callers routed to
-//! its store — holds the same `Arc<BlockCell>`.
+//! correlation, and shutdown flags. Everything inside the runtime that
+//! touches a block — its namespace, its `/iso/` surface, and callers routed
+//! to its store — holds the same `Arc<BlockCell>`. Embedders and native
+//! blocks see it only through the read-only [`BlockView`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use structfs_core_store::{Error, Path, Value};
+use structfs_core_store::{path, Error, Path, Value};
 use structfs_handles::{CancelToken, Gate};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// Unique block identifier, assigned by the runtime. Opaque to blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(String);
 
 impl BlockId {
@@ -55,6 +56,7 @@ impl std::fmt::Display for BlockId {
 /// The six lifecycle states from
 /// [spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BlockState {
     Created,
     Starting,
@@ -88,6 +90,7 @@ impl BlockState {
 /// failure modes; restart is out of
 /// scope for the strawman).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum FailurePolicy {
     /// Block failure fails the assembly.
     #[default]
@@ -99,6 +102,7 @@ pub enum FailurePolicy {
 /// Shutdown mode
 /// ([spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ShutdownMode {
     Graceful,
     Immediate,
@@ -116,30 +120,30 @@ impl ShutdownMode {
 /// A server-protocol request queued for a block
 /// ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)).
 #[derive(Debug, Clone)]
-pub struct ServerRequest {
+pub(crate) struct ServerRequest {
     /// `"read"` or `"write"`.
-    pub op: &'static str,
+    pub(crate) op: &'static str,
     /// Path relative to the block's store root.
-    pub path: Path,
+    pub(crate) path: Path,
     /// Data for writes; `Value::Null` for reads.
-    pub data: Value,
+    pub(crate) data: Value,
     /// Correlation token; the block responds by writing to
     /// `iso/server/responses/{token}`.
-    pub token: u64,
+    pub(crate) token: u64,
 }
 
 impl ServerRequest {
     /// Encode as the spec's request envelope.
-    pub fn to_value(&self) -> Value {
-        let mut map = std::collections::BTreeMap::new();
-        map.insert("op".to_string(), Value::from(self.op));
-        map.insert("path".to_string(), Value::String(self.path.to_string()));
-        map.insert("data".to_string(), self.data.clone());
-        map.insert(
-            "respond_to".to_string(),
-            Value::String(format!("iso/server/responses/{}", self.token)),
-        );
-        Value::Map(map)
+    pub(crate) fn to_value(&self) -> Value {
+        Value::Map(BTreeMap::from([
+            ("op".to_string(), Value::from(self.op)),
+            ("path".to_string(), Value::String(self.path.to_string())),
+            ("data".to_string(), self.data.clone()),
+            (
+                "respond_to".to_string(),
+                Value::String(format!("iso/server/responses/{}", self.token)),
+            ),
+        ]))
     }
 }
 
@@ -148,7 +152,7 @@ impl ServerRequest {
 /// served requests interleaved
 /// with runtime notifications.
 #[derive(Debug, Clone)]
-pub enum BlockEvent {
+pub(crate) enum BlockEvent {
     /// A server-protocol request (carries `respond_to`).
     Request(ServerRequest),
     /// A runtime- or host-originated signal. Fire-and-forget.
@@ -159,29 +163,25 @@ pub enum BlockEvent {
 
 impl BlockEvent {
     /// Encode as the mailbox envelope; `op` distinguishes event kinds.
-    pub fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         match self {
             BlockEvent::Request(request) => request.to_value(),
-            BlockEvent::Signal { name, data } => {
-                let mut map = std::collections::BTreeMap::new();
-                map.insert("op".to_string(), Value::from("signal"));
-                map.insert("signal".to_string(), Value::String(name.clone()));
-                map.insert("data".to_string(), data.clone());
-                Value::Map(map)
-            }
-            BlockEvent::Timer { tag } => {
-                let mut map = std::collections::BTreeMap::new();
-                map.insert("op".to_string(), Value::from("timer"));
-                map.insert("tag".to_string(), tag.clone());
-                Value::Map(map)
-            }
+            BlockEvent::Signal { name, data } => Value::Map(BTreeMap::from([
+                ("op".to_string(), Value::from("signal")),
+                ("signal".to_string(), Value::String(name.clone())),
+                ("data".to_string(), data.clone()),
+            ])),
+            BlockEvent::Timer { tag } => Value::Map(BTreeMap::from([
+                ("op".to_string(), Value::from("timer")),
+                ("tag".to_string(), tag.clone()),
+            ])),
         }
     }
 }
 
 /// Owns queue/correlation cleanup when a caller finishes, times out, or drops.
 pub(crate) struct PendingCall {
-    cell: std::sync::Arc<BlockCell>,
+    cell: Arc<BlockCell>,
     token: u64,
     receiver: oneshot::Receiver<ResponseDelivery>,
     _charge: crate::admission::CallCharge,
@@ -211,6 +211,7 @@ impl Drop for PendingCall {
     }
 }
 
+#[derive(Default)]
 struct ShutdownFlags {
     requested: bool,
     mode: Option<ShutdownMode>,
@@ -229,82 +230,95 @@ struct QueuedEvent {
 struct CellState {
     state: BlockState,
     queue: VecDeque<QueuedEvent>,
-    responses: HashMap<u64, oneshot::Sender<ResponseDelivery>>,
-    request_cancels: HashMap<u64, CancelToken>,
+    // Ordered maps: under simulation, orphaned callers are woken in token
+    // order, which is a function of the run — never of a hasher.
+    responses: BTreeMap<u64, oneshot::Sender<ResponseDelivery>>,
+    request_cancels: BTreeMap<u64, CancelToken>,
     /// Simulation only: which block parked awaiting each token, so the
     /// response can make it runnable during the responder's turn.
-    callers: HashMap<u64, String>,
+    callers: BTreeMap<u64, String>,
     shutdown: ShutdownFlags,
     interface: Option<Value>,
     last_error: Option<String>,
 }
 
-/// The single shared state record for one block instance.
-pub struct BlockCell {
+/// The single shared state record for one block instance. Runtime-internal:
+/// embedders observe it through [`BlockView`].
+pub(crate) struct BlockCell {
     /// The block's local name within its assembly.
-    pub name: String,
+    pub(crate) name: String,
     /// The block's runtime-assigned identity.
-    pub id: BlockId,
+    pub(crate) id: BlockId,
     /// Host-only admission identity; transcript IDs may repeat across runtimes.
     pub(crate) admission_id: BlockId,
     /// Failure policy from the assembly definition.
-    pub failure: FailurePolicy,
+    pub(crate) failure: FailurePolicy,
     /// Cancelled on immediate shutdown: fails the block's parked reads.
-    pub cancel: CancelToken,
-    pub usage: crate::ExecutionMeter,
+    pub(crate) cancel: CancelToken,
+    pub(crate) usage: crate::ExecutionMeter,
     /// Signals and outstanding timers share this bounded instance budget.
-    pub events: std::sync::Arc<crate::CallBudget>,
+    pub(crate) events: Arc<crate::CallBudget>,
     /// Bounds responses retained before callers consume them.
-    pub replies: std::sync::Arc<crate::CallBudget>,
+    pub(crate) replies: Arc<crate::CallBudget>,
 
     state: Mutex<CellState>,
     /// Notified on every state/queue/shutdown change a waiter might watch.
-    pub(crate) gate: Gate,
+    gate: Gate,
     next_token: AtomicU64,
     started_at: Instant,
     /// Deterministic simulation (spec 12): the schedule this cell's
     /// wakes report to, under the cell's stable key. `None` outside
     /// simulation.
-    sim: Option<(String, std::sync::Arc<crate::turnstile::Turnstile>)>,
+    sim: Option<(String, Arc<crate::turnstile::Turnstile>)>,
+}
+
+/// Admission ceiling for a cell's outbound event queue.
+fn event_limits() -> crate::CallLimits {
+    crate::CallLimits::default()
+        .with_calls(256)
+        .with_calls_per_block(256)
+        .with_bytes(1024 * 1024)
+        .with_bytes_per_block(1024 * 1024)
 }
 
 impl BlockCell {
-    /// Create a cell in `Created` state.
-    pub fn new(name: impl Into<String>, failure: FailurePolicy) -> Self {
+    fn with_id(name: String, failure: FailurePolicy, id: BlockId) -> Self {
         Self {
-            name: name.into(),
-            id: BlockId::new(),
+            name,
+            id,
             admission_id: BlockId::new(),
             failure,
             cancel: CancelToken::new(),
             usage: crate::ExecutionMeter::default(),
-            replies: crate::CallBudget::new(crate::CallLimits::default()),
-            events: crate::CallBudget::new(crate::CallLimits {
-                calls: 256,
-                calls_per_block: 256,
-                bytes: 1024 * 1024,
-                bytes_per_block: 1024 * 1024,
-            }),
+            replies: crate::CallBudget::shared(crate::CallLimits::default()),
+            events: crate::CallBudget::shared(event_limits()),
             state: Mutex::new(CellState {
                 state: BlockState::Created,
                 queue: VecDeque::new(),
-                responses: HashMap::new(),
-                request_cancels: HashMap::new(),
-                shutdown: ShutdownFlags {
-                    requested: false,
-                    mode: None,
-                    complete: false,
-                    exit_code: None,
-                },
+                responses: BTreeMap::new(),
+                request_cancels: BTreeMap::new(),
+                shutdown: ShutdownFlags::default(),
                 interface: None,
                 last_error: None,
-                callers: HashMap::new(),
+                callers: BTreeMap::new(),
             }),
             gate: Gate::new(),
             next_token: AtomicU64::new(0),
             started_at: Instant::now(),
             sim: None,
         }
+    }
+
+    /// A cell in `Created` state with a fresh random id.
+    #[cfg(test)]
+    pub(crate) fn new(name: impl Into<String>, failure: FailurePolicy) -> Self {
+        Self::with_id(name.into(), failure, BlockId::new())
+    }
+
+    /// A cell whose id derives from its assembly-scoped key, so
+    /// identity is stable across runs (see [`BlockId::named`]).
+    pub(crate) fn keyed(name: impl Into<String>, failure: FailurePolicy, key: &str) -> Self {
+        Self::with_id(name.into(), failure, BlockId::named(key))
     }
 
     /// Enroll this cell in a deterministic simulation before it is
@@ -312,58 +326,19 @@ impl BlockCell {
     pub(crate) fn attach_simulation(
         &mut self,
         key: &str,
-        turnstile: std::sync::Arc<crate::turnstile::Turnstile>,
+        turnstile: Arc<crate::turnstile::Turnstile>,
     ) {
         self.sim = Some((key.to_string(), turnstile));
     }
 
     /// Whether this cell runs under the deterministic scheduler.
-    pub fn simulated(&self) -> bool {
+    pub(crate) fn simulated(&self) -> bool {
         self.sim.is_some()
     }
 
     /// The cell's schedule enrollment, when simulated.
-    pub(crate) fn sim(&self) -> Option<&(String, std::sync::Arc<crate::turnstile::Turnstile>)> {
+    pub(crate) fn sim(&self) -> Option<&(String, Arc<crate::turnstile::Turnstile>)> {
         self.sim.as_ref()
-    }
-
-    /// A cell whose id derives from its assembly-scoped key, so
-    /// identity is stable across runs (see [`BlockId::named`]).
-    pub fn keyed(name: impl Into<String>, failure: FailurePolicy, key: &str) -> Self {
-        Self {
-            name: name.into(),
-            id: BlockId::named(key),
-            admission_id: BlockId::new(),
-            failure,
-            cancel: CancelToken::new(),
-            usage: crate::ExecutionMeter::default(),
-            replies: crate::CallBudget::new(crate::CallLimits::default()),
-            events: crate::CallBudget::new(crate::CallLimits {
-                calls: 256,
-                calls_per_block: 256,
-                bytes: 1024 * 1024,
-                bytes_per_block: 1024 * 1024,
-            }),
-            state: Mutex::new(CellState {
-                state: BlockState::Created,
-                queue: VecDeque::new(),
-                responses: HashMap::new(),
-                request_cancels: HashMap::new(),
-                shutdown: ShutdownFlags {
-                    requested: false,
-                    mode: None,
-                    complete: false,
-                    exit_code: None,
-                },
-                interface: None,
-                last_error: None,
-                callers: HashMap::new(),
-            }),
-            gate: Gate::new(),
-            next_token: AtomicU64::new(0),
-            started_at: Instant::now(),
-            sim: None,
-        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CellState> {
@@ -373,12 +348,12 @@ impl BlockCell {
     // === Lifecycle ===
 
     /// Current lifecycle state.
-    pub fn state(&self) -> BlockState {
+    pub(crate) fn state(&self) -> BlockState {
         self.lock().state
     }
 
     /// Transition state and wake watchers.
-    pub fn set_state(&self, state: BlockState) {
+    pub(crate) fn set_state(&self, state: BlockState) {
         let orphaned = {
             let mut cell = self.lock();
             cell.state = state;
@@ -386,13 +361,13 @@ impl BlockCell {
                 // No response will ever come: fail in-flight callers by
                 // dropping their senders.
                 cell.responses.clear();
-                for (_, cancel) in cell.request_cancels.drain() {
+                for (_, cancel) in std::mem::take(&mut cell.request_cancels) {
                     cancel.cancel();
                 }
                 cell.queue.clear();
                 std::mem::take(&mut cell.callers)
             } else {
-                HashMap::new()
+                BTreeMap::new()
             }
         };
         self.gate.notify();
@@ -407,7 +382,7 @@ impl BlockCell {
 
     /// Attempt the Created -> Starting transition. Returns true if this
     /// caller won the race and should spawn the driver.
-    pub fn try_begin_start(&self) -> bool {
+    pub(crate) fn try_begin_start(&self) -> bool {
         let mut cell = self.lock();
         if cell.state == BlockState::Created {
             cell.state = BlockState::Starting;
@@ -418,17 +393,17 @@ impl BlockCell {
     }
 
     /// Record a failure message for diagnostics.
-    pub fn record_error(&self, message: impl Into<String>) {
+    pub(crate) fn record_error(&self, message: impl Into<String>) {
         self.lock().last_error = Some(message.into());
     }
 
     /// Last recorded failure, if any.
-    pub fn last_error(&self) -> Option<String> {
+    pub(crate) fn last_error(&self) -> Option<String> {
         self.lock().last_error.clone()
     }
 
     /// Nanoseconds since the cell was created (the block's monotonic clock).
-    pub fn monotonic_nanos(&self) -> i64 {
+    pub(crate) fn monotonic_nanos(&self) -> i64 {
         self.started_at.elapsed().as_nanos() as i64
     }
 
@@ -493,7 +468,7 @@ impl BlockCell {
     }
 
     pub(crate) fn enqueue_owned(
-        self: &std::sync::Arc<Self>,
+        self: &Arc<Self>,
         op: &'static str,
         path: Path,
         data: Value,
@@ -509,31 +484,29 @@ impl BlockCell {
     }
 
     /// Outstanding response identities and queued events, for overload diagnostics.
-    pub fn pending_counts(&self) -> (usize, usize) {
+    pub(crate) fn pending_counts(&self) -> (usize, usize) {
         let cell = self.lock();
         (cell.responses.len(), cell.queue.len())
     }
 
     /// Deliver a signal, failing explicitly if the event budget is full.
-    pub fn deliver_signal(&self, name: impl Into<String>, data: Value) -> Result<(), Error> {
-        let charged = Value::Array(vec![Value::String(name.into()), data]);
-        let charge = self.reserve_event(&charged)?;
-        let Value::Array(mut values) = charged else {
-            unreachable!()
+    /// The charge is the logical weight of the envelope the block reads.
+    pub(crate) fn deliver_signal(&self, name: impl Into<String>, data: Value) -> Result<(), Error> {
+        let event = BlockEvent::Signal {
+            name: name.into(),
+            data,
         };
-        let data = values.pop().unwrap();
-        let Value::String(name) = values.pop().unwrap() else {
-            unreachable!()
-        };
-        self.deliver_event(BlockEvent::Signal { name, data }, charge)
+        let charge = self.reserve_event(&event.to_value())?;
+        self.deliver_event(event, charge)
     }
+
     pub(crate) fn reserve_event(
         &self,
         data: &Value,
     ) -> Result<crate::admission::CallCharge, Error> {
-        self.events
-            .acquire(&self.admission_id, &Path::parse("").unwrap(), data)
+        self.events.acquire(&self.admission_id, &path!(""), data)
     }
+
     /// Reserve at registration, not expiry: an admitted timer cannot be lost
     /// because signals fill the mailbox while the timer is sleeping.
     pub(crate) fn deliver_event(
@@ -556,7 +529,9 @@ impl BlockCell {
         }
         Ok(())
     }
-    pub fn deliver_timer(&self, tag: Value) -> Result<(), Error> {
+
+    #[cfg(test)]
+    pub(crate) fn deliver_timer(&self, tag: Value) -> Result<(), Error> {
         let charge = self.reserve_event(&tag)?;
         self.deliver_event(BlockEvent::Timer { tag }, charge)
     }
@@ -565,7 +540,7 @@ impl BlockCell {
 
     /// Take the next mailbox event, parking until one arrives or shutdown
     /// is requested (which yields `None`, the spec's null-unblock).
-    pub async fn next_event(&self) -> Result<Option<BlockEvent>, Error> {
+    pub(crate) async fn next_event(&self) -> Result<Option<BlockEvent>, Error> {
         // First read of the mailbox marks the block Running (the spec's
         // Starting -> Running transition: "begins reading").
         {
@@ -615,14 +590,14 @@ impl BlockCell {
     }
 
     /// Drain all pending mailbox events without blocking.
-    pub fn pending_events(&self) -> Vec<BlockEvent> {
+    pub(crate) fn pending_events(&self) -> Vec<BlockEvent> {
         let mut cell = self.lock();
         cell.queue.drain(..).map(|queued| queued.event).collect()
     }
 
     /// Cooperative cancellation for one served request. Missing/finished
     /// identities return an already-cancelled token, never a new live scope.
-    pub fn request_cancellation(&self, token: u64) -> CancelToken {
+    pub(crate) fn request_cancellation(&self, token: u64) -> CancelToken {
         self.lock()
             .request_cancels
             .get(&token)
@@ -636,7 +611,7 @@ impl BlockCell {
 
     /// Fulfill a response for a correlation token. Unknown tokens are
     /// ignored (the caller may have timed out and gone away).
-    pub fn respond(&self, token: u64, response: Value) {
+    pub(crate) fn respond(&self, token: u64, response: Value) {
         let (sender, caller) = {
             let mut cell = self.lock();
             if let Some(cancel) = cell.request_cancels.remove(&token) {
@@ -645,20 +620,19 @@ impl BlockCell {
             (cell.responses.remove(&token), cell.callers.remove(&token))
         };
         if let Some(sender) = sender {
-            let delivery =
-                match self
-                    .replies
-                    .acquire(&self.admission_id, &Path::parse("").unwrap(), &response)
-                {
-                    Ok(charge) => ResponseDelivery {
-                        value: response,
-                        _charge: Some(charge),
-                    },
-                    Err(error) => ResponseDelivery {
-                        value: crate::protocol::error_to_response(&error),
-                        _charge: None,
-                    },
-                };
+            let delivery = match self
+                .replies
+                .acquire(&self.admission_id, &path!(""), &response)
+            {
+                Ok(charge) => ResponseDelivery {
+                    value: response,
+                    _charge: Some(charge),
+                },
+                Err(error) => ResponseDelivery {
+                    value: crate::protocol::error_to_response(&error),
+                    _charge: None,
+                },
+            };
             let _ = sender.send(delivery);
         }
         // The parked caller's answer exists: runnable, during this
@@ -676,7 +650,7 @@ impl BlockCell {
         let callers = {
             let mut cell = self.lock();
             cell.responses.clear();
-            for (_, cancel) in cell.request_cancels.drain() {
+            for (_, cancel) in std::mem::take(&mut cell.request_cancels) {
                 cancel.cancel();
             }
             std::mem::take(&mut cell.callers)
@@ -691,7 +665,7 @@ impl BlockCell {
     // === Shutdown ===
 
     /// Request shutdown; wakes parked request reads.
-    pub fn request_shutdown(&self, mode: ShutdownMode) {
+    pub(crate) fn request_shutdown(&self, mode: ShutdownMode) {
         {
             let mut cell = self.lock();
             cell.shutdown.requested = true;
@@ -717,17 +691,17 @@ impl BlockCell {
     }
 
     /// Whether shutdown has been requested.
-    pub fn shutdown_requested(&self) -> bool {
+    pub(crate) fn shutdown_requested(&self) -> bool {
         self.lock().shutdown.requested
     }
 
     /// The shutdown mode, if requested.
-    pub fn shutdown_mode(&self) -> Option<ShutdownMode> {
+    pub(crate) fn shutdown_mode(&self) -> Option<ShutdownMode> {
         self.lock().shutdown.mode
     }
 
     /// Block signals its shutdown is complete, with an exit code.
-    pub fn mark_shutdown_complete(&self, code: i64) {
+    pub(crate) fn mark_shutdown_complete(&self, code: i64) {
         {
             let mut cell = self.lock();
             cell.shutdown.complete = true;
@@ -737,13 +711,13 @@ impl BlockCell {
     }
 
     /// Whether the block signalled shutdown completion.
-    pub fn shutdown_complete(&self) -> bool {
+    pub(crate) fn shutdown_complete(&self) -> bool {
         self.lock().shutdown.complete
     }
 
     /// The block's exit code: what it declared via `shutdown/complete`,
     /// defaulting to 0 for a clean stop and 1 for failure.
-    pub fn exit_code(&self) -> i64 {
+    pub(crate) fn exit_code(&self) -> i64 {
         let cell = self.lock();
         match cell.shutdown.exit_code {
             Some(code) => code,
@@ -753,16 +727,16 @@ impl BlockCell {
     }
 
     /// Terminal-status envelope: `{name, state, code}`.
-    pub fn status_value(&self) -> Value {
-        let mut map = std::collections::BTreeMap::new();
-        map.insert("name".to_string(), Value::String(self.name.clone()));
-        map.insert("state".to_string(), Value::from(self.state().as_str()));
-        map.insert("code".to_string(), Value::Integer(self.exit_code()));
-        Value::Map(map)
+    pub(crate) fn status_value(&self) -> Value {
+        Value::Map(BTreeMap::from([
+            ("name".to_string(), Value::String(self.name.clone())),
+            ("state".to_string(), Value::from(self.state().as_str())),
+            ("code".to_string(), Value::Integer(self.exit_code())),
+        ]))
     }
 
     /// Park until this cell reaches a terminal state.
-    pub async fn wait_terminal(&self) {
+    pub(crate) async fn wait_terminal(&self) {
         self.gate
             .wait_until(|| self.lock().state.is_terminal().then_some(()))
             .await
@@ -772,21 +746,126 @@ impl BlockCell {
 
     /// Store the block's runtime interface declaration
     /// (`/iso/self/interface`).
-    pub fn set_interface(&self, interface: Value) {
+    pub(crate) fn set_interface(&self, interface: Value) {
         self.lock().interface = Some(interface);
     }
 
     /// The declared interface, if any.
-    pub fn interface(&self) -> Option<Value> {
+    pub(crate) fn interface(&self) -> Option<Value> {
         self.lock().interface.clone()
+    }
+}
+
+/// A read-only view of one block instance: identity, lifecycle, shutdown
+/// status, and accounting. Cheap to clone. Nothing reachable through it can
+/// change the block — lifecycle transitions, mailbox traffic, and responses
+/// belong to the runtime.
+#[derive(Clone)]
+pub struct BlockView(pub(crate) Arc<BlockCell>);
+
+impl BlockView {
+    /// The block's local name within its assembly.
+    pub fn name(&self) -> &str {
+        &self.0.name
+    }
+
+    /// The block's runtime-assigned identity.
+    pub fn id(&self) -> &BlockId {
+        &self.0.id
+    }
+
+    /// The failure policy from the assembly definition.
+    pub fn failure_policy(&self) -> FailurePolicy {
+        self.0.failure
+    }
+
+    /// Current lifecycle state.
+    pub fn state(&self) -> BlockState {
+        self.0.state()
+    }
+
+    /// The last recorded failure message, if any.
+    pub fn last_error(&self) -> Option<String> {
+        self.0.last_error()
+    }
+
+    /// The exit code: what the block declared via `shutdown/complete`,
+    /// defaulting to 0 for a clean stop and 1 for failure.
+    pub fn exit_code(&self) -> i64 {
+        self.0.exit_code()
+    }
+
+    /// Terminal-status envelope: `{name, state, code}`.
+    pub fn status_value(&self) -> Value {
+        self.0.status_value()
+    }
+
+    /// The interface the block declared at `iso/self/interface`, if any.
+    pub fn interface(&self) -> Option<Value> {
+        self.0.interface()
+    }
+
+    /// Outstanding response identities and queued mailbox events.
+    pub fn pending_counts(&self) -> (usize, usize) {
+        self.0.pending_counts()
+    }
+
+    /// A snapshot of the block's measured execution usage. The meter is
+    /// retained after teardown, so this remains valid for a stopped block.
+    pub fn usage(&self) -> crate::ExecutionUsage {
+        self.0.usage.snapshot()
+    }
+
+    /// The block's signal/timer event budget.
+    pub fn event_budget(&self) -> crate::CallBudgetSnapshot {
+        self.0.events.snapshot()
+    }
+
+    /// Whether shutdown has been requested.
+    pub fn shutdown_requested(&self) -> bool {
+        self.0.shutdown_requested()
+    }
+
+    /// The requested shutdown mode, if any.
+    pub fn shutdown_mode(&self) -> Option<ShutdownMode> {
+        self.0.shutdown_mode()
+    }
+
+    /// Whether the block wrote `iso/shutdown/complete`.
+    pub fn shutdown_complete(&self) -> bool {
+        self.0.shutdown_complete()
+    }
+
+    /// Whether immediate shutdown cancelled the block. Cooperative native
+    /// blocks poll this between units of work.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.cancel.is_cancelled()
+    }
+
+    /// Whether the block runs under the deterministic scheduler.
+    pub fn simulated(&self) -> bool {
+        self.0.simulated()
+    }
+
+    /// Park until the block reaches a terminal state.
+    pub async fn wait_terminal(&self) {
+        self.0.wait_terminal().await
+    }
+}
+
+impl std::fmt::Debug for BlockView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockView")
+            .field("name", &self.0.name)
+            .field("id", &self.0.id)
+            .field("state", &self.state())
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use structfs_core_store::path;
 
     #[tokio::test]
     async fn replies_are_charged_until_consumed_and_oversize_is_typed() {
@@ -803,10 +882,8 @@ mod tests {
         assert_eq!(cell.replies.usage().calls, 1);
         reply.await.unwrap();
         assert_eq!(cell.replies.usage().calls, 0);
-        cell.replies.set_limits(crate::CallLimits {
-            bytes: 1,
-            ..Default::default()
-        });
+        cell.replies
+            .set_limits(crate::CallLimits::default().with_bytes(1));
         let reply = cell.enqueue("read", path!("x"), Value::Null);
         let BlockEvent::Request(request) = cell.next_event().await.unwrap().unwrap() else {
             panic!("not a request")
@@ -874,6 +951,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn signals_charge_their_envelope_and_refund_on_consumption() {
+        let cell = BlockCell::new("test", FailurePolicy::FailFast);
+        cell.deliver_signal("usr1", Value::from("payload")).unwrap();
+        let charged = cell.events.usage().bytes;
+        assert!(charged > "usr1payload".len(), "{charged}");
+        assert_eq!(cell.pending_events().len(), 1);
+        assert_eq!(cell.events.usage().bytes, 0);
+        cell.events.set_limits(event_limits().with_bytes(1));
+        assert!(cell.deliver_signal("big", Value::Null).is_err());
+    }
+
     #[tokio::test]
     async fn signal_wakes_parked_mailbox_read() {
         let cell = Arc::new(BlockCell::new("test", FailurePolicy::FailFast));
@@ -936,6 +1025,25 @@ mod tests {
             }
             _ => panic!("expected map"),
         }
+    }
+
+    #[test]
+    fn the_view_reads_without_mutating() {
+        let cell = Arc::new(BlockCell::keyed("kv", FailurePolicy::Isolate, "demo/kv"));
+        cell.record_error("boom");
+        let view = BlockView(cell.clone());
+        assert_eq!(view.name(), "kv");
+        assert_eq!(view.id().as_str(), "block:demo/kv");
+        assert_eq!(view.failure_policy(), FailurePolicy::Isolate);
+        assert_eq!(view.state(), BlockState::Created);
+        assert_eq!(view.last_error().as_deref(), Some("boom"));
+        assert_eq!(view.pending_counts(), (0, 0));
+        assert!(!view.is_cancelled());
+        assert!(!view.usage().finished);
+        cell.request_shutdown(ShutdownMode::Immediate);
+        assert!(view.is_cancelled());
+        assert!(view.shutdown_requested());
+        assert_eq!(view.state(), BlockState::Stopped);
     }
 
     #[tokio::test]

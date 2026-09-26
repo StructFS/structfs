@@ -49,22 +49,11 @@ fn posix_main(
     let fd = wasi.path_open(
         dirfd,
         "out.txt",
-        OpenFlags {
-            write: true,
-            create: true,
-            ..Default::default()
-        },
+        OpenFlags::default().with_write(true).with_create(true),
     )?;
     wasi.fd_write(fd, b"file contents")?;
     wasi.fd_close(fd)?;
-    let fd = wasi.path_open(
-        dirfd,
-        "out.txt",
-        OpenFlags {
-            read: true,
-            ..Default::default()
-        },
-    )?;
+    let fd = wasi.path_open(dirfd, "out.txt", OpenFlags::default().with_read(true))?;
     let size = wasi.fd_filestat_size(fd)?;
     wasi.fd_seek(fd, 5, SEEK_SET)?;
     let tail = wasi.fd_read(fd, 64)?;
@@ -109,14 +98,16 @@ async fn posix_program_runs_on_the_iso_surface() {
     let stdio = ScriptedStdio::with_input(["hello tower", "second line"]);
     let provided = stdio.clone();
 
-    let mut runtime = Runtime::new().with_stdio_provider(Arc::new(move |name| {
-        (name == "posix").then(|| Arc::new(provided.clone()) as Arc<dyn Stdio>)
-    }));
-    register_builtins(&mut runtime);
-    runtime.register_builtin(
+    let mut config = featherweight_runtime::RuntimeConfig::new(tokio::runtime::Handle::current())
+        .with_stdio_provider(Arc::new(move |name| {
+            (name == "posix").then(|| Arc::new(provided.clone()) as Arc<dyn Stdio>)
+        }));
+    register_builtins(&mut config);
+    config.register_builtin(
         "posix",
         Arc::new(|| Box::new(PosixBlock) as Box<dyn NativeBlock>),
     );
+    let runtime = Runtime::new(config);
 
     let def = AssemblyDef::from_str(
         r#"{"assembly": "wasi-tower",
@@ -172,4 +163,68 @@ async fn posix_program_runs_on_the_iso_surface() {
     );
 
     assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+/// The shim's errno table (spec 09's errno column) agrees with the
+/// runtime's error taxonomy for every core error variant. The shim cannot
+/// depend on the runtime, so this is where the two tables are held together.
+#[test]
+fn wasi_errno_agrees_with_the_error_taxonomy() {
+    use featherweight_runtime::ErrorKind;
+    use structfs_core_store::{CodecErrorKind, CodecOperation, Format, PathError};
+    let samples = [
+        Error::Path(PathError::InvalidComponent {
+            component: "a-b".into(),
+            position: 0,
+            message: "not an identifier".into(),
+        }),
+        Error::NoRoute { path: path!("x") },
+        Error::Codec {
+            kind: CodecErrorKind::Syntax,
+            operation: CodecOperation::Decode,
+            format: Format::JSON,
+            message: "bad".into(),
+        },
+        Error::Codec {
+            kind: CodecErrorKind::ResourceLimit,
+            operation: CodecOperation::Decode,
+            format: Format::JSON,
+            message: "deep".into(),
+        },
+        Error::UnsupportedFormat(Format::OCTET_STREAM),
+        Error::Ll(structfs_ll_store::LLError::NotSupported),
+        Error::Io(std::io::Error::other("disk")),
+        Error::store("s", "op", "weird"),
+        Error::not_found(path!("x")),
+        Error::permission_denied("no"),
+        Error::conflict("dup"),
+        Error::invalid_argument("zero"),
+        Error::overloaded("busy"),
+        Error::deadline_exceeded("late"),
+        Error::resource_limit("big"),
+        Error::cancelled("gone"),
+    ];
+    let mut kinds = std::collections::HashSet::new();
+    for error in samples {
+        let kind = ErrorKind::of(&error);
+        kinds.insert(kind);
+        let expected = match kind {
+            ErrorKind::NotFound | ErrorKind::NoRoute => errno::NOENT,
+            ErrorKind::PermissionDenied => errno::NOTCAPABLE,
+            ErrorKind::Conflict => errno::EXIST,
+            ErrorKind::Overloaded => errno::AGAIN,
+            ErrorKind::DeadlineExceeded => errno::TIMEDOUT,
+            ErrorKind::Cancelled => errno::INTR,
+            ErrorKind::InvalidPath | ErrorKind::InvalidArgument => errno::INVAL,
+            // Resource limits have no errno analogue (spec 11); they and
+            // every untyped failure surface as EIO.
+            _ => errno::IO,
+        };
+        assert_eq!(
+            featherweight_wasi::errno_from_error(&error),
+            expected,
+            "{error}"
+        );
+    }
+    assert_eq!(kinds.len(), ErrorKind::ALL.len());
 }

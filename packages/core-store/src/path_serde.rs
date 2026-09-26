@@ -1,5 +1,8 @@
 //! Opt-in component-array representations. Default `Path` Serde remains a string.
 //!
+//! Kept for schemas that carry paths as arrays (no workspace crate needs
+//! one); the portable release fixture (`tests/portable`) is its consumer check.
+//!
 //! ```
 //! #[derive(serde::Serialize, serde::Deserialize)]
 //! struct Settings {

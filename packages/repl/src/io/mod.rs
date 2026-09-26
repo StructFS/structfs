@@ -16,9 +16,10 @@ pub use test_host::TestHost;
 
 /// Error type for I/O operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum IoError {
     #[error("I/O error: {0}")]
-    Io(String),
+    Io(#[from] std::io::Error),
 }
 
 /// Host interface for REPL I/O operations.

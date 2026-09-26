@@ -4,6 +4,7 @@
 mod tests {
     use featherweight_runtime::{
         host_store, service_host_store, AssemblyDef, BlockState, CoreWasmEngine, Runtime,
+        RuntimeConfig,
     };
     use std::{
         collections::{BTreeMap, HashMap},
@@ -17,6 +18,7 @@ mod tests {
         time::Duration,
     };
     use structfs_core_store::{path, DetachedFuture, Error, MemoryStore, ReadOnly, Value};
+    use structfs_handles::CancelToken;
     use structfs_profiles::{
         Approval, CommitAck, Declaration, Durability, Implementation, ProcessRequest, Profile,
         Profiled,
@@ -92,14 +94,13 @@ mod tests {
                 file.sync_all()?;
                 s.records.insert(id.into(), payload.into());
             }
-            Ok(CommitAck {
-                token: structfs_state::Token {
-                    epoch: self.path.file_name().unwrap().to_string_lossy().into(),
-                    revision: s.records.len() as u64,
-                },
-                persisted: true,
-                durability: Durability::FileSynced,
-            })
+            Ok(CommitAck::new(
+                structfs_state::Token::new(
+                    self.path.file_name().unwrap().to_string_lossy(),
+                    s.records.len() as u64,
+                ),
+                Durability::FileSynced,
+            ))
         }
     }
     struct Tool {
@@ -235,16 +236,13 @@ mod tests {
         ));
         let supervisor = CleanupSupervisor::new(4).unwrap();
         let service = supervisor
-            .owner(OwnerLimits {
-                retained_bytes: 32 << 20,
-                ..Default::default()
-            })
+            .owner(OwnerLimits::default().with_retained_bytes(32 << 20))
             .unwrap();
         let journal = Journal::open(&service.handle(), temp.clone());
         let events = Arc::new(OwnedTail::new(&service.handle(), 2, 2048).unwrap());
         let executions = Arc::new(AtomicUsize::new(0));
         let cancelled = Arc::new(AtomicUsize::new(0));
-        let state = State::new(
+        let state = State::shared(
             &service.handle(),
             Some(Value::Map(BTreeMap::new())),
             StateLimits::default(),
@@ -264,23 +262,17 @@ mod tests {
                 cancelled: cancelled.clone(),
                 executions: executions.clone(),
             });
-            let mut runtime = Runtime::new();
-            runtime.register_core_artifact("turn", prepared.clone());
-            let request = ProcessRequest {
-                version: 1,
-                operation: id.into(),
-                program: "fake-tool".into(),
-                args: vec![],
-                environment_grant: "safe_env".into(),
-                workspace_grant: "workspace".into(),
-            };
-            let declarations = vec![Declaration {
-                profile: Profile::Process,
-                version: 1,
-                implementation: Implementation::FixtureOnly,
-            }];
-            let provider =
-                Profiled::new(service.handle().service(tool.clone()), declarations).unwrap();
+            let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+            config.register_core_artifact("turn", prepared.clone());
+            let runtime = Runtime::new(config);
+            let request = ProcessRequest::new(id, "fake-tool", "safe_env", "workspace");
+            let declarations = vec![Declaration::new(
+                Profile::Process,
+                Implementation::FixtureOnly,
+            )];
+            let provider = Arc::new(
+                Profiled::new(service.handle().service(tool.clone()), declarations).unwrap(),
+            );
             let def=AssemblyDef::from_str(r#"{"assembly":"turn","imports":{"request":"input","tool":"approved capability"},"blocks":{"turn":"turn"},"public":"turn","wiring":["turn:/request -> $request","turn:/tool -> $tool"]}"#).unwrap();
             let instance = runtime
                 .instantiate(
@@ -302,28 +294,18 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(2), tool.started.notified())
                     .await
                     .unwrap();
-                assert!(tool
-                    .approve(Approval {
-                        version: 1,
-                        operation: "wrong".into(),
-                        approved: true
-                    })
-                    .is_err());
+                assert!(tool.approve(Approval::new("wrong", true)).is_err());
                 if id == "approved" {
                     let observer = CancelToken::new();
                     observer.cancel();
                     assert!(events.read(0, 1, &observer).await.is_err());
                     assert_eq!(instance.public_cell().state(), BlockState::Running);
-                    tool.approve(Approval {
-                        version: 1,
-                        operation: id.into(),
-                        approved: true,
-                    })
-                    .unwrap();
+                    tool.approve(Approval::new(id, true)).unwrap();
                 } else if id == "cancelled" {
-                    assert!(instance.shutdown(Duration::ZERO).await.complete());
+                    // One deadline covers escalation and joining.
+                    assert!(instance.shutdown(Duration::from_secs(1)).await.complete());
                 } else {
-                    assert!(service.close(Duration::from_secs(1)).await.is_quiescent());
+                    assert!(service.join(Duration::from_secs(1)).await.is_quiescent());
                 }
             }
             tokio::time::timeout(Duration::from_secs(2), instance.wait_public_terminal())
@@ -341,10 +323,7 @@ mod tests {
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         assert_eq!(cancelled.load(Ordering::SeqCst), 2);
         let restarted = supervisor
-            .owner(OwnerLimits {
-                retained_bytes: 32 << 20,
-                ..Default::default()
-            })
+            .owner(OwnerLimits::default().with_retained_bytes(32 << 20))
             .unwrap();
         let reopened = Journal::open(&restarted.handle(), temp.clone());
         let j = reopened.clone();
@@ -361,21 +340,21 @@ mod tests {
                 .is_err()
         );
         // An ordinary state commit and immutable snapshot do not write the journal.
-        let config_state = State::new(
+        let config_state = State::shared(
             &restarted.handle(),
             Some(Value::from("draft")),
             StateLimits::default(),
         )
         .unwrap();
         let config_client = StateClient::new(
-            Router::new(vec![Mount::new(
+            Router::shared(vec![Mount::new(
                 path!(""),
                 path!(""),
                 config_state.view(path!(""), true),
-                Arc::new(BudgetAdmission {
-                    budget: CallBudget::<String>::new(CallLimits::default()),
-                    key: "config".into(),
-                }),
+                Arc::new(BudgetAdmission::new(
+                    CallBudget::<String>::shared(CallLimits::default()),
+                    "config",
+                )),
             )])
             .unwrap()
             .client(),
@@ -401,7 +380,7 @@ mod tests {
             snapshot.projection(65536, 128).await.unwrap().root(),
             Some(&Value::from("saved"))
         );
-        snapshot.release().await.unwrap();
+        snapshot.close().await.unwrap();
         assert!(!reopened
             .state
             .lock()
@@ -416,20 +395,20 @@ mod tests {
             .unwrap();
         assert!(config.persisted);
         assert_eq!(config.token.revision, 2);
-        let fresh = State::new(
+        let fresh = State::shared(
             &restarted.handle(),
             Some(Value::Null),
             StateLimits::default(),
         )
         .unwrap();
-        let raw = Router::new(vec![Mount::new(
+        let raw = Router::shared(vec![Mount::new(
             path!(""),
             path!(""),
             fresh.view(path!(""), true),
-            Arc::new(BudgetAdmission {
-                budget: CallBudget::<String>::new(CallLimits::default()),
-                key: "state".into(),
-            }),
+            Arc::new(BudgetAdmission::new(
+                CallBudget::<String>::shared(CallLimits::default()),
+                "state",
+            )),
         )])
         .unwrap()
         .client();
@@ -443,7 +422,7 @@ mod tests {
                 .await,
             Err(ClientError::State(Fault::EpochMismatch { .. }))
         ));
-        assert!(restarted.close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(restarted.join(Duration::from_secs(1)).await.is_quiescent());
         drop(journal);
         drop(reopened);
         std::fs::remove_file(temp).unwrap();
@@ -463,9 +442,10 @@ mod tests {
             return Err(Error::permission_denied("fake process grant"));
         }
         let (process, client) = structfs_handles::DuplexStream::pair(8)?;
+        let (process, client) = (Arc::new(process), Arc::new(client));
         let cleanup = process.clone();
         let registration = owner.register(ResourceKind::Registration, 16, move || async move {
-            cleanup.release();
+            cleanup.close();
             Ok(())
         })?;
         let operation = structfs_profiles::OperationHandle::start(
@@ -480,7 +460,7 @@ mod tests {
             },
         )?;
         Ok(FakeProcess {
-            operation,
+            operation: Arc::new(operation),
             stream: client,
             _registration: registration,
         })
@@ -489,14 +469,7 @@ mod tests {
     async fn fake_process_grants_streams_exit_and_cancel_join() {
         let supervisor = CleanupSupervisor::new(1).unwrap();
         let owner = supervisor.owner(Default::default()).unwrap();
-        let request = ProcessRequest {
-            version: 1,
-            operation: "echo_once".into(),
-            program: "echo".into(),
-            args: vec![],
-            environment_grant: "safe_env".into(),
-            workspace_grant: "workspace".into(),
-        };
+        let request = ProcessRequest::new("echo_once", "echo", "safe_env", "workspace");
         let mut denied = request.clone();
         denied.workspace_grant = "ambient".into();
         assert!(fake_process(&owner.handle(), denied).is_err());
@@ -532,9 +505,10 @@ mod tests {
             pending.status().phase,
             structfs_profiles::Phase::Failed
         ));
-        assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     }
 }
 
-#[cfg(test)]
-mod owned_execution;
+// Owned execution (prepared core-Wasm hosting, joined state recovery) is
+// covered by the runtime's own suite in featherweight/runtime/tests/owned_execution.rs;
+// this consumer fixture does not duplicate it.

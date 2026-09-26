@@ -7,24 +7,33 @@ use structfs_core_store::{
     path, DetachedFuture, DetachedReader, DetachedWriter, Error, MemoryStore, Path, Reader, Record,
     Value, Writer,
 };
+use structfs_handles::CancelToken;
 use structfs_service::*;
 fn mount(service: Arc<dyn Service>, budget: Arc<CallBudget>, prefix: Path, base: Path) -> Mount {
     Mount::new(
         prefix,
         base,
         service,
-        Arc::new(BudgetAdmission {
-            budget,
-            key: "provider".into(),
-        }),
+        Arc::new(BudgetAdmission::new(budget, "provider")),
     )
 }
-fn budget(calls: usize) -> Arc<CallBudget> {
-    CallBudget::new(CallLimits {
-        calls,
-        calls_per_block: calls,
-        ..CallLimits::default()
+/// Yield until `ready` holds. Bounded: a condition that never becomes true
+/// fails the test with a name instead of hanging the suite forever.
+async fn spin_until(what: &str, mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready() {
+            tokio::task::yield_now().await;
+        }
     })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+fn budget(calls: usize) -> Arc<CallBudget> {
+    CallBudget::shared(
+        CallLimits::default()
+            .with_calls(calls)
+            .with_calls_per_block(calls),
+    )
 }
 struct Echo {
     redirect: Option<Path>,
@@ -43,6 +52,7 @@ impl Service for Echo {
                     p.to_string(),
                 ))))),
                 Operation::Write(p, _) => Ok(Response::Written(redirect.unwrap_or(p))),
+                _ => Err(Error::invalid_argument("unsupported operation kind")),
             }
         })
     }
@@ -54,7 +64,7 @@ async fn routing_scopes_and_context_cannot_escape() {
         redirect: None,
         seen: Mutex::new(vec![]),
     });
-    let r = Router::new(vec![mount(
+    let r = Router::shared(vec![mount(
         echo.clone(),
         b.clone(),
         path!("api"),
@@ -84,7 +94,10 @@ async fn routing_scopes_and_context_cannot_escape() {
         path!("item")
     );
     assert_eq!(echo.seen.lock().unwrap()[0].0, id);
-    assert!(echo.seen.lock().unwrap()[0].2.is_cancelled());
+    // A call that completed is not cancelled: the drop guard fires only for a
+    // call abandoned while pending, so a handle handed back by the provider
+    // is not revoked the instant the call returns.
+    assert!(!echo.seen.lock().unwrap()[0].2.is_cancelled());
     let denied = client
         .scoped(&path!(""), Permissions::READ_ONLY)
         .scoped(&path!(""), Permissions::READ_WRITE);
@@ -104,7 +117,7 @@ async fn routing_scopes_and_context_cannot_escape() {
         redirect: Some(path!("elsewhere")),
         seen: Mutex::new(vec![]),
     });
-    let client = Router::new(vec![mount(
+    let client = Router::shared(vec![mount(
         outside,
         b.clone(),
         path!("api"),
@@ -122,7 +135,7 @@ async fn routing_scopes_and_context_cannot_escape() {
         redirect: Some(path!("tenant/sibling")),
         seen: Mutex::new(vec![]),
     });
-    let client = Router::new(vec![mount(sibling, b, path!("api"), path!("tenant"))])
+    let client = Router::shared(vec![mount(sibling, b, path!("api"), path!("tenant"))])
         .unwrap()
         .client()
         .scoped(&path!("api/child"), Permissions::READ_WRITE);
@@ -143,7 +156,7 @@ async fn longest_prefix_denial_does_not_fall_back() {
     let root = mount(echo.clone(), b.clone(), path!(""), path!("root"));
     let mut nested = mount(echo.clone(), b.clone(), path!("sealed"), path!("nested"));
     nested.permissions = Permissions::READ_ONLY;
-    let client = Router::new(vec![root, nested]).unwrap().client();
+    let client = Router::shared(vec![root, nested]).unwrap().client();
     assert!(matches!(
         client
             .write(&path!("sealed/item"), Record::parsed(Value::Null))
@@ -159,7 +172,7 @@ async fn longest_prefix_denial_does_not_fall_back() {
             .as_value(),
         Some(&Value::from("nested/item"))
     );
-    assert!(Router::new(vec![
+    assert!(Router::shared(vec![
         mount(echo.clone(), b.clone(), path!("a"), path!("")),
         mount(echo, b, path!("a"), path!(""))
     ])
@@ -201,14 +214,15 @@ async fn detached_dispatch_releases_lock_and_clients_are_concurrent() {
         gate: Arc::new(structfs_handles::Gate::new()),
         ready: ready.clone(),
     }));
-    let client = Router::new(vec![mount(p, b.clone(), path!(""), path!(""))])
+    let client = Router::shared(vec![mount(p, b.clone(), path!(""), path!(""))])
         .unwrap()
         .client();
     let reader = client.clone();
     let task = tokio::spawn(async move { reader.read(&path!("wait")).await });
-    while ready.load(Ordering::SeqCst) == 0 {
-        tokio::task::yield_now().await;
-    }
+    spin_until("the parked read to reach the provider", || {
+        ready.load(Ordering::SeqCst) > 0
+    })
+    .await;
     assert_eq!(b.usage().calls, 1);
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -231,7 +245,7 @@ impl Service for Pending {
 async fn deadlines_cancellation_admission_and_abandonment() {
     let root = budget(1);
     let child = root.child(CallLimits::default());
-    let client = Router::new(vec![mount(
+    let client = Router::shared(vec![mount(
         Arc::new(Pending),
         child.clone(),
         path!(""),
@@ -243,9 +257,7 @@ async fn deadlines_cancellation_admission_and_abandonment() {
     let token = context.cancellation.clone();
     let c = client.with_context(context);
     let task = tokio::spawn(async move { c.read(&path!("a")).await });
-    while root.usage().calls == 0 {
-        tokio::task::yield_now().await;
-    }
+    spin_until("the first call to be charged", || root.usage().calls > 0).await;
     assert_eq!(child.usage().calls, 1); // Even a provider that ignores context stays charged.
     assert!(matches!(
         client.read(&path!("b")).await,
@@ -266,9 +278,10 @@ async fn deadlines_cancellation_admission_and_abandonment() {
     assert_eq!(root.usage().calls, 0);
     let c = client.clone();
     let task = tokio::spawn(async move { c.read(&path!("a")).await });
-    while root.usage().calls == 0 {
-        tokio::task::yield_now().await;
-    }
+    spin_until("the abandoned call to be charged", || {
+        root.usage().calls > 0
+    })
+    .await;
     task.abort();
     let _ = task.await;
     assert_eq!(root.usage().calls, 0);
@@ -282,10 +295,7 @@ async fn deadlines_cancellation_admission_and_abandonment() {
         .unwrap_err()
         .is_cancelled());
     assert_eq!(root.metrics().admitted, admitted);
-    root.set_limits(CallLimits {
-        calls: 0,
-        ..CallLimits::default()
-    });
+    root.set_limits(CallLimits::default().with_calls(0));
     assert!(matches!(
         client.read(&path!("a")).await,
         Err(Error::Overloaded { .. })
@@ -318,7 +328,7 @@ async fn cancelled_blocking_work_keeps_charge_until_joined() {
         entered: entered.clone(),
         release: Mutex::new(rx),
     }));
-    let client = Router::new(vec![mount(
+    let client = Router::shared(vec![mount(
         owner.handle().service(provider.clone()),
         b.clone(),
         path!(""),
@@ -330,9 +340,10 @@ async fn cancelled_blocking_work_keeps_charge_until_joined() {
     let cancellation = context.cancellation.clone();
     let c = client.with_context(context);
     let task = tokio::spawn(async move { c.read(&path!("a")).await });
-    while entered.load(Ordering::SeqCst) == 0 {
-        tokio::task::yield_now().await;
-    }
+    spin_until("the blocking provider to start", || {
+        entered.load(Ordering::SeqCst) > 0
+    })
+    .await;
     cancellation.cancel();
     assert!(task.await.unwrap().unwrap_err().is_cancelled());
     assert_eq!(b.usage().calls, 1);
@@ -342,20 +353,20 @@ async fn cancelled_blocking_work_keeps_charge_until_joined() {
         Err(Error::Overloaded { .. })
     ));
     let closing = provider.clone();
-    let joined = tokio::spawn(async move { closing.close().await });
+    let joined = tokio::spawn(async move { closing.join(Duration::from_secs(5)).await });
     tokio::task::yield_now().await;
     assert!(!joined.is_finished());
-    assert!(!owner.close(Duration::ZERO).await.is_quiescent());
+    assert!(!owner.join(Duration::ZERO).await.is_quiescent());
     tx.send(()).unwrap();
-    joined.await.unwrap();
+    assert!(joined.await.unwrap());
     assert_eq!(b.usage().calls, 0);
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     assert!(client.read(&path!("a")).await.unwrap_err().is_cancelled());
 }
 #[tokio::test]
 async fn sync_adapter_and_raw_payload_accounting() {
     let b = budget(2);
-    let client = Router::new(vec![mount(
+    let client = Router::shared(vec![mount(
         Arc::new(ImmediateStore::new(MemoryStore::new())),
         b.clone(),
         path!(""),
@@ -371,10 +382,7 @@ async fn sync_adapter_and_raw_payload_accounting() {
         client.read(&path!("a")).await.unwrap().unwrap().as_value(),
         Some(&Value::Unsigned(u64::MAX))
     );
-    b.set_limits(CallLimits {
-        bytes: 4,
-        ..CallLimits::default()
-    });
+    b.set_limits(CallLimits::default().with_bytes(4));
     assert!(matches!(
         client
             .write(
@@ -400,7 +408,7 @@ async fn names_only_projection_survives_service_mount_and_cancellation() {
         }
     }
     let projection = ChildNames::new(RawDirectory, 16, 1024).unwrap();
-    let router = Router::new(vec![mount(
+    let router = Router::shared(vec![mount(
         Arc::new(BlockingStore::new(projection)),
         budget(2),
         path!("names"),

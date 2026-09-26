@@ -1,11 +1,18 @@
 //! Process information store.
 
-use collection_literals::btree;
 use std::collections::BTreeMap;
 
 use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
 
-/// Store for process information.
+/// The readable `self/*` entries, in listing order.
+const SELF_ENTRIES: [&str; 5] = ["pid", "cwd", "args", "exe", "env"];
+
+/// Store for information about the current process.
+///
+/// `proc/self/env` is the real process environment; writes through
+/// [`EnvStore`](crate::EnvStore) live in that store's overlay and do not
+/// appear here. Writing `proc/self/cwd` changes the process-wide working
+/// directory.
 pub struct ProcStore;
 
 impl ProcStore {
@@ -13,56 +20,48 @@ impl ProcStore {
         Self
     }
 
-    fn self_info() -> Value {
-        Value::Map(btree! {
-            "pid".into() => Value::String("Current process ID".into()),
-            "cwd".into() => Value::String("Current working directory".into()),
-            "args".into() => Value::String("Command line arguments".into()),
-            "exe".into() => Value::String("Path to current executable".into()),
-            "env".into() => Value::String("Environment variables".into()),
-        })
+    fn entry(name: &str) -> Result<Option<Value>, Error> {
+        Ok(Some(match name {
+            "pid" => Value::Integer(i64::from(std::process::id())),
+            "cwd" => Value::String(std::env::current_dir()?.to_string_lossy().into_owned()),
+            "args" => Value::Array(
+                std::env::args_os()
+                    .map(|a| Value::String(a.to_string_lossy().into_owned()))
+                    .collect(),
+            ),
+            "exe" => Value::String(std::env::current_exe()?.to_string_lossy().into_owned()),
+            "env" => Value::Map(
+                std::env::vars_os()
+                    .map(|(k, v)| {
+                        (
+                            k.to_string_lossy().into_owned(),
+                            Value::String(v.to_string_lossy().into_owned()),
+                        )
+                    })
+                    .collect(),
+            ),
+            _ => return Ok(None),
+        }))
     }
 
-    fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
-        if path.is_empty() {
-            return Ok(Some(Value::Map(btree! {
-                "self".into() => Self::self_info(),
-            })));
-        }
-
-        // Must start with "self"
-        if &path[0] != "self" {
-            return Ok(None);
-        }
-
-        if path.len() == 1 {
-            return Ok(Some(Self::self_info()));
-        }
-
-        if path.len() != 2 {
-            return Ok(None);
-        }
-
-        match &path[1] {
-            "pid" => Ok(Some(Value::Integer(std::process::id() as i64))),
-            "cwd" => match std::env::current_dir() {
-                Ok(cwd) => Ok(Some(Value::String(cwd.to_string_lossy().to_string()))),
-                Err(e) => Err(Error::Io(e)),
-            },
-            "args" => {
-                let args: Vec<Value> = std::env::args().map(Value::String).collect();
-                Ok(Some(Value::Array(args)))
+    fn self_map() -> Result<Value, Error> {
+        let mut map = BTreeMap::new();
+        for name in SELF_ENTRIES {
+            if let Some(value) = Self::entry(name)? {
+                map.insert(name.to_string(), value);
             }
-            "exe" => match std::env::current_exe() {
-                Ok(exe) => Ok(Some(Value::String(exe.to_string_lossy().to_string()))),
-                Err(e) => Err(Error::Io(e)),
-            },
-            "env" => {
-                let vars: BTreeMap<String, Value> = std::env::vars()
-                    .map(|(k, v)| (k, Value::String(v)))
-                    .collect();
-                Ok(Some(Value::Map(vars)))
-            }
+        }
+        Ok(Value::Map(map))
+    }
+
+    fn read_value(path: &Path) -> Result<Option<Value>, Error> {
+        match path.len() {
+            0 => Ok(Some(Value::Map(BTreeMap::from([(
+                "self".to_string(),
+                Self::self_map()?,
+            )])))),
+            1 if &path[0] == "self" => Ok(Some(Self::self_map()?)),
+            2 if &path[0] == "self" => Self::entry(&path[1]),
             _ => Ok(None),
         }
     }
@@ -76,38 +75,22 @@ impl Default for ProcStore {
 
 impl Reader for ProcStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        Ok(self.read_value(from)?.map(Record::parsed))
+        Ok(Self::read_value(from)?.map(Record::parsed))
     }
 }
 
 impl Writer for ProcStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        // Must be proc/self/...
-        if to.len() != 2 || &to[0] != "self" {
-            return Err(Error::store("proc", "write", "Invalid proc path"));
+        if to.len() != 2 || &to[0] != "self" || &to[1] != "cwd" {
+            return Err(Error::permission_denied(format!(
+                "proc/{to} is not writable; only proc/self/cwd accepts writes"
+            )));
         }
-
-        match &to[1] {
-            "cwd" => {
-                let value = data.into_value(&NoCodec)?;
-
-                let new_cwd = match &value {
-                    Value::String(s) => s.as_str(),
-                    _ => {
-                        return Err(Error::store("proc", "cwd", "cwd must be a string path"));
-                    }
-                };
-
-                std::env::set_current_dir(new_cwd)?;
-
-                Ok(to.clone())
-            }
-            _ => Err(Error::store(
-                "proc",
-                "write",
-                format!("Cannot write to proc/self/{}", &to[1]),
-            )),
+        match data.into_value(&NoCodec)? {
+            Value::String(dir) => std::env::set_current_dir(dir)?,
+            _ => return Err(Error::invalid_argument("cwd must be a string path")),
         }
+        Ok(to.clone())
     }
 }
 
@@ -116,146 +99,63 @@ mod tests {
     use super::*;
     use structfs_core_store::path;
 
-    #[test]
-    fn read_pid() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("self/pid")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Integer(pid) => assert_eq!(pid, std::process::id() as i64),
-            _ => panic!("Expected integer"),
-        }
+    fn read(at: &Path) -> Option<Value> {
+        ProcStore::new()
+            .read(at)
+            .unwrap()
+            .map(|r| r.into_value(&NoCodec).unwrap())
     }
 
     #[test]
-    fn read_args() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("self/args")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Array(args) => assert!(!args.is_empty()),
-            _ => panic!("Expected array"),
-        }
-    }
-
-    #[test]
-    fn read_cwd() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("self/cwd")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::String(s) => assert!(!s.is_empty()),
-            _ => panic!("Expected string"),
-        }
-    }
-
-    #[test]
-    fn read_exe() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("self/exe")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::String(s) => assert!(!s.is_empty()),
-            _ => panic!("Expected string"),
-        }
-    }
-
-    #[test]
-    fn read_env() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("self/env")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Map(map) => assert!(!map.is_empty()),
-            _ => panic!("Expected map"),
-        }
-    }
-
-    #[test]
-    fn read_root() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("self"));
-            }
-            _ => panic!("Expected map"),
-        }
-    }
-
-    #[test]
-    fn read_self() {
-        let mut store = ProcStore::new();
-        let record = store.read(&path!("self")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("pid"));
-                assert!(map.contains_key("cwd"));
-                assert!(map.contains_key("args"));
-                assert!(map.contains_key("exe"));
-                assert!(map.contains_key("env"));
-            }
-            _ => panic!("Expected map"),
-        }
-    }
-
-    #[test]
-    fn read_nonexistent_returns_none() {
-        let mut store = ProcStore::new();
-        let result = store.read(&path!("nonexistent")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn read_self_nonexistent_returns_none() {
-        let mut store = ProcStore::new();
-        let result = store.read(&path!("self/nonexistent")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn read_nested_path_returns_none() {
-        let mut store = ProcStore::new();
-        let result = store.read(&path!("self/pid/extra")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn write_invalid_path_error() {
-        let mut store = ProcStore::new();
-        let result = store.write(&path!("invalid"), Record::parsed(Value::Null));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_self_pid_error() {
-        let mut store = ProcStore::new();
-        let result = store.write(&path!("self/pid"), Record::parsed(Value::Integer(123)));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_cwd_invalid_type_error() {
-        let mut store = ProcStore::new();
-        let result = store.write(&path!("self/cwd"), Record::parsed(Value::Integer(123)));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_cwd_nonexistent_error() {
-        let mut store = ProcStore::new();
-        let result = store.write(
-            &path!("self/cwd"),
-            Record::parsed(Value::String("/nonexistent/path/12345".to_string())),
+    fn self_entries() {
+        assert_eq!(
+            read(&path!("self/pid")),
+            Some(Value::Integer(std::process::id() as i64))
         );
-        assert!(result.is_err());
+        assert!(matches!(read(&path!("self/args")), Some(Value::Array(a)) if !a.is_empty()));
+        assert!(matches!(read(&path!("self/cwd")), Some(Value::String(s)) if !s.is_empty()));
+        assert!(matches!(read(&path!("self/exe")), Some(Value::String(s)) if !s.is_empty()));
+        assert!(matches!(read(&path!("self/env")), Some(Value::Map(m)) if !m.is_empty()));
+        assert_eq!(read(&path!("self/nonexistent")), None);
+        assert_eq!(read(&path!("self/pid/extra")), None);
+        assert_eq!(read(&path!("nonexistent")), None);
     }
 
     #[test]
-    fn default_impl() {
-        let store: ProcStore = Default::default();
-        assert!(std::ptr::eq(&store as *const _, &store as *const _));
+    fn root_and_self_are_maps_of_values() {
+        let Some(Value::Map(own)) = read(&path!("self")) else {
+            panic!("expected map")
+        };
+        assert_eq!(own.len(), SELF_ENTRIES.len());
+        assert_eq!(
+            own.get("pid"),
+            Some(&Value::Integer(std::process::id() as i64))
+        );
+        let Some(Value::Map(root)) = read(&path!("")) else {
+            panic!("expected map")
+        };
+        assert!(matches!(root.get("self"), Some(Value::Map(m)) if m.contains_key("cwd")));
+    }
+
+    #[test]
+    fn invalid_writes() {
+        let mut store = ProcStore;
+        for at in [path!("invalid"), path!("self/pid")] {
+            assert!(matches!(
+                store.write(&at, Record::parsed(Value::Integer(1))),
+                Err(Error::PermissionDenied { .. })
+            ));
+        }
+        assert!(matches!(
+            store.write(&path!("self/cwd"), Record::parsed(Value::Integer(1))),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            store.write(
+                &path!("self/cwd"),
+                Record::parsed(Value::String("/nonexistent/path/12345".into()))
+            ),
+            Err(Error::Io(_))
+        ));
     }
 }

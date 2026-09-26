@@ -151,13 +151,14 @@ The protocol error types (spec 06) map onto errno for shim layers:
 
 | Protocol error | errno |
 |---|---|
-| `not_found` | `ENOENT` |
+| `not_found`, `no_route` | `ENOENT` |
 | `forbidden`, `not_readable`, `not_writable` | `EACCES` |
 | `unavailable` | `EAGAIN` |
 | `timeout` | `ETIMEDOUT` |
 | `conflict` | `EEXIST` |
 | cancellation (a released handle / interrupted parked read) | `EINTR` |
-| `invalid_path` | `EINVAL` |
+| `invalid_path`, `invalid_argument` | `EINVAL` |
+| `resource_limit`, `store_error` | `EIO` |
 
 Cancellation-fails-reads is exactly the interrupted-syscall semantic.
 

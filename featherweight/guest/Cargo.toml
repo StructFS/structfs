@@ -11,7 +11,10 @@ keywords = ["isotope", "wasm", "guest", "sdk", "store"]
 categories = ["wasm", "api-bindings"]
 
 [features]
-default = ["reference-guest"]
+default = []
+# The wasm-kv reference block: exports `manifest` and `run`. Off by default so
+# a block built on the SDK can define its own entry points without duplicate
+# symbols; build the reference block with `--features reference-guest`.
 reference-guest = []
 value-codecs = ["dep:structfs-serde-store"]
 state = ["value-codecs", "dep:structfs-state"]

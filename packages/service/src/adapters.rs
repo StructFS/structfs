@@ -1,37 +1,44 @@
 use crate::{CallContext, Operation, Response, Service};
 use std::sync::{Arc, Mutex};
-use structfs_core_store::{DetachedFuture, DetachedStore, Error, Store};
+use structfs_core_store::{
+    DetachedFuture, DetachedShared, DetachedStore, Error, SharedReader, SharedWriter, Store,
+};
 use structfs_handles::Gate;
-fn poisoned() -> Error {
-    Error::store("service", "dispatch", "provider lock poisoned")
+
+/// Every adapter here uses one poison policy: recover the guard with
+/// `into_inner` rather than failing forever. A provider whose store panicked
+/// mid-operation may be inconsistent, but permanently bricking the mount is
+/// strictly worse than letting the next call observe the damage.
+fn recover<T>(result: std::sync::LockResult<T>) -> T {
+    result.unwrap_or_else(|e| e.into_inner())
 }
+
 /// A detached store's mutex is held only while constructing the future.
+///
+/// A thin `Service` face on [`DetachedShared`], which already owns the
+/// shared-handle mechanics; this adds only the operation/response mapping.
 pub struct DetachedProvider<T> {
-    inner: Mutex<T>,
+    inner: DetachedShared<T>,
 }
 impl<T> DetachedProvider<T> {
     pub fn new(store: T) -> Self {
         Self {
-            inner: Mutex::new(store),
+            inner: DetachedShared::new(store),
         }
     }
 }
 impl<T: DetachedStore + 'static> Service for DetachedProvider<T> {
     fn call(&self, context: CallContext, op: Operation) -> DetachedFuture<Response> {
-        let mut store = match self.inner.lock() {
-            Ok(s) => s,
-            Err(_) => return Box::pin(async { Err(poisoned()) }),
-        };
         match op {
             Operation::Read(p) => {
-                let f = store.read_detached(&p);
+                let f = self.inner.read_shared(p);
                 Box::pin(async move {
                     let _context = context;
                     f.await.map(Response::Read)
                 })
             }
             Operation::Write(p, d) => {
-                let f = store.write_detached(&p, d);
+                let f = self.inner.write_shared(p, d);
                 Box::pin(async move {
                     let _context = context;
                     f.await.map(Response::Written)
@@ -55,7 +62,7 @@ impl<T: Store + 'static> Service for ImmediateStore<T> {
     fn call(&self, context: CallContext, op: Operation) -> DetachedFuture<Response> {
         let result = (|| {
             context.ensure_active()?;
-            let mut s = self.inner.lock().map_err(|_| poisoned())?;
+            let mut s = recover(self.inner.lock());
             match op {
                 Operation::Read(p) => s.read(&p).map(Response::Read),
                 Operation::Write(p, d) => s.write(&p, d).map(Response::Written),
@@ -78,14 +85,15 @@ struct Work {
 struct Finished(Arc<Work>);
 impl Drop for Finished {
     fn drop(&mut self) {
-        let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = recover(self.0.state.lock());
         s.active -= 1;
         drop(s);
         self.0.gate.notify();
     }
 }
-/// Blocking I/O adapter. Cancellation abandons the result, not an already running
-/// closure. The closure retains its lease; `close` stops admission and joins work.
+/// Blocking I/O adapter. Cancellation abandons the result, not an already
+/// running closure. The closure retains its lease; `close` stops admission and
+/// `join` waits for work already inside the provider.
 pub struct BlockingStore<T> {
     inner: Arc<Mutex<T>>,
     work: Arc<Work>,
@@ -103,32 +111,28 @@ impl<T> BlockingStore<T> {
             }),
         }
     }
-    pub async fn close(&self) {
-        self.work
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .closed = true;
-        self.work
-            .gate
-            .wait_until(|| {
-                (self
-                    .work
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .active
-                    == 0)
-                    .then_some(())
-            })
-            .await;
+    /// Stop admitting calls. Non-blocking and idempotent; work already inside
+    /// the provider keeps running until it finishes.
+    pub fn close(&self) {
+        recover(self.work.state.lock()).closed = true;
+        self.work.gate.notify();
+    }
+    /// [`BlockingStore::close`], then wait at most `timeout` for in-flight
+    /// work to finish. Returns whether it did; work still running keeps its
+    /// admission lease either way.
+    pub async fn join(&self, timeout: std::time::Duration) -> bool {
+        self.close();
+        tokio::time::timeout(
+            timeout,
+            self.work
+                .gate
+                .wait_until(|| (recover(self.work.state.lock()).active == 0).then_some(())),
+        )
+        .await
+        .is_ok()
     }
     pub fn active(&self) -> usize {
-        self.work
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .active
+        recover(self.work.state.lock()).active
     }
 }
 impl<T: Store + 'static> Service for BlockingStore<T> {
@@ -137,7 +141,7 @@ impl<T: Store + 'static> Service for BlockingStore<T> {
         let work = self.work.clone();
         Box::pin(async move {
             let done = {
-                let mut state = work.state.lock().map_err(|_| poisoned())?;
+                let mut state = recover(work.state.lock());
                 if state.closed {
                     return Err(Error::cancelled("provider closed"));
                 }
@@ -150,7 +154,7 @@ impl<T: Store + 'static> Service for BlockingStore<T> {
                 let context = context;
                 let _lease = context.lease();
                 context.ensure_active()?;
-                let mut store = inner.lock().map_err(|_| poisoned())?;
+                let mut store = recover(inner.lock());
                 context.ensure_active()?;
                 match op {
                     Operation::Read(p) => store.read(&p).map(Response::Read),

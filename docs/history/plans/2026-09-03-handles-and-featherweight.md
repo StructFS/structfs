@@ -1,5 +1,11 @@
 # Handles, Streaming, and the Featherweight Isotope Runtime
 
+> Historical plan (2026-09-03). Several types it designs no longer exist:
+> `TailLog`/`TailPage` were replaced by `service::OwnedTail`/`TailRead`, and
+> `SyncBridge` and `ByteStream` were removed in 0.5 (see
+> [migration-0.5](../../migration-0.5.md)). Current behavior is in the crate
+> docs.
+
 Design for two deliverables:
 
 1. `structfs-handles`: the handle/streaming primitive, designed against the

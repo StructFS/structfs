@@ -13,11 +13,18 @@ categories = ["web-programming::http-client"]
 [features]
 default = ["blocking"]
 streaming = ["dep:reqwest", "dep:bytes"]
-blocking = ["dep:reqwest", "reqwest/blocking", "dep:structfs-handles", "dep:tokio"]
+blocking = [
+    "dep:reqwest",
+    "reqwest/blocking",
+    "dep:structfs-handles",
+    "dep:structfs-serde-store",
+    "dep:collection_literals",
+    "dep:tokio",
+]
 
 [dependencies]
 structfs-core-store = { workspace = true, features = ["async"] }
-structfs-serde-store = { workspace = true }
+structfs-serde-store = { workspace = true, optional = true }
 structfs-handles = { workspace = true, optional = true }
 
 serde = { workspace = true }
@@ -27,9 +34,8 @@ reqwest = { workspace = true, optional = true }
 http = { workspace = true }
 bytes = { version = "1", optional = true }
 url = { workspace = true }
-collection_literals = { workspace = true }
+collection_literals = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
-wiremock = { workspace = true }

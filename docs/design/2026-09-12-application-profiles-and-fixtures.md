@@ -1,6 +1,6 @@
 # Application profiles and migration fixtures
 
-Status: implemented for the next 0.2.0 release; not published.
+Status: implemented and published (first released in 0.2.0).
 
 This implements P0-E in the [application substrate plan](2026-09-11-application-substrate-and-value-ir.md).
 The migration target combines Value v1, owned async services, Featherweight

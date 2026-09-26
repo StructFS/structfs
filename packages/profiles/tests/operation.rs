@@ -1,16 +1,17 @@
 #![cfg(feature = "host")]
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use structfs_profiles::{OperationHandle, Phase};
 use structfs_service::{CleanupSupervisor, OwnerLimits};
 
 #[tokio::test]
-async fn cancel_is_not_completion_release_retains_noncooperative_charge() {
+async fn cancel_is_not_completion_close_retains_noncooperative_charge() {
     let supervisor = CleanupSupervisor::new(1).unwrap();
     let owner = supervisor
-        .owner(OwnerLimits {
-            resources: 8,
-            retained_bytes: 8,
-        })
+        .owner(
+            OwnerLimits::default()
+                .with_resources(8)
+                .with_retained_bytes(8),
+        )
         .unwrap();
     let (send, wait) = tokio::sync::oneshot::channel();
     let operation = OperationHandle::start(&owner.handle(), "one".into(), 8, move |_| async move {
@@ -27,8 +28,8 @@ async fn cancel_is_not_completion_release_retains_noncooperative_charge() {
     operation.cancel();
     assert!(operation.status().cancel_requested);
     assert!(!operation.status().joined);
-    operation.release();
-    assert!(!owner.close(Duration::from_millis(1)).await.is_quiescent());
+    operation.close();
+    assert!(!owner.join(Duration::from_millis(1)).await.is_quiescent());
     assert!(owner
         .handle()
         .report()
@@ -36,7 +37,7 @@ async fn cancel_is_not_completion_release_retains_noncooperative_charge() {
         .iter()
         .any(|r| r.bytes == 8));
     send.send(()).unwrap();
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     assert!(operation.status().joined);
     assert!(matches!(operation.status().phase, Phase::Completed));
     assert!(operation.result().is_err());
@@ -65,7 +66,7 @@ async fn bounded_result_and_terminal_failure_are_repeatable() {
             assert!(matches!(operation.status().phase, Phase::Failed));
             assert!(operation.result().is_err());
         }
-        Arc::clone(&operation).release();
+        operation.close();
     }
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
 }

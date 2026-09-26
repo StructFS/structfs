@@ -2,8 +2,8 @@
 
 The Rust guest SDK for the Isotope core-wasm binding
 ([spec 11](https://github.com/StructFS/structfs/blob/main/isotope/spec/11-core-wasm-binding.md)),
-plus the reference guest: a kv store served over the Isotope server
-protocol.
+plus, behind the opt-in `reference-guest` feature, the reference guest: a kv
+store served over the Isotope server protocol.
 
 The core-wasm binding is deliberately small — the entire ABI surface a
 guest touches is the `sdk` module:
@@ -22,13 +22,14 @@ reference runtime).
 Enable the optional `value-codecs` feature for `sdk::read_value` and
 `sdk::write_value`. Pass a `structfs_serde_store::ValueCodec` with the profile and
 limits your host supports, and declare its format in your manifest. For example,
-`Profile::ValueJson` uses `application/vnd.structfs.value+json;version=1` and
+`CodecProfile::ValueJson` uses `application/vnd.structfs.value+json;version=1` and
 preserves bytes, full u64 values, and non-finite floats. The feature builds for
 `wasm32-unknown-unknown`; it does not change the reference guest's JSON contract.
 
 ## Building a block
 
-No componentization, no bindgen:
+No componentization, no bindgen. Depend on the SDK with default features
+(the SDK only), give your crate `crate-type = ["cdylib"]`, and build:
 
 ```bash
 cargo build --target wasm32-unknown-unknown --release
@@ -39,7 +40,8 @@ The resulting `.wasm` runs directly under
 under the JavaScript browser host, or under any host implementing the
 binding's two imports.
 
-A minimal block:
+A minimal block (the SDK exports `block_alloc`; your crate exports
+`manifest` and `run`):
 
 ```rust,ignore
 use featherweight_guest::sdk;
@@ -58,10 +60,18 @@ pub extern "C" fn run() -> i32 {
 }
 ```
 
-The crate's own `lib.rs` is the worked example: the wasm-kv block reads
-its mailbox, serves read/write requests, and exits cleanly on the
-shutdown signal — about a hundred lines, most of them ordinary library
-code.
+The crate's own `lib.rs` is the worked example: with
+`--features reference-guest` it builds the wasm-kv block, which reads its
+mailbox, serves read/write requests, and exits cleanly on the shutdown
+signal — about a hundred lines, most of them ordinary library code:
+
+```bash
+cargo build -p featherweight-guest --features reference-guest \
+    --target wasm32-unknown-unknown --release
+```
+
+Do not enable `reference-guest` in a crate that defines its own `manifest`
+or `run`: both would export the same symbols.
 
 The optional `state` feature adds `state::Client`, using the selected Value codec
 and the portable `structfs-state` protocol for batches, snapshots, and observation.
@@ -80,7 +90,9 @@ using the legacy Null-as-absence envelope should migrate using Isotope 07's
 `present` field. The sample kv store retains its documented delete-on-null
 convention; the Value and ABI layers distinguish present Null from absence.
 
-`sdk::read_typed` and `sdk::write_typed` preserve `HostError { status, message }`.
+`sdk::read_typed` and `sdk::write_typed` preserve `HostError { status, message }`;
+`sdk::status` names every spec 11 status code, including `INVALID_ARGUMENT`
+(-10) for requests that are malformed independent of store state.
 Value/profile helpers use that typed host error; existing `structfs_read` and
 `structfs_write` remain diagnostic-only compatibility wrappers.
 

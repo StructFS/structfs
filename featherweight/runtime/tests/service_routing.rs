@@ -1,5 +1,5 @@
 use featherweight_runtime::{
-    service_host_store, AssemblyDef, CallBudget, CallLimits, CoreWasmEngine, Runtime,
+    service_host_store, AssemblyDef, CallBudget, CallLimits, CoreWasmEngine, Runtime, RuntimeConfig,
 };
 use std::{
     collections::HashMap,
@@ -28,6 +28,13 @@ impl Service for Capture {
                     Path::parse("outside").unwrap()
                 } else {
                     p
+                })
+            }
+            _ => {
+                return Box::pin(async {
+                    Err(structfs_core_store::Error::invalid_argument(
+                        "unsupported operation kind",
+                    ))
                 })
             }
         };
@@ -59,17 +66,26 @@ fn guest() -> Vec<u8> {
         (if (call $read (i32.const 256) (i32.const 8) (i32.const 1024)) (then unreachable))
         (i32.const 0)))"#,escape(manifest),escape(payload),manifest.len(),payload.len()).into_bytes()
 }
+fn runtime_with(
+    budget: &Arc<CallBudget>,
+    code: Arc<featherweight_runtime::CoreWasmBlock>,
+    builtins: bool,
+) -> Runtime {
+    let mut config =
+        RuntimeConfig::new(tokio::runtime::Handle::current()).with_call_budget(budget.clone());
+    if builtins {
+        featherweight_runtime::register_builtins(&mut config);
+    }
+    config.register_core_artifact("service-test", code);
+    Runtime::new(config)
+}
+
 #[tokio::test]
 async fn guest_imports_use_shared_routing_and_admit_each_call_once() {
     let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
     let code = Arc::new(engine.prepare(guest()).await.unwrap());
-    let budget = CallBudget::new(CallLimits {
-        calls: 1,
-        calls_per_block: 1,
-        ..CallLimits::default()
-    });
-    let mut runtime = Runtime::new().with_call_budget(budget.clone());
-    runtime.register_core_artifact("service-test", code);
+    let budget = CallBudget::shared(CallLimits::default().with_calls(1).with_calls_per_block(1));
+    let runtime = runtime_with(&budget, code, false);
     let definition=AssemblyDef::from_str(r#"{"assembly":"service-test","blocks":{"guest":"service-test"},"public":"guest","imports":{"store":"native"},"wiring":["guest:/svc -> $store"]}"#).unwrap();
     let capture = Arc::new(Capture {
         seen: Mutex::new(vec![]),
@@ -111,12 +127,8 @@ async fn guest_imports_use_shared_routing_and_admit_each_call_once() {
 async fn direct_provider_admission_can_reject_before_dispatch() {
     let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
     let code = Arc::new(engine.prepare(guest()).await.unwrap());
-    let budget = CallBudget::new(CallLimits {
-        calls: 0,
-        ..CallLimits::default()
-    });
-    let mut runtime = Runtime::new().with_call_budget(budget.clone());
-    runtime.register_core_artifact("service-test", code);
+    let budget = CallBudget::shared(CallLimits::default().with_calls(0));
+    let runtime = runtime_with(&budget, code, false);
     let definition=AssemblyDef::from_str(r#"{"assembly":"service-test","blocks":{"guest":"service-test"},"public":"guest","imports":{"store":"native"},"wiring":["guest:/svc -> $store"]}"#).unwrap();
     let capture = Arc::new(Capture {
         seen: Mutex::new(vec![]),
@@ -146,14 +158,8 @@ async fn direct_provider_admission_can_reject_before_dispatch() {
 async fn mailbox_target_reuses_router_reservation() {
     let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
     let code = Arc::new(engine.prepare(guest()).await.unwrap());
-    let budget = CallBudget::new(CallLimits {
-        calls: 1,
-        calls_per_block: 1,
-        ..CallLimits::default()
-    });
-    let mut runtime = Runtime::new().with_call_budget(budget.clone());
-    featherweight_runtime::register_builtins(&mut runtime);
-    runtime.register_core_artifact("service-test", code);
+    let budget = CallBudget::shared(CallLimits::default().with_calls(1).with_calls_per_block(1));
+    let runtime = runtime_with(&budget, code, true);
     let definition=AssemblyDef::from_str(r#"{"assembly":"service-test","blocks":{"guest":"service-test","store":"builtin:kv"},"public":"guest","wiring":["guest:/svc -> store"]}"#).unwrap();
     let assembly = runtime
         .instantiate(&definition, HashMap::new(), ".".as_ref())
@@ -198,6 +204,11 @@ impl Service for BackgroundProvider {
             Ok(match op {
                 Operation::Read(_) => Response::Read(Some(Record::parsed(Value::Null))),
                 Operation::Write(p, _) => Response::Written(p),
+                _ => {
+                    return Err(structfs_core_store::Error::invalid_argument(
+                        "unsupported operation kind",
+                    ))
+                }
             })
         })
     }
@@ -206,10 +217,12 @@ impl Service for BackgroundProvider {
 async fn shutdown_reports_owned_provider_work_after_guest_execution_has_joined() {
     let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
     let code = Arc::new(engine.prepare(guest()).await.unwrap());
-    let budget = CallBudget::new(CallLimits::default());
-    let mut runtime = Runtime::new().with_call_budget(budget.clone());
+    let budget = CallBudget::shared(CallLimits::default());
+    let mut config =
+        RuntimeConfig::new(tokio::runtime::Handle::current()).with_call_budget(budget.clone());
+    config.register_core_artifact("owned-test", code);
+    let runtime = Runtime::new(config);
     let supervisor = runtime.cleanup_supervisor();
-    runtime.register_core_artifact("owned-test", code);
     let definition = AssemblyDef::from_str(r#"{"assembly":"owned-test","blocks":{"guest":"owned-test"},"public":"guest","imports":{"store":"native"},"wiring":["guest:/svc -> $store"]}"#).unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
     let assembly = runtime
@@ -228,7 +241,9 @@ async fn shutdown_reports_owned_provider_work_after_guest_execution_has_joined()
     tokio::time::timeout(Duration::from_secs(2), assembly.wait_public_terminal())
         .await
         .unwrap();
-    let report = assembly.shutdown(Duration::ZERO).await;
+    // The guest has stopped; the provider's committed effect cannot be
+    // interrupted, so the report names it after the (short) deadline.
+    let report = assembly.shutdown(Duration::from_millis(200)).await;
     assert!(report.remaining.is_empty());
     assert!(!report.complete());
     assert_eq!(report.providers[0].remaining.len(), 2);
@@ -238,7 +253,7 @@ async fn shutdown_reports_owned_provider_work_after_guest_execution_has_joined()
     drop(assembly);
     drop(runtime);
     release.notify_one();
-    let reports = supervisor.close(Duration::from_secs(2)).await;
+    let reports = supervisor.join(Duration::from_secs(2)).await;
     assert!(reports.iter().all(|r| r.is_quiescent()));
     assert_eq!(budget.usage().calls, 0);
 }

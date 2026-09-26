@@ -1,6 +1,6 @@
 # Plan: HATEOAS Refactor for HTTP Stores
 
-This plan describes refactoring all HTTP stores (HttpBrokerStore, AsyncHttpBrokerStore,
+This plan describes refactoring all HTTP stores (HttpBrokerStore, BackgroundHttpBrokerStore,
 HttpClientStore) to follow hypermedia principles using the reference pattern. Clients
 discover state transitions by following references in responses, not by constructing
 paths from out-of-band knowledge.
@@ -99,7 +99,7 @@ Clients iterate `items` and follow references. No path construction from IDs.
 
 ### Handle Status Uses References
 
-**Before (AsyncHttpBrokerStore):**
+**Before (BackgroundHttpBrokerStore, then named AsyncHttpBrokerStore):**
 ```json
 {
   "id": "0",
@@ -218,7 +218,7 @@ explains in natural language, meta provides machine-navigable structure.
 | `read /meta/outstanding/0` | N/A | State + navigation references |
 | `read /docs` | Prose help | Prose help (unchanged) |
 
-### AsyncHttpBrokerStore
+### BackgroundHttpBrokerStore
 
 | Path | Before | After |
 |------|--------|-------|

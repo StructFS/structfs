@@ -27,10 +27,7 @@ fn unknown_variant_keeps_message_category_and_nested_location() {
 #[test]
 fn unicode_diagnostics_respect_zero_and_small_byte_limits() {
     for cap in [0, 1, 2, 19, 25, 256, 2048] {
-        let limits = Limits {
-            max_diagnostic_bytes: cap,
-            ..Limits::default()
-        };
+        let limits = Limits::default().with_max_diagnostic_bytes(cap);
         let error =
             from_value_with_limits::<Mode>(Value::from("é".repeat(10_000)), &limits).unwrap_err();
         if let Error::Codec { message, .. } = error {

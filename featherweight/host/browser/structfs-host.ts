@@ -19,18 +19,54 @@ export const status = {
   INVALID_PATH: -7,
   RESOURCE_LIMIT: -8,
   OTHER: -9,
+  INVALID_ARGUMENT: -10,
 } as const;
 
 export type Status = (typeof status)[keyof typeof status];
 
+/// The typed detail an error carries across transcripts: its kind label
+/// (errors.ts) when the status alone is ambiguous, and the structured
+/// fields the native runtime records beside it.
+export interface ErrorDetail {
+  kind?: string;
+  path?: string;
+  component?: string;
+  position?: number;
+  codec?: { kind: string; [field: string]: unknown };
+}
+
 /// A store error carrying a spec 11 status code.
 export class StoreError extends Error {
   readonly code: Status;
+  readonly detail: ErrorDetail;
 
-  constructor(code: Status, message: string) {
+  constructor(code: Status, message: string, detail: ErrorDetail = {}) {
     super(message);
     this.code = code;
+    this.detail = detail;
   }
+}
+
+// The StructFS component grammar (the `structfs-path-validation` crate):
+// a numeric string, or a UAX#31 identifier — XID_Start then XID_Continue,
+// or an underscore followed by at least one XID_Continue.
+const component = /^(?:[0-9]+|\p{XID_Start}\p{XID_Continue}*|_\p{XID_Continue}+)$/u;
+
+/// Validate and normalize a guest path as the native binding does: empty
+/// components are dropped, and an invalid component is status -7 before
+/// any store sees the operation.
+export function parsePath(text: string): string {
+  const components = text.split("/").filter((part) => part !== "");
+  components.forEach((part, position) => {
+    if (!component.test(part)) {
+      throw new StoreError(
+        status.INVALID_PATH,
+        `invalid path component '${part}' at position ${position}`,
+        { kind: "invalid_path", component: part, position },
+      );
+    }
+  });
+  return components.join("/");
 }
 
 /// A pre-serialized JSON payload: lets a store deliver values (like
@@ -123,9 +159,9 @@ export async function instantiate(
   const imports: WebAssembly.Imports = {
     structfs: {
       read(pathPtr: number, pathLen: number, retPtr: number): number {
-        const path = decoder.decode(guestBytes(pathPtr, pathLen));
+        const raw = decoder.decode(guestBytes(pathPtr, pathLen));
         try {
-          const value = store.read(path);
+          const value = store.read(parsePath(raw));
           if (value === undefined) {
             deliver(retPtr, new Uint8Array(0));
             return status.ABSENT;
@@ -143,9 +179,10 @@ export async function instantiate(
         dataLen: number,
         retPtr: number,
       ): number {
-        const path = decoder.decode(guestBytes(pathPtr, pathLen));
+        const raw = decoder.decode(guestBytes(pathPtr, pathLen));
         const data = guestBytes(dataPtr, dataLen);
         try {
+          const path = parsePath(raw);
           const value: unknown = JSON.parse(decoder.decode(data));
           const resultPath = store.write(path, value);
           deliver(retPtr, encoder.encode(resultPath));

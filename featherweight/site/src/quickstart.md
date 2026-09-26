@@ -87,7 +87,8 @@ bindgen. The reference kv block:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo build --target wasm32-unknown-unknown --release -p featherweight-guest
+cargo build --target wasm32-unknown-unknown --release \
+    -p featherweight-guest --features reference-guest
 ```
 
 Drop the artifact into an assembly:

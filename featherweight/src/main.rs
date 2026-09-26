@@ -4,15 +4,21 @@
 //!   block wired to kv, echo, and logger service blocks.
 //! - `fw run <assembly.(json|yaml)>` instantiates an assembly definition
 //!   and waits for its public block to finish.
+//!
+//! Recording, replay, seek, determinism, and the session log are
+//! orthogonal flags accepted before or after the subcommand.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::{Args, Parser, Subcommand};
 use featherweight_runtime::{
-    host_store, register_builtins, AssemblyDef, Determinism, Runtime, SessionEntry, TranscriptMode,
-    TranscriptProvider,
+    host_store, register_builtins, AssemblyDef, Determinism, Runtime, RuntimeConfig, SessionEntry,
+    TranscriptMode, TranscriptProvider,
 };
+use structfs_core_store::{path, Reader as _};
 use structfs_json_store::{JsonlFileBacking, LogStore};
 
 /// The demo: a shell as the public block, with services wired in.
@@ -47,33 +53,85 @@ failure:
   kv: isolate
 "#;
 
-const USAGE: &str = "usage:
-  fw shell                     run the demo assembly (interactive shell)
-  fw run <assembly.json|yaml> [--record DIR | --replay DIR | --seek DIR [--at SEQ]]
-                              [--seed N] [--session FILE]
-                               run an assembly definition
-Orthogonal features, mixable freely:
-  --record DIR    write each block's boundary answers as a transcript in DIR
-                  (and a session log to DIR/session.jsonl)
-  --replay DIR    answer every boundary operation from the transcripts in DIR;
-                  the live world is never consulted
-  --seek DIR      replay the transcripts in DIR, then hand off to live
-                  execution; --at SEQ stops the replay at that point on
-                  DIR/session.jsonl's timeline. Refused if the replayed
-                  prefix wrote to a wired peer (that state would be missing
-                  live); with --seed, sources fast-forward so the run
-                  continues exactly where a straight seeded run would be
-  --seed N        deterministic sources: seeded entropy and a virtual clock,
-                  so two runs with one seed see the same inputs (blocks still
-                  run in parallel at full speed)
-  --sim N         full simulation: --seed plus the deterministic scheduler —
-                  cross-block interleaving is drawn from the seed too, racy
-                  assemblies become one reproducible run per seed, and
-                  deadlocks are detected and shut down loudly; blocks run one
-                  at a time, so this trades throughput for reproducibility
-  --session FILE  forensics: an assembly-wide, arrival-order log of every
-                  block's boundary operations — works live, recording, or
-                  replaying";
+#[derive(Parser)]
+#[command(
+    name = "fw",
+    version,
+    about = "The Featherweight Isotope runtime",
+    arg_required_else_help = true,
+    after_help = "The transcript, determinism and session flags are orthogonal and mix freely."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+    #[command(flatten)]
+    modes: Modes,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the demo assembly (an interactive shell wired to kv, echo, logs).
+    Shell,
+    /// Run an assembly definition (JSON or YAML) until its public block ends.
+    Run {
+        /// The assembly definition file.
+        assembly: PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct Modes {
+    /// Write each block's boundary answers as a transcript in DIR (and a
+    /// session log to DIR/session.jsonl).
+    #[arg(long, value_name = "DIR", global = true, conflicts_with_all = ["replay", "seek"])]
+    record: Option<PathBuf>,
+
+    /// Answer every boundary operation from the transcripts in DIR; the
+    /// live world is never consulted.
+    #[arg(long, value_name = "DIR", global = true, conflicts_with = "seek")]
+    replay: Option<PathBuf>,
+
+    /// Replay the transcripts in DIR, then hand off to live execution.
+    /// Refused if the replayed prefix wrote to a wired peer (that state
+    /// would be missing live); with --seed, sources fast-forward so the run
+    /// continues exactly where a straight seeded run would be.
+    #[arg(long, value_name = "DIR", global = true)]
+    seek: Option<PathBuf>,
+
+    /// With --seek: stop the replay at SEQ on DIR/session.jsonl's timeline.
+    #[arg(long, value_name = "SEQ", global = true, requires = "seek")]
+    at: Option<u64>,
+
+    /// Deterministic sources: seeded entropy and a virtual clock, so two
+    /// runs with one seed see the same inputs (blocks still run in
+    /// parallel at full speed).
+    #[arg(long, value_name = "N", global = true, conflicts_with = "sim")]
+    seed: Option<u64>,
+
+    /// Full simulation: --seed plus the deterministic scheduler — cross-block
+    /// interleaving is drawn from the seed too, racy assemblies become one
+    /// reproducible run per seed, and deadlocks are detected and shut down
+    /// loudly; blocks run one at a time.
+    #[arg(long, value_name = "N", global = true)]
+    sim: Option<u64>,
+
+    /// Forensics: an assembly-wide, arrival-order log of every block's
+    /// boundary operations — works live, recording, or replaying.
+    #[arg(long, value_name = "FILE", global = true)]
+    session: Option<PathBuf>,
+}
+
+/// Exit with a usage error (code 2).
+fn usage_error(message: impl std::fmt::Display) -> ! {
+    eprintln!("fw: {message}");
+    std::process::exit(2);
+}
+
+/// Exit with a run failure (code 1).
+fn failure(message: impl std::fmt::Display) -> ! {
+    eprintln!("fw: {message}");
+    std::process::exit(1);
+}
 
 /// Per-block transcripts as stores: one JSONL-backed append log per block in
 /// `dir`. The runtime sees only the store; the file is this provider's
@@ -82,7 +140,7 @@ Orthogonal features, mixable freely:
 /// Keys are assembly-scoped paths (`demo/shell`, `demo/sub/inner`,
 /// `child#2/kv`), laid out as directories under `dir`. Segments are
 /// sanitized so a hostile block name can't escape it.
-fn transcript_provider(dir: std::path::PathBuf, fresh: bool) -> Arc<TranscriptProvider> {
+fn transcript_provider(dir: PathBuf, fresh: bool) -> Arc<TranscriptProvider> {
     Arc::new(move |block: &str| {
         let mut file = dir.clone();
         for segment in block.split('/') {
@@ -114,196 +172,111 @@ fn transcript_provider(dir: std::path::PathBuf, fresh: bool) -> Arc<TranscriptPr
     })
 }
 
-fn main() {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+/// Per-block seek horizons for "the state just after session `seq`",
+/// read from `dir`'s session log.
+fn seek_horizons(
+    dir: &std::path::Path,
+    seq: u64,
+) -> Arc<featherweight_runtime::transcript::SeekPoint> {
+    let session = dir.join("session.jsonl");
+    if !session.exists() {
+        usage_error(format!("--at needs {}", session.display()));
+    }
+    let entries = LogStore::open(JsonlFileBacking::new(&session))
+        .and_then(|mut log| log.read(&path!("")))
+        .and_then(
+            |all| match all.map(|r| r.into_value(&structfs_core_store::NoCodec)) {
+                Some(Ok(structfs_core_store::Value::Array(items))) => items
+                    .into_iter()
+                    .map(structfs_serde_store::from_value::<SessionEntry>)
+                    .collect(),
+                Some(Err(e)) => Err(e),
+                _ => Ok(Vec::new()),
+            },
+        )
+        .unwrap_or_else(|e| {
+            usage_error(format!("{} is not a session log: {e}", session.display()))
+        });
+    let cursors = SessionEntry::cursors_at(&entries, seq);
+    Arc::new(move |key: &str| Some(cursors.get(key).copied().unwrap_or(0)))
+}
 
-    // --record DIR | --replay DIR (mutually exclusive) and --seed N
-    // (orthogonal to both), position-free.
-    let mut transcript_mode = TranscriptMode::Off;
-    let mut record_dir: Option<std::path::PathBuf> = None;
-    let mut seek_dir: Option<std::path::PathBuf> = None;
-    for flag in ["--record", "--replay"] {
-        if let Some(at) = args.iter().position(|a| a == flag) {
-            if at + 1 >= args.len() {
-                eprintln!("fw: {flag} needs a directory\n{USAGE}");
-                std::process::exit(2);
-            }
-            if !matches!(transcript_mode, TranscriptMode::Off) {
-                eprintln!("fw: --record and --replay are mutually exclusive");
-                std::process::exit(2);
-            }
-            let dir = std::path::PathBuf::from(args.remove(at + 1));
-            args.remove(at);
-            transcript_mode = match flag {
-                "--record" => {
-                    record_dir = Some(dir.clone());
-                    TranscriptMode::Record(transcript_provider(dir, true))
-                }
-                _ => TranscriptMode::Replay(transcript_provider(dir, false)),
-            };
-        }
+fn transcript_mode(modes: &Modes) -> TranscriptMode {
+    if let Some(dir) = &modes.record {
+        return TranscriptMode::Record(transcript_provider(dir.clone(), true));
     }
-    // --seek DIR [--at SEQ]: replay a prefix, then continue live.
-    if let Some(at) = args.iter().position(|a| a == "--seek") {
-        let Some(dir) = args.get(at + 1) else {
-            eprintln!("fw: --seek needs a directory\n{USAGE}");
-            std::process::exit(2);
-        };
-        if !matches!(transcript_mode, TranscriptMode::Off) {
-            eprintln!("fw: --seek is mutually exclusive with --record/--replay");
-            std::process::exit(2);
-        }
-        seek_dir = Some(std::path::PathBuf::from(dir));
-        args.remove(at + 1);
-        args.remove(at);
+    if let Some(dir) = &modes.replay {
+        return TranscriptMode::Replay(transcript_provider(dir.clone(), false));
     }
-    if let Some(dir) = seek_dir {
-        let mut horizon: Option<u64> = None;
-        if let Some(at) = args.iter().position(|a| a == "--at") {
-            let Some(seq) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
-                eprintln!("fw: --at needs a session seq\n{USAGE}");
-                std::process::exit(2);
-            };
-            horizon = Some(seq);
-            args.remove(at + 1);
-            args.remove(at);
-        }
-        // A horizon needs the timeline: map session seq to per-block
-        // transcript cursors. Without --at, every block replays its
-        // whole transcript before going live.
-        let to: std::sync::Arc<featherweight_runtime::transcript::SeekPoint> = match horizon {
-            None => std::sync::Arc::new(|_: &str| None),
-            Some(seq) => {
-                let session = dir.join("session.jsonl");
-                let text = std::fs::read_to_string(&session).unwrap_or_else(|e| {
-                    eprintln!("fw: --at needs {}: {e}", session.display());
-                    std::process::exit(2);
-                });
-                let entries: Vec<SessionEntry> = text
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(serde_json::from_str)
-                    .collect::<Result<_, _>>()
-                    .unwrap_or_else(|e| {
-                        eprintln!("fw: {} is not a session log: {e}", session.display());
-                        std::process::exit(2);
-                    });
-                let cursors = SessionEntry::cursors_at(&entries, seq);
-                std::sync::Arc::new(move |key: &str| Some(cursors.get(key).copied().unwrap_or(0)))
-            }
+    if let Some(dir) = &modes.seek {
+        // Without --at, every block replays its whole transcript before
+        // going live.
+        let to = match modes.at {
+            None => Arc::new(|_: &str| None) as Arc<featherweight_runtime::transcript::SeekPoint>,
+            Some(seq) => seek_horizons(dir, seq),
         };
-        transcript_mode = TranscriptMode::Seek {
-            provider: transcript_provider(dir, false),
+        return TranscriptMode::Seek {
+            provider: transcript_provider(dir.clone(), false),
             to,
         };
     }
+    TranscriptMode::Off
+}
 
+fn main() {
+    let cli = Cli::parse();
+    let modes = &cli.modes;
+
+    let transcripts = transcript_mode(modes);
+    let determinism = match (modes.seed, modes.sim) {
+        (Some(seed), _) => Determinism::Seeded { seed },
+        (_, Some(seed)) => Determinism::Simulation { seed },
+        _ => Determinism::Live,
+    };
     // --session FILE: explicit wins; --record DIR implies DIR/session.jsonl.
-    let mut session_file: Option<std::path::PathBuf> = None;
-    if let Some(at) = args.iter().position(|a| a == "--session") {
-        let Some(file) = args.get(at + 1) else {
-            eprintln!("fw: --session needs a file\n{USAGE}");
-            std::process::exit(2);
-        };
-        session_file = Some(std::path::PathBuf::from(file));
-        args.remove(at + 1);
-        args.remove(at);
-    }
-    if session_file.is_none() {
-        if let Some(dir) = &record_dir {
-            session_file = Some(dir.join("session.jsonl"));
-        }
-    }
+    let session_file = modes
+        .session
+        .clone()
+        .or_else(|| modes.record.as_ref().map(|dir| dir.join("session.jsonl")));
 
-    let mut determinism = Determinism::Live;
-    if let Some(at) = args.iter().position(|a| a == "--seed") {
-        let Some(seed) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
-            eprintln!("fw: --seed needs an integer\n{USAGE}");
-            std::process::exit(2);
-        };
-        args.remove(at + 1);
-        args.remove(at);
-        determinism = Determinism::Seeded { seed };
-    }
-    if let Some(at) = args.iter().position(|a| a == "--sim") {
-        let Some(seed) = args.get(at + 1).and_then(|n| n.parse().ok()) else {
-            eprintln!("fw: --sim needs an integer\n{USAGE}");
-            std::process::exit(2);
-        };
-        if !matches!(determinism, Determinism::Live) {
-            eprintln!("fw: --sim and --seed are mutually exclusive (--sim implies --seed)");
-            std::process::exit(2);
-        }
-        args.remove(at + 1);
-        args.remove(at);
-        determinism = Determinism::Simulation { seed };
-    }
-
-    let (source, base_dir) = match args.first().map(String::as_str) {
-        Some("shell") => (DEMO_ASSEMBLY.to_string(), std::path::PathBuf::from(".")),
-        Some("run") => {
-            let Some(file) = args.get(1) else {
-                eprintln!("{USAGE}");
-                std::process::exit(2);
-            };
-            let path = std::path::PathBuf::from(file);
-            let source = match std::fs::read_to_string(&path) {
-                Ok(source) => source,
-                Err(e) => {
-                    eprintln!("fw: cannot read {file}: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let base = path
+    let (source, base_dir) = match &cli.command {
+        Command::Shell => (DEMO_ASSEMBLY.to_string(), PathBuf::from(".")),
+        Command::Run { assembly } => {
+            let source = std::fs::read_to_string(assembly)
+                .unwrap_or_else(|e| failure(format!("cannot read {}: {e}", assembly.display())));
+            let base = assembly
                 .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
             (source, base)
         }
-        _ => {
-            eprintln!("{USAGE}");
-            std::process::exit(2);
-        }
     };
-
-    let def = match AssemblyDef::from_str(&source) {
-        Ok(def) => def,
-        Err(e) => {
-            eprintln!("fw: {e}");
-            std::process::exit(1);
-        }
-    };
+    let def = AssemblyDef::from_str(&source).unwrap_or_else(|e| failure(e));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime");
-    let mut runtime = Runtime::with_handle(rt.handle().clone())
-        .with_transcripts(transcript_mode)
+        .unwrap_or_else(|e| failure(format!("cannot start the async runtime: {e}")));
+    let mut config = RuntimeConfig::new(rt.handle().clone())
+        .with_transcripts(transcripts)
         .with_determinism(determinism);
     if let Some(file) = session_file {
         // A fresh log per run: a session is one run's timeline.
         let _ = std::fs::remove_file(&file);
         match LogStore::open(JsonlFileBacking::new(&file)) {
-            Ok(log) => runtime = runtime.with_session_log(host_store(log)),
-            Err(e) => {
-                eprintln!("fw: cannot open session log {}: {e}", file.display());
-                std::process::exit(1);
-            }
+            Ok(log) => config = config.with_session_log(host_store(log)),
+            Err(e) => failure(format!("cannot open session log {}: {e}", file.display())),
         }
     }
-    register_builtins(&mut runtime);
+    register_builtins(&mut config);
     // The WIT component binding is an adapter, not a core concern: the
     // CLI opts in so component artifacts run alongside core modules.
-    featherweight_component::register(&mut runtime);
+    featherweight_component::register(&mut config);
+    let runtime = Runtime::new(config);
 
-    let assembly = match runtime.instantiate(&def, HashMap::new(), &base_dir) {
-        Ok(assembly) => assembly,
-        Err(e) => {
-            eprintln!("fw: {e}");
-            std::process::exit(1);
-        }
-    };
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), &base_dir)
+        .unwrap_or_else(|e| failure(e));
 
     rt.block_on(async {
         assembly.wait_public_terminal().await;
@@ -312,11 +285,10 @@ fn main() {
 
     let public = assembly.public_cell();
     if public.state() == featherweight_runtime::BlockState::Failed {
-        eprintln!(
-            "fw: assembly '{}' failed: {}",
+        failure(format!(
+            "assembly '{}' failed: {}",
             assembly.name,
             public.last_error().unwrap_or_default()
-        );
-        std::process::exit(1);
+        ));
     }
 }

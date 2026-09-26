@@ -17,7 +17,8 @@ both directions, digests included.
 
 | File | What |
 |------|------|
-| `structfs-host.ts` | The binding host: `instantiate(wasmBytes, store)` → `{manifest, run}` |
+| `structfs-host.ts` | The binding host: `instantiate(wasmBytes, store)` → `{manifest, run}`; validates guest paths (status -7) before any store sees them, as the native binding does |
+| `errors.ts` | The typed error taxonomy (status, wire type, transcript label per kind), pinned to the native runtime's table by `test/fixtures/error-kinds.json` |
 | `iso-store.ts` | A minimal `/iso` surface: mailbox, responses, stdio, env/args, time, randomness, shutdown; everything else denied like an unwired namespace |
 | `determinism.ts` | Seeded time and entropy (spec 12), bit-identical to the native runtime — the committed seeded fixture holds both hosts to one derivation |
 | `transcript.ts` | Spec 12 transcripts: `RecordingStore`/`ReplayingStore` wrapping any store, JSONL to/from the native runtime's format |
@@ -79,9 +80,14 @@ node serve.ts        # then open http://localhost:8787
 ```
 
 To regenerate the cross-host fixtures after changing the probe or the
-wire format: `node test/record-fixture.ts` here, and
-`cargo test -p featherweight-runtime --test transcript -- --ignored regenerate`
-on the native side.
+wire format, run on the native side, in order,
+`cargo test -p featherweight-runtime --test transcript -- --ignored --exact regenerate_rust_fixture`
+and `... --exact regenerate_seeded_fixture`, then `node test/record-fixture.ts`
+here. Each writes both fixture directories, which must stay byte-identical
+(the native `the_cross_host_fixtures_are_mirrored` test checks). The error
+table is regenerated with
+`cargo test -p featherweight-runtime --lib -- --ignored regenerate_error_kinds`;
+`test/errors.test.ts` then holds `errors.ts` to it.
 
 ## Hosting support boundary
 

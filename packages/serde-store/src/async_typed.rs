@@ -1,13 +1,19 @@
 //! Async typed reader and writer extension traits.
 //!
-//! These traits provide typed access to async stores via serde.
+//! These traits provide typed access to async stores via serde. They mirror
+//! the synchronous [`TypedReader`](crate::TypedReader) /
+//! [`TypedWriter`](crate::TypedWriter) surface one method at a time; see the
+//! [crate docs](crate#typed-access) for the matrix and for the codec
+//! convention.
 //!
 //! Enable the `async` feature to use these traits:
 //!
 //! ```toml
 //! [dependencies]
-//! structfs-serde-store = { version = "0.3", features = ["async"] }
+//! structfs-serde-store = { version = "0.4", features = ["async"] }
 //! ```
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -20,25 +26,36 @@ use crate::convert::{from_value, to_value};
 /// Async extension trait for typed reads.
 ///
 /// This trait is automatically implemented for all `AsyncReader` implementations.
-/// It provides convenience methods for reading data directly into Rust types.
+///
+/// There is no `read_children_typed_async`: [`AsyncReader`] has no child
+/// enumeration to build it on. When core-store grows one, this trait grows
+/// the typed wrapper.
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use structfs_serde_store::{AsyncTypedReader, JsonCodec};
-/// use serde::Deserialize;
+/// ```rust
+/// # #[cfg(feature = "async")] {
+/// use std::sync::Arc;
+/// use serde::{Deserialize, Serialize};
+/// use structfs_core_store::{path, Codec, Error, MemoryStore, SyncToAsync};
+/// use structfs_serde_store::{AsyncTypedReader, AsyncTypedWriter, JsonCodec};
 ///
-/// #[derive(Deserialize)]
-/// struct Config {
-///     debug: bool,
-///     port: u16,
-/// }
+/// #[derive(Debug, PartialEq, Serialize, Deserialize)]
+/// struct Config { debug: bool, port: u16 }
 ///
-/// async fn read_config(store: &mut dyn AsyncReader) -> Result<Config, Error> {
-///     let codec = JsonCodec;
-///     store.read_as_async::<Config>(&path!("config"), &codec).await?
-///         .ok_or_else(|| Error::Other { message: "config not found".into() })
-/// }
+/// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+/// let mut store = SyncToAsync::new(MemoryStore::new());
+/// store.write_typed_async(&path!("config"), &Config { debug: true, port: 8080 }).await?;
+///
+/// let config: Config = store.read_typed_async(&path!("config")).await?.unwrap();
+/// assert_eq!(config.port, 8080);
+///
+/// let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
+/// let config: Option<Config> = store.read_as_async(&path!("config"), codec).await?;
+/// assert!(config.is_some());
+/// # Ok::<(), Error>(())
+/// # }).unwrap();
+/// # }
 /// ```
 #[async_trait]
 pub trait AsyncTypedReader: AsyncReader {
@@ -51,13 +68,13 @@ pub trait AsyncTypedReader: AsyncReader {
     async fn read_as_async<T: DeserializeOwned + Send>(
         &mut self,
         from: &Path,
-        codec: &(dyn Codec + Sync),
+        codec: Arc<dyn Codec>,
     ) -> Result<Option<T>, Error> {
         let Some(record) = self.read_async(from).await? else {
             return Ok(None);
         };
 
-        let value = record.into_value(codec)?;
+        let value = record.into_value(codec.as_ref())?;
         let typed = from_value(value)?;
         Ok(Some(typed))
     }
@@ -67,22 +84,12 @@ pub trait AsyncTypedReader: AsyncReader {
         &mut self,
         from: &Path,
     ) -> Result<Option<T>, Error> {
-        self.read_as_async(from, &structfs_core_store::NoCodec)
-            .await
-    }
-
-    /// Read a value as a serde_json::Value asynchronously.
-    ///
-    /// Convenience method when you don't know the exact type.
-    async fn read_json_async(
-        &mut self,
-        from: &Path,
-        codec: &(dyn Codec + Sync),
-    ) -> Result<Option<serde_json::Value>, Error> {
-        self.read_as_async::<structfs_core_store::Value>(from, codec)
-            .await?
-            .map(crate::value_to_json)
-            .transpose()
+        let Some(record) = self.read_async(from).await? else {
+            return Ok(None);
+        };
+        Ok(Some(from_value(
+            record.into_value(&structfs_core_store::NoCodec)?,
+        )?))
     }
 }
 
@@ -93,24 +100,8 @@ impl<R: AsyncReader + ?Sized + Send> AsyncTypedReader for R {}
 /// Async extension trait for typed writes.
 ///
 /// This trait is automatically implemented for all `AsyncWriter` implementations.
-/// It provides convenience methods for writing Rust types directly.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use structfs_serde_store::AsyncTypedWriter;
-/// use serde::Serialize;
-///
-/// #[derive(Serialize)]
-/// struct User {
-///     name: String,
-///     email: String,
-/// }
-///
-/// async fn create_user(store: &mut dyn AsyncWriter, user: &User) -> Result<Path, Error> {
-///     store.write_as_async(&path!("users/new"), user).await
-/// }
-/// ```
+/// As in the synchronous flavour, there is no codec-taking counterpart: a
+/// typed write always produces a parsed record.
 #[async_trait]
 pub trait AsyncTypedWriter: AsyncWriter {
     /// Serialize a Rust type and write it to the store asynchronously.
@@ -119,24 +110,13 @@ pub trait AsyncTypedWriter: AsyncWriter {
     /// 1. Serializes the data to a Value
     /// 2. Wraps it in a Record::Parsed
     /// 3. Writes it to the store
-    async fn write_as_async<T: Serialize + Sync>(
+    async fn write_typed_async<T: Serialize + Sync + ?Sized>(
         &mut self,
         to: &Path,
         data: &T,
     ) -> Result<Path, Error> {
         let value = to_value(data)?;
         self.write_async(to, Record::parsed(value)).await
-    }
-
-    /// Write a serde_json::Value to the store asynchronously.
-    ///
-    /// Convenience method for dynamic JSON data.
-    async fn write_json_async(
-        &mut self,
-        to: &Path,
-        data: serde_json::Value,
-    ) -> Result<Path, Error> {
-        self.write_as_async(to, &data).await
     }
 }
 
@@ -147,105 +127,56 @@ impl<W: AsyncWriter + ?Sized + Send> AsyncTypedWriter for W {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typed::tests::{alice, raw_alice, RecordStore, TestUser};
     use crate::JsonCodec;
-    use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
-    use structfs_core_store::{path, Record};
+    use structfs_core_store::{path, MemoryStore, SyncToAsync, Writer};
 
-    /// Simple async test store
-    struct TestAsyncStore {
-        data: HashMap<Path, Record>,
-    }
-
-    impl TestAsyncStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl AsyncReader for TestAsyncStore {
-        async fn read_async(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            Ok(self.data.get(from).cloned())
-        }
-    }
-
-    #[async_trait]
-    impl AsyncWriter for TestAsyncStore {
-        async fn write_async(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            self.data.insert(to.clone(), data);
-            Ok(to.clone())
-        }
-    }
-
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct TestUser {
-        name: String,
-        age: u32,
+    fn store() -> SyncToAsync<MemoryStore> {
+        SyncToAsync::new(MemoryStore::new())
     }
 
     #[tokio::test]
-    async fn async_typed_roundtrip() {
-        let mut store = TestAsyncStore::new();
-        let codec = JsonCodec;
-
-        let user = TestUser {
-            name: "Alice".to_string(),
-            age: 30,
-        };
-
-        // Write typed
+    async fn async_typed_roundtrip_is_codec_free() {
+        let mut store = store();
         store
-            .write_as_async(&path!("users/alice"), &user)
+            .write_typed_async(&path!("users/alice"), &alice())
             .await
             .unwrap();
 
-        // Read typed
         let recovered: TestUser = store
-            .read_as_async(&path!("users/alice"), &codec)
+            .read_typed_async(&path!("users/alice"))
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(recovered, alice());
 
-        assert_eq!(user, recovered);
+        let missing: Option<TestUser> = store.read_typed_async(&path!("nope")).await.unwrap();
+        assert!(missing.is_none());
     }
 
     #[tokio::test]
-    async fn async_read_nonexistent_returns_none() {
-        let mut store = TestAsyncStore::new();
-        let codec = JsonCodec;
+    async fn async_read_as_supplies_the_codec_raw_records_need() {
+        let mut inner = RecordStore::default();
+        inner.write(&path!("raw"), raw_alice()).unwrap();
+        let mut store = SyncToAsync::new(inner);
 
-        let result: Option<TestUser> = store
-            .read_as_async(&path!("nonexistent"), &codec)
+        assert!(store
+            .read_typed_async::<TestUser>(&path!("raw"))
             .await
-            .unwrap();
+            .is_err());
 
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn async_write_json_works() {
-        let mut store = TestAsyncStore::new();
-        let codec = JsonCodec;
-
-        let json = serde_json::json!({
-            "key": "value",
-            "nested": {"a": 1, "b": 2}
-        });
-
-        store
-            .write_json_async(&path!("config"), json.clone())
-            .await
-            .unwrap();
-
-        let recovered: serde_json::Value = store
-            .read_json_async(&path!("config"), &codec)
+        let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
+        let user: TestUser = store
+            .read_as_async(&path!("raw"), codec.clone())
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(user, alice());
 
-        assert_eq!(json, recovered);
+        let missing: Option<TestUser> = store
+            .read_as_async(&path!("nonexistent"), codec)
+            .await
+            .unwrap();
+        assert!(missing.is_none());
     }
 }

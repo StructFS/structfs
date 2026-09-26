@@ -3,7 +3,7 @@
 mod tests {
     use featherweight_runtime::{
         async_host_store, service_host_store, AssemblyDef, BlockState, CoreWasmEngine, Metering,
-        Runtime,
+        Runtime, RuntimeConfig,
     };
     use std::{
         collections::HashMap,
@@ -97,13 +97,12 @@ mod tests {
         let prepared = Arc::new(engine.prepare(guest("", true)).await.unwrap());
         for _ in 0..2 {
             let start = Instant::now();
-            let budget = CallBudget::new(CallLimits {
-                calls: 1,
-                calls_per_block: 1,
-                ..Default::default()
-            });
-            let mut runtime = Runtime::new().with_call_budget(budget.clone());
-            runtime.register_core_artifact("gateway", prepared.clone());
+            let budget =
+                CallBudget::shared(CallLimits::default().with_calls(1).with_calls_per_block(1));
+            let mut config = RuntimeConfig::new(tokio::runtime::Handle::current())
+                .with_call_budget(budget.clone());
+            config.register_core_artifact("gateway", prepared.clone());
+            let runtime = Runtime::new(config);
             let released = Arc::new(AtomicUsize::new(0));
             let upstream = Arc::new(Upstream {
                 payload: vec![0, 255, 128, 10],
@@ -111,6 +110,7 @@ mod tests {
                 opened: AtomicBool::new(false),
             });
             let (output, consumer) = DuplexStream::pair(4).unwrap();
+            let output = Arc::new(output);
             let instance = runtime
                 .instantiate(
                     &definition(),
@@ -150,7 +150,7 @@ mod tests {
             assert_eq!(released.load(Ordering::SeqCst), 1);
             assert_eq!(budget.usage().calls, 0);
             assert!(budget.metrics().admitted >= 4);
-            let usage = instance.public_cell().usage.snapshot();
+            let usage = instance.public_cell().usage();
             assert_eq!(usage.peak_linear_memory_bytes, Some(65536));
             eprintln!(
                 "gateway workload: {} us, {:?} peak guest bytes",
@@ -169,14 +169,12 @@ mod tests {
                 _ => "",
             };
             let code = Arc::new(engine.prepare(guest(tail, false)).await.unwrap());
-            let budget = CallBudget::new(CallLimits::default());
-            let mut runtime = Runtime::new()
+            let budget = CallBudget::shared(CallLimits::default());
+            let mut config = RuntimeConfig::new(tokio::runtime::Handle::current())
                 .with_call_budget(budget.clone())
-                .with_metering(Metering {
-                    fuel: Some(100000),
-                    ..Default::default()
-                });
-            runtime.register_core_artifact("gateway", code);
+                .with_metering(Metering::with_fuel(100000));
+            config.register_core_artifact("gateway", code);
+            let runtime = Runtime::new(config);
             let released = Arc::new(AtomicUsize::new(0));
             let upstream = Arc::new(Upstream {
                 payload: vec![1; if mode == "oversize" { 9 } else { 4 }],
@@ -184,8 +182,9 @@ mod tests {
                 opened: AtomicBool::new(false),
             });
             let (output, consumer) = DuplexStream::pair(4).unwrap();
+            let output = Arc::new(output);
             if mode == "disconnect" {
-                consumer.release();
+                consumer.close();
             }
             let instance = runtime
                 .instantiate(
@@ -211,10 +210,7 @@ mod tests {
         let supervisor = CleanupSupervisor::new(1).unwrap();
         let owner = supervisor.owner(Default::default()).unwrap();
         let h = owner.handle();
-        let budget = CallBudget::<String>::new(CallLimits {
-            calls: 1,
-            ..Default::default()
-        });
+        let budget = CallBudget::<String>::shared(CallLimits::default().with_calls(1));
         let lease = budget.acquire_bytes(&"upstream".into(), 4).unwrap();
         assert!(budget.acquire_bytes(&"peer".into(), 4).is_err());
         let (start, started) = tokio::sync::oneshot::channel();
@@ -236,10 +232,10 @@ mod tests {
         started.await.unwrap();
         call.abort();
         let _ = call.await;
-        assert!(!owner.close(Duration::from_millis(1)).await.is_quiescent());
+        assert!(!owner.join(Duration::from_millis(1)).await.is_quiescent());
         assert_eq!(budget.usage().calls, 1);
         release.send(()).unwrap();
-        assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
         assert_eq!(budget.usage().calls, 0);
         assert_eq!(cleaned.load(Ordering::SeqCst), 1);
         let (a, _b) = DuplexStream::pair(4).unwrap();
@@ -266,16 +262,13 @@ mod tests {
     async fn request_timeout_and_disconnect_before_open_do_not_leak_admission() {
         let supervisor = CleanupSupervisor::new(1).unwrap();
         let owner = supervisor.owner(Default::default()).unwrap();
-        let budget = CallBudget::<String>::new(CallLimits::default());
+        let budget = CallBudget::<String>::shared(CallLimits::default());
         let cleaned = Arc::new(AtomicUsize::new(0));
-        let router = Router::new(vec![Mount::new(
+        let router = Router::shared(vec![Mount::new(
             structfs_core_store::path!(""),
             structfs_core_store::path!(""),
             Arc::new(PendingRead(cleaned.clone())),
-            Arc::new(BudgetAdmission {
-                budget: budget.clone(),
-                key: "upstream".into(),
-            }),
+            Arc::new(BudgetAdmission::new(budget.clone(), "upstream")),
         )])
         .unwrap();
         let client = router.client().owned_by(&owner.handle()).with_context(
@@ -289,7 +282,7 @@ mod tests {
         ));
         assert_eq!(cleaned.load(Ordering::SeqCst), 1);
         assert_eq!(budget.usage().calls, 0);
-        owner.cancel();
+        owner.close();
         let started = Arc::new(AtomicUsize::new(0));
         let count = started.clone();
         assert!(owner
@@ -301,6 +294,6 @@ mod tests {
             .await
             .is_err());
         assert_eq!(started.load(Ordering::SeqCst), 0);
-        assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     }
 }

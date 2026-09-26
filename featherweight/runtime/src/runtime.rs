@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use structfs_core_store::{Error, Format, MemoryStore, Path, ReadOnly, Record, Value};
+use structfs_core_store::{path, Error, Format, MemoryStore, Path, ReadOnly, Record, Value};
 use structfs_serde_store::MultiCodec;
 
 use crate::assembly::{AssemblyDef, WireTarget};
-use crate::block::{BlockCell, BlockId, BlockState, ShutdownMode};
-use crate::core_wasm::{is_component, CoreWasmBlock};
+use crate::block::{BlockCell, BlockId, BlockState, BlockView, ShutdownMode};
+use crate::core_wasm::{is_component, CoreWasmBlock, CoreWasmEngine, HostRun};
 use crate::determinism::Determinism;
 use crate::error::{Result, RuntimeError};
 use crate::iso::{IsoConfig, IsoSurface, LogSink, StderrLog};
@@ -21,7 +21,7 @@ use crate::protocol::{decode_read_response, decode_write_response};
 use crate::session::SessionLog;
 use crate::spawn::{ProcStore, SpawnProtocol};
 use crate::stdio::{HostStdio, NullStdio, Stdio};
-use crate::transcript::{BlockTranscript, PreambleProfile, TranscriptMode};
+use crate::transcript::{BlockTranscript, TranscriptMode};
 use crate::turnstile::Turnstile;
 
 /// A loaded wasm artifact in some binding of the Block ABI: it serves
@@ -30,17 +30,8 @@ use crate::turnstile::Turnstile;
 /// Binding adapters implement this to teach the runtime new artifact
 /// kinds; the core knows only the Block ABI (spec 10) and its own
 /// core-wasm binding (spec 11) — everything else registers through
-/// [`Runtime::register_loader`].
+/// [`RuntimeConfig::register_loader`] or [`RuntimeConfig::register_artifact`].
 pub trait WasmBlockDriver: Send + Sync + 'static {
-    /// Optional host-only control for a particular instance. The default
-    /// advertises no resumability or checkpoint support.
-    fn capabilities(&self) -> crate::DriverCapabilities {
-        Default::default()
-    }
-    fn control(&self, _id: &BlockId) -> Option<crate::DriverControl> {
-        None
-    }
-
     /// Execute with the full lifecycle, cancellation and accounting context.
     /// Adapters must implement this directly; there is no implicit blocking bridge.
     fn execute(
@@ -63,8 +54,11 @@ pub trait ArtifactLoader: Send + Sync {
 
 /// The built-in loader: the core-wasm binding (spec 11). Claims any
 /// artifact that is not a wasm component (core modules, and wat text in
-/// tests) and runs it over the standard transports.
-struct CoreWasmLoader;
+/// tests). Every artifact it loads shares one engine — and one epoch
+/// ticker — per runtime.
+struct CoreWasmLoader {
+    engine: std::sync::OnceLock<Arc<CoreWasmEngine>>,
+}
 
 impl ArtifactLoader for CoreWasmLoader {
     fn matches(&self, bytes: &[u8]) -> bool {
@@ -72,8 +66,15 @@ impl ArtifactLoader for CoreWasmLoader {
     }
 
     fn load(&self, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
+        let engine = match self.engine.get() {
+            Some(engine) => engine.clone(),
+            None => {
+                let engine = CoreWasmEngine::new(1)?;
+                self.engine.get_or_init(|| engine).clone()
+            }
+        };
         Ok(Arc::new(CoreWasmDriver(Arc::new(
-            CoreWasmBlock::prepare_for_loader(bytes)?,
+            engine.prepare_blocking(&bytes)?,
         ))))
     }
 }
@@ -86,22 +87,26 @@ impl WasmBlockDriver for CoreWasmDriver {
         context: crate::DriverContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i32>> + Send>> {
         Box::pin(async move {
+            let policy = crate::ExecutionPolicy {
+                fuel: context.metering.fuel,
+                ..Default::default()
+            };
             self.0
-                .run_metered_async(
-                    context.id,
-                    context.namespace,
-                    MultiCodec::standard(),
-                    context.format,
-                    &context.metering,
-                    context.cancel,
-                    context.usage,
-                )
+                .run_host_async(HostRun {
+                    host: context.namespace,
+                    codec: MultiCodec::standard(),
+                    format: context.format,
+                    policy,
+                    cancel: context.cancel,
+                    meter: context.usage,
+                })
                 .await
+                .result
         })
     }
 
     fn manifest(&self) -> Result<Vec<u8>> {
-        self.0.manifest()
+        Ok(self.0.manifest().to_vec())
     }
 }
 
@@ -139,49 +144,237 @@ pub(crate) struct BlockRuntime {
 /// the block definition's `stdio` field.
 pub type StdioProvider = dyn Fn(&str) -> Option<Arc<dyn Stdio>> + Send + Sync;
 
-/// Shared runtime context: the tokio handle, the block registry, and the
-/// per-operation deadline.
+/// Everything a [`Runtime`] is configured with, fixed before it exists.
+///
+/// Build one with [`RuntimeConfig::new`] and the `with_*` methods, add
+/// registrations with the `register_*` methods, then hand it to
+/// [`Runtime::new`]. A running runtime cannot be reconfigured: every
+/// block of every assembly it instantiates sees the same configuration.
+pub struct RuntimeConfig {
+    handle: tokio::runtime::Handle,
+    timeout: Duration,
+    call_budget: Arc<crate::admission::CallBudget>,
+    execution: Option<crate::execution::ExecutionScope>,
+    log: Arc<dyn LogSink>,
+    stdio_provider: Arc<StdioProvider>,
+    metering: Metering,
+    transcripts: TranscriptMode,
+    determinism: Determinism,
+    session: Option<HostStore>,
+    core_engine: Option<Arc<CoreWasmEngine>>,
+    builtins: HashMap<String, Arc<dyn NativeBlockFactory>>,
+    loaders: Vec<Arc<dyn ArtifactLoader>>,
+    artifacts: HashMap<String, Arc<dyn WasmBlockDriver>>,
+}
+
+impl RuntimeConfig {
+    /// Defaults: a 30 s per-operation deadline, an unbounded shared call
+    /// budget, stderr logging, no transcripts, live determinism, no fuel
+    /// cap, and no registrations. Blocks run on `handle`'s runtime.
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            handle,
+            timeout: Duration::from_secs(30),
+            call_budget: crate::admission::CallBudget::shared(Default::default()),
+            execution: None,
+            log: Arc::new(StderrLog),
+            stdio_provider: Arc::new(|_| None),
+            metering: Metering::default(),
+            transcripts: TranscriptMode::Off,
+            determinism: Determinism::Live,
+            session: None,
+            core_engine: None,
+            builtins: HashMap::new(),
+            loaders: Vec::new(),
+            artifacts: HashMap::new(),
+        }
+    }
+
+    /// Set the per-operation deadline for routed calls (default 30s).
+    ///
+    /// A parked handle read can legitimately outlast this; callers of such
+    /// paths should use handles rather than long synchronous calls.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Share a live call budget across request runtimes; saturated calls
+    /// fail immediately as Overloaded. For per-request limits, pass a child
+    /// of the shared tenant/global budget. Update limits on the retained
+    /// budget handle rather than replacing it.
+    pub fn with_call_budget(mut self, budget: Arc<crate::admission::CallBudget>) -> Self {
+        self.call_budget = budget;
+        self
+    }
+
+    /// Apply one absolute deadline/cancellation scope to all blocks, routed
+    /// calls and providers in this runtime. Use a fresh runtime per request.
+    pub fn with_execution_scope(mut self, scope: crate::execution::ExecutionScope) -> Self {
+        self.execution = Some(scope);
+        self
+    }
+
+    /// Replace the log sink (default: stderr).
+    pub fn with_log_sink(mut self, log: Arc<dyn LogSink>) -> Self {
+        self.log = log;
+        self
+    }
+
+    /// Override stdio selection by block name (checked before the block
+    /// definition's `stdio` field). Used by tests and embedders.
+    pub fn with_stdio_provider(mut self, provider: Arc<StdioProvider>) -> Self {
+        self.stdio_provider = provider;
+        self
+    }
+
+    /// Set per-run guest metering (the fuel cap) for wasm blocks. Epoch
+    /// interruption is an engine concern and always on.
+    pub fn with_metering(mut self, metering: Metering) -> Self {
+        self.metering = metering;
+        self
+    }
+
+    /// Set the transcript mode (spec 12; default: [`TranscriptMode::Off`]).
+    ///
+    /// `Record` executes live and appends every boundary answer to each
+    /// block's transcript store; `Replay` answers every boundary operation
+    /// from the transcript and never consults the live world. Transcripts are
+    /// per-block, keyed by block name through the mode's provider.
+    /// Orthogonal to [`RuntimeConfig::with_determinism`] — mix and match.
+    pub fn with_transcripts(mut self, transcripts: TranscriptMode) -> Self {
+        self.transcripts = transcripts;
+        self
+    }
+
+    /// Set the determinism mode (spec 12; default: [`Determinism::Live`]).
+    ///
+    /// Three levels, chosen per run:
+    ///
+    /// - `Live` — the performance mode: real clock and entropy, blocks
+    ///   fully parallel, no scheduler, and the determinism hooks cost a
+    ///   `None` check.
+    /// - `Seeded` — deterministic sources: two runs with one seed see
+    ///   the same `/iso/time` and `/iso/random` answers; blocks still
+    ///   run in parallel at full speed.
+    /// - `Simulation` — Antithesis-style: `Seeded` plus the seeded
+    ///   deterministic scheduler, so cross-block interleaving — racy
+    ///   assemblies included — is one reproducible run per seed, with
+    ///   deadlocks detected. Blocks run one turn at a time: this trades
+    ///   throughput for reproducibility, which is why it is a mode and
+    ///   not the default. Deadlock detection exists only in this mode.
+    ///
+    /// Orthogonal to [`RuntimeConfig::with_transcripts`] — mix and match: a
+    /// seeded run can be recorded, and recording a live run is a record
+    /// of what happened, not a promise it can be reproduced.
+    pub fn with_determinism(mut self, determinism: Determinism) -> Self {
+        self.determinism = determinism;
+        self
+    }
+
+    /// Attach a session log (spec 12): an assembly-wide, arrival-order
+    /// forensic witness of every block's boundary operations, written to
+    /// `store` with the append-log convention. Observation-class — it
+    /// answers nothing, replay never reads it, and it works in every
+    /// mode: live (a flight recorder with no transcripts), recording
+    /// (entries link into the transcripts), and replay (the re-run's own
+    /// timeline). Orthogonal to transcripts and determinism — mix freely.
+    pub fn with_session_log(mut self, store: HostStore) -> Self {
+        self.session = Some(store);
+        self
+    }
+
+    /// Share one core-wasm engine with the built-in `.wasm` loader (and
+    /// with other runtimes). Without this, the runtime creates one engine
+    /// on first use (`CoreWasmEngine::new(1)`: at most 10,000 concurrent
+    /// core-wasm runs and 64 MiB per store) and shares it across every
+    /// artifact it loads. A block that starts when every slot is taken
+    /// waits, within its execution scope, until one frees.
+    pub fn with_core_engine(mut self, engine: Arc<CoreWasmEngine>) -> Self {
+        self.core_engine = Some(engine);
+        self
+    }
+
+    /// Register a native block under `builtin:{name}`.
+    pub fn register_builtin(
+        &mut self,
+        name: impl Into<String>,
+        factory: Arc<dyn NativeBlockFactory>,
+    ) {
+        self.builtins.insert(name.into(), factory);
+    }
+
+    /// Register a binding adapter's artifact loader. Registered loaders
+    /// are consulted before the built-in core-wasm loader, most recently
+    /// registered first.
+    pub fn register_loader(&mut self, loader: Arc<dyn ArtifactLoader>) {
+        self.loaders.insert(0, loader);
+    }
+
+    /// Register an already-prepared artifact from any external adapter
+    /// under an assembly artifact identifier. The host controls
+    /// preparation concurrency, caching and artifact identity.
+    pub fn register_artifact(&mut self, name: impl Into<String>, driver: Arc<dyn WasmBlockDriver>) {
+        self.artifacts.insert(name.into(), driver);
+    }
+
+    /// Register host-resolved core code under an assembly artifact identifier.
+    /// Share a prepared block across fresh session runtimes with this method.
+    pub fn register_core_artifact(&mut self, name: impl Into<String>, block: Arc<CoreWasmBlock>) {
+        self.register_artifact(name, Arc::new(CoreWasmDriver(block)));
+    }
+}
+
+/// Shared runtime context: the frozen configuration, the block registry,
+/// and the deterministic scheduler when simulation is on.
 pub(crate) struct RtCtx {
     handle: tokio::runtime::Handle,
     cleanup: Arc<structfs_service::CleanupSupervisor>,
-    provider_limits: Mutex<structfs_service::OwnerLimits>,
-    // Interior mutability: RtCtx sits behind Arcs (including a Weak from
-    // new_cyclic), so builder-style configuration cannot use get_mut.
-    timeout: Mutex<Duration>,
-    call_budget: Mutex<Arc<crate::admission::CallBudget>>,
-    execution: Mutex<Option<crate::execution::ExecutionScope>>,
-    blocks: Mutex<HashMap<BlockId, Arc<BlockRuntime>>>,
-    log: Mutex<Arc<dyn LogSink>>,
-    stdio_provider: Mutex<Arc<StdioProvider>>,
-    metering: Mutex<Metering>,
-    transcript_mode: Mutex<TranscriptMode>,
-    determinism: Mutex<Determinism>,
+    timeout: Duration,
+    call_budget: Arc<crate::admission::CallBudget>,
+    execution: Option<crate::execution::ExecutionScope>,
+    log: Arc<dyn LogSink>,
+    stdio_provider: Arc<StdioProvider>,
+    metering: Metering,
+    transcript_mode: TranscriptMode,
+    determinism: Determinism,
+    /// The session log (spec 12): the assembly-wide forensic witness,
+    /// when one is attached.
+    session: Option<Arc<SessionLog>>,
+    /// The deterministic scheduler, when Determinism::Simulation is on.
+    turnstile: Option<Arc<Turnstile>>,
+    /// Ordered, so every walk of the registry (deadlock handling included)
+    /// happens in an order that is a function of the assembly's shape.
+    blocks: Mutex<BTreeMap<BlockId, Arc<BlockRuntime>>>,
     /// How many times each transcript key base has been claimed, for the
     /// `#n` suffix on reuse.
     transcript_keys: Mutex<HashMap<String, u64>>,
-    /// The session log (spec 12): the assembly-wide forensic witness,
-    /// when one is attached.
-    session: Mutex<Option<Arc<SessionLog>>>,
-    /// The deterministic scheduler, when Determinism::Simulation is on.
-    turnstile: Mutex<Option<Arc<Turnstile>>>,
     runtime: Weak<RuntimeInner>,
 }
 
+/// Provider owners for each assembly bound this many resources.
+const PROVIDER_RESOURCES: usize = 65536;
+
 impl RtCtx {
-    pub(crate) fn call_budget_snapshot(&self) -> Vec<crate::admission::CallBudgetSnapshot> {
-        self.call_budget
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .hierarchy()
+    pub(crate) fn cleanup(&self) -> &Arc<structfs_service::CleanupSupervisor> {
+        &self.cleanup
     }
 
-    /// Run a future to completion from a blocking thread.
+    /// Run a future to completion from a blocking thread (native blocks).
     pub(crate) fn block_on<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
         self.handle.block_on(fut)
     }
 
-    fn lock_blocks(&self) -> std::sync::MutexGuard<'_, HashMap<BlockId, Arc<BlockRuntime>>> {
+    fn lock_blocks(&self) -> std::sync::MutexGuard<'_, BTreeMap<BlockId, Arc<BlockRuntime>>> {
         self.blocks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn execution_scope(&self) -> Option<crate::execution::ExecutionScope> {
+        self.execution.clone()
+    }
+
+    pub(crate) fn turnstile(&self) -> Option<&Arc<Turnstile>> {
+        self.turnstile.as_ref()
     }
 
     /// Route a read to a block via the server protocol.
@@ -190,8 +383,7 @@ impl RtCtx {
         cell: &Arc<BlockCell>,
         path: Path,
     ) -> std::result::Result<Option<Value>, Error> {
-        let response = self.call(cell, "read", path, Value::Null).await?;
-        decode_read_response(response)
+        decode_read_response(self.call(cell, "read", path, Value::Null, None).await?)
     }
 
     /// Route a write to a block via the server protocol.
@@ -201,58 +393,24 @@ impl RtCtx {
         path: Path,
         data: Value,
     ) -> std::result::Result<Path, Error> {
-        let response = self.call(cell, "write", path, data).await?;
-        decode_write_response(response)
+        decode_write_response(self.call(cell, "write", path, data, None).await?)
     }
 
-    async fn call(
+    /// One server-protocol call, inside the runtime's execution scope when
+    /// it has one. `prepaid` is an admission already charged by the router;
+    /// otherwise the call is charged to the shared budget here.
+    pub(crate) async fn call(
         self: &Arc<Self>,
         cell: &Arc<BlockCell>,
         op: &'static str,
         path: Path,
         data: Value,
+        prepaid: Option<structfs_service::Lease>,
     ) -> std::result::Result<Value, Error> {
+        let live = self.call_live(cell, op, path, data, prepaid);
         match self.execution_scope() {
-            Some(scope) => scope.run(self.call_live(cell, op, path, data)).await,
-            None => self.call_live(cell, op, path, data).await,
-        }
-    }
-
-    pub(crate) fn execution_scope(&self) -> Option<crate::execution::ExecutionScope> {
-        self.execution
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    async fn call_live(
-        self: &Arc<Self>,
-        cell: &Arc<BlockCell>,
-        op: &'static str,
-        path: Path,
-        data: Value,
-    ) -> std::result::Result<Value, Error> {
-        self.call_live_charged(cell, op, path, data, None).await
-    }
-
-    pub(crate) async fn call_admitted(
-        self: &Arc<Self>,
-        cell: &Arc<BlockCell>,
-        op: &'static str,
-        path: Path,
-        data: Value,
-        lease: structfs_service::Lease,
-    ) -> std::result::Result<Value, Error> {
-        match self.execution_scope() {
-            Some(scope) => {
-                scope
-                    .run(self.call_live_charged(cell, op, path, data, Some(lease)))
-                    .await
-            }
-            None => {
-                self.call_live_charged(cell, op, path, data, Some(lease))
-                    .await
-            }
+            Some(scope) => scope.run(live).await,
+            None => live.await,
         }
     }
 
@@ -262,14 +420,10 @@ impl RtCtx {
         path: &Path,
         data: Option<&Record>,
     ) -> std::result::Result<structfs_service::Lease, Error> {
-        self.call_budget
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .acquire_record(key, path, data)
+        self.call_budget.acquire_record(key, path, data)
     }
 
-    async fn call_live_charged(
+    async fn call_live(
         self: &Arc<Self>,
         cell: &Arc<BlockCell>,
         op: &'static str,
@@ -284,12 +438,7 @@ impl RtCtx {
         }
         let charge = match prepaid {
             Some(lease) => lease,
-            None => self
-                .call_budget
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-                .acquire(&cell.admission_id, &path, &data)?,
+            None => self.call_budget.acquire(&cell.admission_id, &path, &data)?,
         };
         self.ensure_started(cell)
             .map_err(|e| Error::store("runtime", "start", e.to_string()))?;
@@ -305,12 +454,9 @@ impl RtCtx {
             turnstile.park(&me, crate::turnstile::ParkKind::Call);
             let response = rx.await;
             turnstile.wait_turn(&me).await;
-            return match response {
-                Ok(response) => Ok(response),
-                Err(_) => Err(Error::overloaded("store temporarily unavailable")),
-            };
+            return response.map_err(|_| Error::overloaded("store temporarily unavailable"));
         }
-        let timeout = *self.timeout.lock().unwrap_or_else(|e| e.into_inner());
+        let timeout = self.timeout;
         let rx = cell.enqueue_owned(op, path, data, charge);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => Ok(response),
@@ -322,24 +468,8 @@ impl RtCtx {
         }
     }
 
-    pub(crate) fn turnstile(&self) -> Option<Arc<Turnstile>> {
-        self.turnstile
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn log_sink(&self) -> Arc<dyn LogSink> {
-        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    fn stdio_for(&self, block: &Arc<BlockRuntime>) -> Arc<dyn Stdio> {
-        let provider = self
-            .stdio_provider
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(stdio) = provider(&block.cell.name) {
+    fn stdio_for(&self, block: &BlockRuntime) -> Arc<dyn Stdio> {
+        if let Some(stdio) = (self.stdio_provider)(&block.cell.name) {
             return stdio;
         }
         if block.stdio_kind == "host" {
@@ -347,6 +477,26 @@ impl RtCtx {
         } else {
             Arc::new(NullStdio)
         }
+    }
+
+    /// Open the block's transcript store (spec 12). The provider is
+    /// synchronous and runs here, so a missing store fails the start; the
+    /// transcript's contents are loaded asynchronously by the block's task.
+    fn transcript_source(&self, block: &BlockRuntime) -> Result<Option<TranscriptSource>> {
+        let key = &block.transcript_key;
+        let opened = match &self.transcript_mode {
+            TranscriptMode::Off => return Ok(None),
+            TranscriptMode::Record(provider) => provider(key)
+                .map(TranscriptSource::Record)
+                .map_err(|e| format!("transcript store for block '{key}': {e}")),
+            TranscriptMode::Replay(provider) => provider(key)
+                .map(TranscriptSource::Replay)
+                .map_err(|e| format!("transcript for block '{key}': {e}")),
+            TranscriptMode::Seek { provider, to } => provider(key)
+                .map(|store| TranscriptSource::Seek(store, to(key)))
+                .map_err(|e| format!("seek transcript for block '{key}': {e}")),
+        };
+        opened.map(Some).map_err(RuntimeError::Assembly)
     }
 
     /// Start a block if it's still in `Created` (lazy startup).
@@ -361,75 +511,12 @@ impl RtCtx {
                 cell.name
             )));
         };
-
-        // Transcripts (spec 12): open the block's transcript before its
-        // code runs, and fail the start loudly if the transcript store can't be
-        // had — a partial transcript is worse than no run.
-        let transcript_mode = self
-            .transcript_mode
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let transcript = match &transcript_mode {
-            TranscriptMode::Off => None,
-            TranscriptMode::Record(provider) => Some(
-                provider(&block.transcript_key)
-                    .map(BlockTranscript::recording)
-                    .map_err(|e| {
-                        cell.set_state(BlockState::Failed);
-                        RuntimeError::assembly(format!(
-                            "transcript store for block '{}': {e}",
-                            block.transcript_key
-                        ))
-                    })?,
-            ),
-            TranscriptMode::Replay(provider) => Some(
-                provider(&block.transcript_key)
-                    .and_then(BlockTranscript::replaying)
-                    .map_err(|e| {
-                        cell.set_state(BlockState::Failed);
-                        RuntimeError::assembly(format!(
-                            "transcript for block '{}': {e}",
-                            block.transcript_key
-                        ))
-                    })?,
-            ),
-            TranscriptMode::Seek { provider, to } => Some(
-                provider(&block.transcript_key)
-                    .and_then(|store| BlockTranscript::seeking(store, to(&block.transcript_key)))
-                    .map_err(|e| {
-                        cell.set_state(BlockState::Failed);
-                        RuntimeError::assembly(format!(
-                            "seek transcript for block '{}': {e}",
-                            block.transcript_key
-                        ))
-                    })?,
-            ),
-        };
-
-        // A seek's prefix must be reconstructible for the handoff to be
-        // sound: effects into wired peers were suppressed during replay,
-        // and a live world missing the block's own effects is refused
-        // loudly rather than handed a confused block. The profile also
-        // says how far to fast-forward seeded sources.
-        let profile: Option<PreambleProfile> = if matches!(
-            &transcript_mode,
-            TranscriptMode::Seek { .. }
-        ) {
-            let profile = transcript
-                .as_ref()
-                .expect("seek builds a transcript")
-                .preamble_profile();
-            if let Some((index, at)) = &profile.peer_write {
+        let transcript = match self.transcript_source(&block) {
+            Ok(source) => source,
+            Err(error) => {
                 cell.set_state(BlockState::Failed);
-                return Err(RuntimeError::assembly(format!(
-                        "cannot seek block '{}' past entry {index}: the prefix writes                          to '{at}', an effect the live world will not hold — seek                          before it, or replay the whole run",
-                        block.transcript_key
-                    )));
+                return Err(error);
             }
-            Some(profile)
-        } else {
-            None
         };
 
         let proc = block.spawn.then(|| {
@@ -442,135 +529,176 @@ impl RtCtx {
         });
         // The session log (spec 12) witnesses every mode — live,
         // recording, and replay — under the block's stable key.
-        let session = self
-            .session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .map(|log| SessionWitness {
-                log,
-                block: block.transcript_key.clone(),
-            });
-
-        // Determinism (spec 12) is the orthogonal feature: it decides how
-        // the iso surface sources time and entropy, whether or not a
-        // transcript is being kept.
-        // Streams derive from the transcript key, not the bare name:
-        // identity that is stable across runs and unique across the
-        // assembly tree, so two blocks named alike never share entropy.
-        let sources = self
-            .determinism
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .sources_for(&block.transcript_key);
-        if let Some(profile) = &profile {
-            sources.fast_forward(profile.entropy_words, profile.clock_ticks);
-        }
-        let iso = Arc::new(IsoSurface::new(IsoConfig {
+        let session = self.session.clone().map(|log| SessionWitness {
+            log,
+            block: block.transcript_key.clone(),
+        });
+        let iso = IsoConfig {
             cell: block.cell.clone(),
-            log: self.log_sink(),
+            log: self.log.clone(),
             stdio: self.stdio_for(&block),
             env: block.env.clone(),
             args: block.args.clone(),
             proc,
             handle: self.handle.clone(),
-            sources,
-        }));
+            // Determinism (spec 12) is the orthogonal feature: it decides
+            // how the iso surface sources time and entropy, whether or not
+            // a transcript is being kept. Streams derive from the
+            // transcript key, not the bare name: identity that is stable
+            // across runs and unique across the assembly tree.
+            sources: self.determinism.sources_for(&block.transcript_key),
+            capabilities: block.wiring.prefixes().map(Path::to_string).collect(),
+            calls: self.call_budget.clone(),
+            execution: self.execution_scope(),
+        };
 
-        let ctx = self.clone();
-        let turnstile = self.turnstile();
         let sim_key = block.transcript_key.clone();
         // Enroll before the task exists: the schedule's view of who is
         // runnable follows instantiation order, never task-start races.
-        if let Some(turnstile) = &turnstile {
+        if let Some(turnstile) = &self.turnstile {
             turnstile.enroll(&sim_key);
         }
-        let identity = turnstile.as_ref().map(|_| sim_key.clone());
-        let task = self
-            .handle
-            .spawn(crate::turnstile::scope_block(identity, async move {
-                if let Some(turnstile) = &turnstile {
-                    turnstile.start(&sim_key).await;
-                }
-                let mut namespace = Namespace::new(
-                    ctx.clone(),
-                    iso,
-                    block.wiring.clone(),
-                    block.provider_owner.clone(),
-                    block.cell.clone(),
-                    transcript,
-                    session,
-                );
-
-                let mut run_guard = RunGuard(block.clone(), true);
-                // Spec 05 ties Running to "begins reading requests", but an
-                // interactive or client-only block may never read them; the
-                // strawman marks Running when the driver's code starts.
-                block.cell.set_state(BlockState::Running);
-
-                let _watch = ctx.execution_scope().map(|scope| {
-                    let cell = block.cell.clone();
-                    crate::execution::Watch(tokio::spawn(async move {
-                        scope.ended().await;
-                        cell.request_shutdown(ShutdownMode::Immediate);
-                    }))
-                });
-                let result: std::result::Result<(), String> = match &block.driver {
-                    Driver::Native(factory) => {
-                        let factory = factory.clone();
-                        crate::turnstile::blocking(move || {
-                            let mut native = factory.create();
-                            native.run(&mut namespace).map_err(|e| e.to_string())
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
-                    }
-                    Driver::Wasm(driver, format) => {
-                        let metering = ctx
-                            .metering
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .clone();
-                        let cancel = block.cell.cancel.clone();
-                        let calls = ctx
-                            .call_budget
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .clone();
-                        driver
-                            .clone()
-                            .execute(crate::DriverContext {
-                                id: block.cell.id.clone(),
-                                namespace,
-                                format: format.clone(),
-                                metering,
-                                cancel,
-                                execution: ctx.execution_scope(),
-                                calls,
-                                usage: block.cell.usage.clone(),
-                            })
-                            .await
-                            .map_err(|e| e.to_string())
-                            .map(|code| {
-                                // Spec 11: run's return value is the exit
-                                // code, unless the block already declared
-                                // one via shutdown/complete.
-                                if code != 0 && !block.cell.shutdown_complete() {
-                                    block.cell.mark_shutdown_complete(code as i64);
-                                }
-                            })
-                    }
-                };
-                if let Some(turnstile) = &turnstile {
-                    turnstile.exit(&sim_key);
-                }
-                finalize(&block, result);
-                run_guard.1 = false;
-            }));
-        if let Some(entry) = self.lock_blocks().get(&cell.id) {
-            *entry.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
-        }
+        let identity = self.turnstile.as_ref().map(|_| sim_key.clone());
+        let run = run_block(self.clone(), block.clone(), iso, transcript, session);
+        // The handle is stored in the same critical section that spawns the
+        // task, so shutdown can never observe a started block without it.
+        let mut task = block.task.lock().unwrap_or_else(|e| e.into_inner());
+        *task = Some(
+            self.handle
+                .spawn(crate::turnstile::scope_block(identity, run)),
+        );
         Ok(())
+    }
+}
+
+/// A transcript store opened for one block, awaiting its load.
+enum TranscriptSource {
+    Record(HostStore),
+    Replay(HostStore),
+    Seek(HostStore, Option<u64>),
+}
+
+impl TranscriptSource {
+    /// Load the transcript. A seek's prefix must be reconstructible for the
+    /// handoff to be sound: effects into wired peers were suppressed during
+    /// replay, and a live world missing the block's own effects is refused
+    /// loudly rather than handed a confused block. The profile also says
+    /// how far to fast-forward seeded sources.
+    async fn open(
+        self,
+        key: &str,
+        sources: &crate::determinism::IsoSources,
+    ) -> std::result::Result<BlockTranscript, String> {
+        match self {
+            TranscriptSource::Record(store) => Ok(BlockTranscript::recording(store)),
+            TranscriptSource::Replay(store) => BlockTranscript::replaying(store)
+                .await
+                .map_err(|e| format!("transcript for block '{key}': {e}")),
+            TranscriptSource::Seek(store, to) => {
+                let transcript = BlockTranscript::seeking(store, to)
+                    .await
+                    .map_err(|e| format!("seek transcript for block '{key}': {e}"))?;
+                let profile = transcript.preamble_profile();
+                if let Some((index, at)) = &profile.peer_write {
+                    return Err(format!(
+                        "cannot seek block '{key}' past entry {index}: the prefix writes \
+                         to '{at}', an effect the live world will not hold — seek \
+                         before it, or replay the whole run"
+                    ));
+                }
+                sources.fast_forward(profile.entropy_words, profile.clock_ticks);
+                Ok(transcript)
+            }
+        }
+    }
+}
+
+/// One block's whole run: wait for a turn (under simulation), load its
+/// transcript, build its namespace, drive its code, and record the outcome.
+async fn run_block(
+    ctx: Arc<RtCtx>,
+    block: Arc<BlockRuntime>,
+    iso: IsoConfig,
+    transcript: Option<TranscriptSource>,
+    session: Option<SessionWitness>,
+) {
+    let turnstile = ctx.turnstile.clone();
+    let key = block.transcript_key.clone();
+    if let Some(turnstile) = &turnstile {
+        turnstile.start(&key).await;
+    }
+    let mut run_guard = RunGuard(block.clone(), true);
+    let result = drive(&ctx, &block, iso, transcript, session).await;
+    if let Some(turnstile) = &turnstile {
+        turnstile.exit(&key);
+    }
+    finalize(&block, result);
+    run_guard.1 = false;
+}
+
+async fn drive(
+    ctx: &Arc<RtCtx>,
+    block: &Arc<BlockRuntime>,
+    iso: IsoConfig,
+    transcript: Option<TranscriptSource>,
+    session: Option<SessionWitness>,
+) -> std::result::Result<(), String> {
+    let transcript = match transcript {
+        Some(source) => Some(source.open(&block.transcript_key, &iso.sources).await?),
+        None => None,
+    };
+    let mut namespace = Namespace::new(
+        ctx.clone(),
+        Arc::new(IsoSurface::new(iso)),
+        block.wiring.clone(),
+        block.provider_owner.clone(),
+        block.cell.clone(),
+        transcript,
+        session,
+    );
+    // Spec 05 ties Running to "begins reading requests", but an
+    // interactive or client-only block may never read them; the
+    // strawman marks Running when the driver's code starts.
+    block.cell.set_state(BlockState::Running);
+
+    let _watch = ctx.execution_scope().map(|scope| {
+        let cell = block.cell.clone();
+        crate::execution::Watch(tokio::spawn(async move {
+            scope.ended().await;
+            cell.request_shutdown(ShutdownMode::Immediate);
+        }))
+    });
+    match &block.driver {
+        Driver::Native(factory) => {
+            let factory = factory.clone();
+            crate::turnstile::blocking(move || {
+                let mut native = factory.create();
+                native.run(&mut namespace).map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        Driver::Wasm(driver, format) => driver
+            .clone()
+            .execute(crate::DriverContext {
+                id: block.cell.id.clone(),
+                namespace,
+                format: format.clone(),
+                metering: ctx.metering.clone(),
+                cancel: block.cell.cancel.clone(),
+                execution: ctx.execution_scope(),
+                calls: ctx.call_budget.clone(),
+                usage: block.cell.usage.clone(),
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .map(|code| {
+                // Spec 11: run's return value is the exit code, unless the
+                // block already declared one via shutdown/complete.
+                if code != 0 && !block.cell.shutdown_complete() {
+                    block.cell.mark_shutdown_complete(code as i64);
+                }
+            }),
     }
 }
 
@@ -608,8 +736,9 @@ fn finalize(block: &BlockRuntime, result: std::result::Result<(), String>) {
     }
 }
 
-/// A running (or runnable) assembly.
+/// What a shutdown left behind.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ShutdownReport {
     /// Registrations whose execution tasks have not been joined. Retain host
     /// reservations until a subsequent shutdown reports an empty list.
@@ -623,6 +752,8 @@ impl ShutdownReport {
     }
 }
 
+/// A running (or runnable) assembly.
+#[non_exhaustive]
 pub struct AssemblyInstance {
     shutdown_lock: tokio::sync::Mutex<()>,
     provider_owner: structfs_service::Owner,
@@ -632,6 +763,9 @@ pub struct AssemblyInstance {
     cells: BTreeMap<String, Arc<BlockCell>>,
     public: Arc<BlockCell>,
     children: Vec<Arc<AssemblyInstance>>,
+    /// Transcript-key claims made for this subtree, so a failed parent
+    /// instantiation can release them.
+    claims: Vec<KeyClaim>,
 }
 
 impl std::fmt::Debug for AssemblyInstance {
@@ -654,6 +788,9 @@ pub struct AssemblyRequest {
     budget: Arc<crate::CallBudget>,
 }
 impl AssemblyRequest {
+    /// Cancel this client's in-flight calls. Not a stop verb: the request
+    /// owns no resources of its own (the instance does), so there is nothing
+    /// to `close` or `join`; pending and later calls fail `Cancelled`.
     pub fn cancel(&self) {
         self.scope.cancel();
     }
@@ -699,26 +836,18 @@ impl AssemblyInstance {
         AssemblyRequest {
             assembly: self.clone(),
             scope: crate::ExecutionScope::new(timeout),
-            budget: crate::CallBudget::new(limits),
-        }
-    }
-    pub fn driver_control(&self, name: &str) -> Option<crate::DriverControl> {
-        let cell = self.cells.get(name)?;
-        let blocks = self.ctx.lock_blocks();
-        match &blocks.get(&cell.id)?.driver {
-            Driver::Wasm(driver, _) => driver.control(&cell.id),
-            Driver::Native(_) => None,
+            budget: crate::CallBudget::shared(limits),
         }
     }
 
-    /// The public block's cell — the assembly's identity from outside.
-    pub fn public_cell(&self) -> &Arc<BlockCell> {
-        &self.public
+    /// The public block — the assembly's identity from outside.
+    pub fn public_cell(&self) -> BlockView {
+        BlockView(self.public.clone())
     }
 
-    /// Look up a block cell by local name.
-    pub fn cell(&self, name: &str) -> Option<&Arc<BlockCell>> {
-        self.cells.get(name)
+    /// Look up a block by local name.
+    pub fn cell(&self, name: &str) -> Option<BlockView> {
+        self.cells.get(name).map(|cell| BlockView(cell.clone()))
     }
 
     /// Read from the assembly's store (its public block).
@@ -736,7 +865,8 @@ impl AssemblyInstance {
         self.public.wait_terminal().await
     }
 
-    /// Deliver a signal to a named block's mailbox.
+    /// Deliver a signal to a named block's mailbox. False when the block
+    /// does not exist, has stopped, or its event budget is full.
     pub fn signal(&self, block: &str, name: impl Into<String>, data: Value) -> bool {
         match self.cells.get(block) {
             Some(cell) => cell.deliver_signal(name, data).is_ok(),
@@ -754,10 +884,7 @@ impl AssemblyInstance {
         name: &str,
         path: Path,
     ) -> std::result::Result<Option<Value>, Error> {
-        let cell = self
-            .cells
-            .get(name)
-            .ok_or_else(|| Error::store("assembly", "read_block", format!("no block '{name}'")))?;
+        let cell = self.named(name)?;
         self.ctx.call_read(cell, path).await
     }
 
@@ -768,11 +895,14 @@ impl AssemblyInstance {
         path: Path,
         data: Value,
     ) -> std::result::Result<Path, Error> {
-        let cell = self
-            .cells
-            .get(name)
-            .ok_or_else(|| Error::store("assembly", "write_block", format!("no block '{name}'")))?;
+        let cell = self.named(name)?;
         self.ctx.call_write(cell, path, data).await
+    }
+
+    fn named(&self, name: &str) -> std::result::Result<&Arc<BlockCell>, Error> {
+        self.cells
+            .get(name)
+            .ok_or_else(|| Error::invalid_argument(format!("no block '{name}' in this assembly")))
     }
 
     fn all_cells(&self) -> Vec<Arc<BlockCell>> {
@@ -781,12 +911,6 @@ impl AssemblyInstance {
             cells.extend(child.all_cells());
         }
         cells
-    }
-
-    /// Native provider lifetime for this instance. Handles opened by a provider
-    /// must register cleanup here before delivery, or use an explicit service owner.
-    pub fn provider_owner(&self) -> structfs_service::OwnerHandle {
-        self.provider_owner.handle()
     }
 
     fn provider_owners(&self) -> Vec<structfs_service::OwnerHandle> {
@@ -806,19 +930,27 @@ impl AssemblyInstance {
         }
     }
 
-    /// Shut the assembly down: graceful first, escalating to immediate
-    /// for blocks that don't stop within `timeout`
-    /// ([spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md)).
+    /// Shut the assembly down
+    /// ([spec 05](https://github.com/StructFS/structfs/blob/main/isotope/spec/05-lifecycle.md))
+    /// within one deadline, `timeout` from now, for the whole tree.
+    ///
+    /// Every block is asked to stop gracefully. Blocks still running at
+    /// the halfway point are escalated to immediate shutdown (their parked
+    /// reads fail and running guests are interrupted). Driver tasks and
+    /// provider cleanup are then joined until the deadline. Whatever has
+    /// not been joined by then is reported, not waited for: retain host
+    /// reservations until a later `shutdown` reports [`ShutdownReport::complete`].
     pub async fn shutdown(&self, timeout: Duration) -> ShutdownReport {
         let _shutdown = self.shutdown_lock.lock().await;
+        let start = tokio::time::Instant::now();
+        let deadline = start + timeout;
+        let escalate_at = start + timeout / 2;
         let cells = self.all_cells();
         for cell in &cells {
             cell.request_shutdown(ShutdownMode::Graceful);
         }
-        // One deadline for the whole tree, rather than N grace periods.
-        let grace = tokio::time::Instant::now() + timeout;
         for cell in &cells {
-            let _ = tokio::time::timeout_at(grace, cell.wait_terminal()).await;
+            let _ = tokio::time::timeout_at(escalate_at, cell.wait_terminal()).await;
         }
         for cell in &cells {
             if !cell.state().is_terminal() {
@@ -827,31 +959,29 @@ impl AssemblyInstance {
         }
         let owners = self.provider_owners();
         for owner in &owners {
-            owner.cancel();
+            owner.close();
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         for cell in &cells {
             let block = self.ctx.lock_blocks().get(&cell.id).cloned();
-            if let Some(block) = block {
-                let task = block.task.lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some(mut task) = task {
-                    if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
-                        // A native driver may not cooperate; retain its handle
-                        // and registration rather than claim it has stopped.
-                        *block.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
-                        continue;
-                    }
+            let Some(block) = block else { continue };
+            let task = block.task.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(mut task) = task {
+                if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+                    // A native driver may not cooperate; retain its handle
+                    // and registration rather than claim it has stopped.
+                    *block.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
+                    continue;
                 }
-                if cell.state().is_terminal() {
-                    self.ctx.lock_blocks().remove(&cell.id);
-                }
+            }
+            if cell.state().is_terminal() {
+                self.ctx.lock_blocks().remove(&cell.id);
             }
         }
         let mut providers = Vec::new();
         for owner in owners {
             providers.push(
                 owner
-                    .close(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                    .join(deadline.saturating_duration_since(tokio::time::Instant::now()))
                     .await,
             );
         }
@@ -869,11 +999,106 @@ impl AssemblyInstance {
 
 /// The shared core of a [`Runtime`], referenced by spawn/management
 /// stores so blocks can instantiate assemblies through the store surface.
-pub struct RuntimeInner {
+pub(crate) struct RuntimeInner {
     ctx: Arc<RtCtx>,
-    builtins: Mutex<HashMap<String, Arc<dyn NativeBlockFactory>>>,
-    loaders: Mutex<Vec<Arc<dyn ArtifactLoader>>>,
-    prepared: Mutex<HashMap<String, Arc<dyn WasmBlockDriver>>>,
+    builtins: HashMap<String, Arc<dyn NativeBlockFactory>>,
+    loaders: Vec<Arc<dyn ArtifactLoader>>,
+    prepared: HashMap<String, Arc<dyn WasmBlockDriver>>,
+}
+
+/// Undoes a partial instantiation: every block registered (or started) in
+/// this scope and its nested children is shut down and deregistered unless
+/// the instantiation completes.
+///
+/// Driver tasks that already started are not abandoned: their handles are
+/// joined on a task supervised by the runtime's cleanup supervisor, so they
+/// stay visible (and a failed join is counted) in
+/// `Runtime::cleanup_supervisor().reports()` until they end. Transcript-key
+/// claims are released too, so a retried instantiation gets the same keys —
+/// and therefore the same block identities — a first success would have.
+struct Rollback {
+    ctx: Arc<RtCtx>,
+    cells: Vec<Arc<BlockCell>>,
+    children: std::cell::RefCell<Vec<Arc<AssemblyInstance>>>,
+    claims: std::cell::RefCell<Vec<KeyClaim>>,
+    armed: bool,
+}
+
+/// One claim on a transcript key base: the `n`th use of `base`.
+#[derive(Clone)]
+struct KeyClaim {
+    base: String,
+    n: u64,
+}
+
+impl Drop for Rollback {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut cells = self.cells.clone();
+        let mut claims = self.claims.get_mut().clone();
+        for child in self.children.get_mut().iter() {
+            cells.extend(child.all_cells());
+            claims.extend(child.claims.iter().cloned());
+        }
+        for cell in &cells {
+            cell.request_shutdown(ShutdownMode::Immediate);
+        }
+        let started: Vec<tokio::task::JoinHandle<()>> = {
+            let mut blocks = self.ctx.lock_blocks();
+            cells
+                .iter()
+                .filter_map(|cell| blocks.remove(&cell.id))
+                .filter_map(|block| block.task.lock().unwrap_or_else(|e| e.into_inner()).take())
+                .collect()
+        };
+        {
+            // Release a claim only while it is still the latest use of its
+            // base: a concurrent instantiation may have claimed after us.
+            let mut keys = self
+                .ctx
+                .transcript_keys
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for claim in claims.iter().rev() {
+                if keys.get(&claim.base) == Some(&claim.n) {
+                    if claim.n <= 1 {
+                        keys.remove(&claim.base);
+                    } else {
+                        keys.insert(claim.base.clone(), claim.n - 1);
+                    }
+                }
+            }
+        }
+        if started.is_empty() {
+            return;
+        }
+        let join = |_cancel| async move {
+            for task in started {
+                task.await
+                    .map_err(|e| Error::store("runtime", "rollback", e.to_string()))?;
+            }
+            Ok(())
+        };
+        match self
+            .ctx
+            .cleanup
+            .owner(structfs_service::OwnerLimits::default().with_resources(1))
+        {
+            Ok(owner) => {
+                if let Err(error) = owner.handle().spawn(join) {
+                    tracing::warn!(%error, "could not supervise a failed instantiation's tasks");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cleanup supervisor full; joining unsupervised");
+                self.ctx.handle.spawn(async move {
+                    let _ = join(structfs_handles::CancelToken::new()).await;
+                });
+            }
+        }
+    }
 }
 
 impl RuntimeInner {
@@ -882,30 +1107,18 @@ impl RuntimeInner {
         self.ctx.clone()
     }
 
-    fn lock_builtins(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<String, Arc<dyn NativeBlockFactory>>> {
-        self.builtins.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Load a wasm artifact through the registered binding loaders.
     fn load_artifact(&self, artifact: &str, bytes: Vec<u8>) -> Result<Arc<dyn WasmBlockDriver>> {
-        // with_handle supports synchronous callers outside an entered runtime.
+        // Loaders may create engines and ticker tasks: enter the runtime so
+        // synchronous callers outside it can instantiate.
         let _entered = self.ctx.handle.enter();
-        let loaders = self
-            .loaders
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        for loader in loaders.iter() {
-            if loader.matches(&bytes) {
-                return loader.load(bytes);
-            }
+        match self.loaders.iter().find(|loader| loader.matches(&bytes)) {
+            Some(loader) => loader.load(bytes),
+            None => Err(RuntimeError::assembly(format!(
+                "no registered artifact loader recognizes '{artifact}' \
+                 (adapters add bindings via RuntimeConfig::register_loader)"
+            ))),
         }
-        Err(RuntimeError::assembly(format!(
-            "no registered artifact loader recognizes '{artifact}' \
-             (adapters add bindings via Runtime::register_loader)"
-        )))
     }
 
     /// Instantiate an assembly definition. See [`Runtime::instantiate`].
@@ -919,16 +1132,18 @@ impl RuntimeInner {
         imports: HashMap<String, HostStore>,
         base_dir: &std::path::Path,
     ) -> Result<Arc<AssemblyInstance>> {
-        let instance = self.instantiate_scoped(def, imports, base_dir, &def.name)?;
+        let instance = self.instantiate_scoped(def, imports, base_dir, &def.name);
         // Simulation: the first scheduling decision waits until the
         // WHOLE tree — nested assemblies included — is enrolled, so the
         // schedule never races the host thread's remaining enrollment.
         // (A spawner instantiating mid-run holds the turn, so this is a
-        // no-op there and the children start at its next yield.)
+        // no-op there and the children start at its next yield.) A failed
+        // instantiation launches too, so blocks it already enrolled get
+        // the turns they need to observe their shutdown.
         if let Some(turnstile) = self.ctx.turnstile() {
             turnstile.launch();
         }
-        Ok(instance)
+        instance
     }
 
     fn instantiate_scoped(
@@ -950,18 +1165,18 @@ impl RuntimeInner {
         let provider_owner = self
             .ctx
             .cleanup
-            .owner(
-                *self
-                    .ctx
-                    .provider_limits
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            )
-            .map_err(|e| RuntimeError::assembly(e.to_string()))?;
+            .owner(structfs_service::OwnerLimits::default().with_resources(PROVIDER_RESOURCES))
+            .map_err(|e| RuntimeError::Admission(e.to_string()))?;
+        let mut rollback = Rollback {
+            ctx: self.ctx.clone(),
+            cells: Vec::new(),
+            children: std::cell::RefCell::new(Vec::new()),
+            claims: std::cell::RefCell::new(Vec::new()),
+            armed: true,
+        };
         let mut cells: BTreeMap<String, Arc<BlockCell>> = BTreeMap::new();
         let mut drivers: BTreeMap<String, Driver> = BTreeMap::new();
         let mut keys: BTreeMap<String, String> = BTreeMap::new();
-        let mut children = Vec::new();
 
         // Claim a block's transcript key: assembly-scoped, `#n` on
         // reuse. The counter lives for the runtime, so the same
@@ -979,33 +1194,37 @@ impl RuntimeInner {
                 .unwrap_or_else(|e| e.into_inner());
             let uses = keys.entry(base.clone()).or_insert(0);
             *uses += 1;
-            match *uses {
+            let n = *uses;
+            rollback.claims.borrow_mut().push(KeyClaim {
+                base: base.clone(),
+                n,
+            });
+            match n {
                 1 => base,
                 n => format!("{base}#{n}"),
             }
         };
+        let mut new_cell = |name: &str, driver: Driver| {
+            let key = claim_key(name);
+            let mut cell = BlockCell::keyed(name.to_string(), def.failure_policy(name), &key);
+            if let Some(turnstile) = self.ctx.turnstile() {
+                cell.attach_simulation(&key, turnstile.clone());
+            }
+            cells.insert(name.to_string(), Arc::new(cell));
+            keys.insert(name.to_string(), key);
+            drivers.insert(name.to_string(), driver);
+        };
 
         // Create cells (or recurse for nested assemblies).
+        let mut children = Vec::new();
         for (name, block_def) in &def.blocks {
             let artifact = block_def.artifact.as_str();
-            let prepared = self
-                .prepared
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(artifact)
-                .cloned();
+            let prepared = self.prepared.get(artifact).cloned();
             if let Some(builtin) = artifact.strip_prefix("builtin:") {
-                let factory = self.lock_builtins().get(builtin).cloned().ok_or_else(|| {
+                let factory = self.builtins.get(builtin).cloned().ok_or_else(|| {
                     RuntimeError::assembly(format!("unknown builtin block '{builtin}'"))
                 })?;
-                let key = claim_key(name);
-                let mut cell = BlockCell::keyed(name.clone(), def.failure_policy(name), &key);
-                if let Some(turnstile) = self.ctx.turnstile() {
-                    cell.attach_simulation(&key, turnstile);
-                }
-                cells.insert(name.clone(), Arc::new(cell));
-                keys.insert(name.clone(), key);
-                drivers.insert(name.clone(), Driver::Native(factory));
+                new_cell(name, Driver::Native(factory));
             } else if prepared.is_some() || artifact.ends_with(".wasm") {
                 let driver = match prepared {
                     Some(driver) => driver,
@@ -1014,14 +1233,7 @@ impl RuntimeInner {
                     }
                 };
                 let format = wasm_format(&driver.manifest()?, block_def.serialization.as_str())?;
-                let key = claim_key(name);
-                let mut cell = BlockCell::keyed(name.clone(), def.failure_policy(name), &key);
-                if let Some(turnstile) = self.ctx.turnstile() {
-                    cell.attach_simulation(&key, turnstile);
-                }
-                cells.insert(name.clone(), Arc::new(cell));
-                keys.insert(name.clone(), key);
-                drivers.insert(name.clone(), Driver::Wasm(driver, format));
+                new_cell(name, Driver::Wasm(driver, format));
             } else if artifact.ends_with(".json")
                 || artifact.ends_with(".yaml")
                 || artifact.ends_with(".yml")
@@ -1043,8 +1255,8 @@ impl RuntimeInner {
                 let child_scope = format!("{scope}/{name}");
                 let child =
                     self.instantiate_scoped(&child_def, HashMap::new(), base_dir, &child_scope)?;
-                cells.insert(name.clone(), child.public_cell().clone());
-                children.push(child);
+                rollback.children.borrow_mut().push(child.clone());
+                children.push((name.clone(), child));
             } else {
                 return Err(RuntimeError::assembly(format!(
                     "unsupported artifact reference '{artifact}' \
@@ -1052,6 +1264,10 @@ impl RuntimeInner {
                 )));
             }
         }
+        for (name, child) in &children {
+            cells.insert(name.clone(), child.public.clone());
+        }
+        let children: Vec<_> = children.into_iter().map(|(_, child)| child).collect();
 
         let public = cells
             .get(&def.public)
@@ -1068,10 +1284,7 @@ impl RuntimeInner {
             // Config appears read-only at /config (spec 02).
             if let Some(config) = def.config.get(&name) {
                 let store = ReadOnly::new(MemoryStore::with_root(config.clone()));
-                entries.push((
-                    Path::parse("config").unwrap(),
-                    Target::Store(host_store(store)),
-                ));
+                entries.push((path!("config"), Target::Store(host_store(store))));
             }
             for wire in def.wiring.iter().filter(|w| w.block == name) {
                 let target = match &wire.target {
@@ -1081,12 +1294,11 @@ impl RuntimeInner {
                 entries.push((wire.prefix.clone(), target));
             }
 
-            let transcript_key = keys[&name].clone();
-
+            rollback.cells.push(cell.clone());
             self.ctx.lock_blocks().insert(
                 cell.id.clone(),
                 Arc::new(BlockRuntime {
-                    cell: cell.clone(),
+                    cell,
                     driver,
                     wiring: Arc::new(WiringTable::new(entries)),
                     provider_owner: provider_owner.handle(),
@@ -1096,21 +1308,11 @@ impl RuntimeInner {
                     stdio_kind: block_def.stdio.clone(),
                     spawn: block_def.spawn,
                     base_dir: base_dir.to_path_buf(),
-                    transcript_key,
+                    transcript_key: keys[&name].clone(),
                     task: Mutex::new(None),
                 }),
             );
         }
-
-        let instance = Arc::new(AssemblyInstance {
-            shutdown_lock: tokio::sync::Mutex::new(()),
-            provider_owner,
-            name: def.name.clone(),
-            ctx: self.ctx.clone(),
-            cells,
-            public: public.clone(),
-            children,
-        });
 
         // The public block starts eagerly; everything else is lazy —
         // except under simulation, where every block starts at once:
@@ -1121,123 +1323,118 @@ impl RuntimeInner {
             // Under simulation every block starts (and enrolls) here,
             // in deterministic iteration order; the launch happens once,
             // at the top of the tree, after all enrollment.
-            for cell in instance.cells.values() {
+            for cell in cells.values() {
                 self.ctx.ensure_started(cell)?;
             }
         }
-        Ok(instance)
+        rollback.armed = false;
+        let mut claims = rollback.claims.take();
+        for child in &children {
+            claims.extend(child.claims.iter().cloned());
+        }
+        Ok(Arc::new(AssemblyInstance {
+            shutdown_lock: tokio::sync::Mutex::new(()),
+            provider_owner,
+            name: def.name.clone(),
+            ctx: self.ctx.clone(),
+            cells,
+            public,
+            children,
+            claims,
+        }))
     }
 }
 
 /// The Featherweight runtime.
 ///
-/// Holds the builtin native-block registry and the shared context. Blocks
-/// run as async tasks on the provided Tokio runtime; native blocks and
-/// synchronous binding adapters use its blocking pool.
+/// Holds the frozen [`RuntimeConfig`], the block registry, and the shared
+/// context. Blocks run as async tasks on the configured Tokio runtime;
+/// native blocks use its blocking pool.
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
 
 impl Runtime {
-    /// Create a runtime on the current tokio runtime handle.
-    ///
-    /// Must be called within a tokio runtime (e.g. inside `block_on` or a
-    /// `#[tokio::main]`); use [`Runtime::with_handle`] otherwise.
-    pub fn new() -> Self {
-        Self::with_handle(tokio::runtime::Handle::current())
-    }
-
-    /// Create a runtime on an explicit tokio handle.
-    pub fn with_handle(handle: tokio::runtime::Handle) -> Self {
-        let inner = Arc::new_cyclic(|weak: &Weak<RuntimeInner>| RuntimeInner {
-            ctx: Arc::new(RtCtx {
-                cleanup: Arc::new(structfs_service::CleanupSupervisor::with_handle(
-                    65536,
-                    handle.clone(),
-                )),
-                provider_limits: Mutex::new(structfs_service::OwnerLimits {
-                    resources: 65536,
-                    ..Default::default()
+    /// Freeze `config` into a runtime.
+    pub fn new(config: RuntimeConfig) -> Self {
+        let RuntimeConfig {
+            handle,
+            timeout,
+            call_budget,
+            execution,
+            log,
+            stdio_provider,
+            metering,
+            transcripts,
+            determinism,
+            session,
+            core_engine,
+            builtins,
+            mut loaders,
+            artifacts,
+        } = config;
+        // The built-in core-wasm loader is consulted last.
+        let core = CoreWasmLoader {
+            engine: std::sync::OnceLock::new(),
+        };
+        if let Some(engine) = core_engine {
+            let _ = core.engine.set(engine);
+        }
+        loaders.push(Arc::new(core));
+        let inner = Arc::new_cyclic(|weak: &Weak<RuntimeInner>| {
+            let turnstile = determinism.simulation_seed().map(|seed| {
+                let turnstile = Turnstile::new(seed);
+                let runtime = weak.clone();
+                // A wedged schedule can never recover on its own (all wakes
+                // happen on turns), so shut the assembly down loudly — in
+                // registry order, which under simulation is key order.
+                turnstile.set_deadlock_handler(move || {
+                    if let Some(runtime) = runtime.upgrade() {
+                        let blocks: Vec<_> = runtime.ctx.lock_blocks().values().cloned().collect();
+                        for block in blocks {
+                            block.cell.request_shutdown(ShutdownMode::Immediate);
+                            // Free any caller stuck awaiting this block: the
+                            // cycle means its response is never coming.
+                            block.cell.fail_in_flight();
+                        }
+                    }
+                });
+                turnstile
+            });
+            RuntimeInner {
+                ctx: Arc::new(RtCtx {
+                    cleanup: Arc::new(structfs_service::CleanupSupervisor::with_handle(
+                        PROVIDER_RESOURCES,
+                        handle.clone(),
+                    )),
+                    handle,
+                    timeout,
+                    call_budget,
+                    execution,
+                    log,
+                    stdio_provider,
+                    metering,
+                    transcript_mode: transcripts,
+                    determinism,
+                    session: session.map(SessionLog::new),
+                    turnstile,
+                    blocks: Mutex::new(BTreeMap::new()),
+                    transcript_keys: Mutex::new(HashMap::new()),
+                    runtime: weak.clone(),
                 }),
-                handle,
-                timeout: Mutex::new(Duration::from_secs(30)),
-                call_budget: Mutex::new(crate::admission::CallBudget::new(Default::default())),
-                execution: Mutex::new(None),
-                blocks: Mutex::new(HashMap::new()),
-                log: Mutex::new(Arc::new(StderrLog)),
-                stdio_provider: Mutex::new(Arc::new(|_| None)),
-                metering: Mutex::new(Metering::default()),
-                transcript_mode: Mutex::new(TranscriptMode::Off),
-                determinism: Mutex::new(Determinism::Live),
-                transcript_keys: Mutex::new(HashMap::new()),
-                session: Mutex::new(None),
-                turnstile: Mutex::new(None),
-                runtime: weak.clone(),
-            }),
-            builtins: Mutex::new(HashMap::new()),
-            loaders: Mutex::new(vec![Arc::new(CoreWasmLoader)]),
-            prepared: Mutex::new(HashMap::new()),
+                builtins,
+                loaders,
+                prepared: artifacts,
+            }
         });
         Self { inner }
     }
 
     /// Retain this supervisor through host shutdown to observe provider cleanup
-    /// even when an instance or its shutdown future is dropped.
+    /// (and the shutdown of released spawn handles) even when an instance or its
+    /// shutdown future is dropped.
     pub fn cleanup_supervisor(&self) -> Arc<structfs_service::CleanupSupervisor> {
         self.inner.ctx.cleanup.clone()
-    }
-
-    /// Bounds owned provider resources for subsequently instantiated assemblies.
-    pub fn with_provider_limits(self, limits: structfs_service::OwnerLimits) -> Self {
-        *self
-            .inner
-            .ctx
-            .provider_limits
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = limits;
-        self
-    }
-
-    /// Register host-resolved core code under an assembly artifact identifier.
-    /// Share a prepared block across fresh session runtimes with this method.
-    pub fn register_core_artifact(&mut self, name: impl Into<String>, block: Arc<CoreWasmBlock>) {
-        self.register_artifact(name, Arc::new(CoreWasmDriver(block)));
-    }
-
-    /// Register an already-prepared artifact from any external adapter. The
-    /// host controls preparation concurrency, caching and artifact identity.
-    pub fn register_artifact(&mut self, name: impl Into<String>, driver: Arc<dyn WasmBlockDriver>) {
-        self.inner
-            .prepared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(name.into(), driver);
-    }
-
-    /// Apply one absolute deadline/cancellation scope to all blocks, routed
-    /// calls and providers in this runtime. Use a fresh runtime per request.
-    pub fn with_execution_scope(self, scope: crate::execution::ExecutionScope) -> Self {
-        *self
-            .inner
-            .ctx
-            .execution
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(scope);
-        self
-    }
-
-    /// Share a live call budget across request runtimes. Configure
-    /// before starting sessions; saturated calls fail immediately as Overloaded.
-    /// For per-request limits, pass a child of the shared tenant/global budget.
-    /// Update limits on the retained budget handle rather than replacing it.
-    pub fn with_call_budget(self, budget: Arc<crate::admission::CallBudget>) -> Self {
-        *self
-            .inner
-            .ctx
-            .call_budget
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = budget;
-        self
     }
 
     /// Number of retained block registrations, including lazy blocks.
@@ -1245,163 +1442,12 @@ impl Runtime {
         self.inner.ctx.lock_blocks().len()
     }
 
-    /// Set the per-operation deadline for routed calls (default 30s).
-    ///
-    /// A parked handle read can legitimately outlast this; callers of such
-    /// paths should use handles rather than long synchronous calls.
-    pub fn with_timeout(self, timeout: Duration) -> Self {
-        *self
-            .inner
-            .ctx
-            .timeout
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = timeout;
-        self
-    }
-
-    /// Replace the log sink (default: stderr).
-    pub fn with_log_sink(self, log: Arc<dyn LogSink>) -> Self {
-        *self.inner.ctx.log.lock().unwrap_or_else(|e| e.into_inner()) = log;
-        self
-    }
-
-    /// Set the transcript mode (spec 12; default: [`TranscriptMode::Off`]).
-    ///
-    /// `Record` executes live and appends every boundary answer to each
-    /// block's transcript store; `Replay` answers every boundary operation
-    /// from the transcript and never consults the live world. Transcripts are
-    /// per-block, keyed by block name through the mode's provider.
-    /// Orthogonal to [`Runtime::with_determinism`] — mix and match.
-    pub fn with_transcripts(self, transcript_mode: TranscriptMode) -> Self {
-        *self
-            .inner
-            .ctx
-            .transcript_mode
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = transcript_mode;
-        self
-    }
-
-    /// Set the determinism mode (spec 12; default: [`Determinism::Live`]).
-    ///
-    /// Three levels, chosen per run:
-    ///
-    /// - `Live` — the performance mode: real clock and entropy, blocks
-    ///   fully parallel, no scheduler, and the determinism hooks cost a
-    ///   `None` check.
-    /// - `Seeded` — deterministic sources: two runs with one seed see
-    ///   the same `/iso/time` and `/iso/random` answers; blocks still
-    ///   run in parallel at full speed.
-    /// - `Simulation` — Antithesis-style: `Seeded` plus the seeded
-    ///   deterministic scheduler, so cross-block interleaving — racy
-    ///   assemblies included — is one reproducible run per seed, with
-    ///   deadlocks detected. Blocks run one turn at a time: this trades
-    ///   throughput for reproducibility, which is why it is a mode and
-    ///   not the default.
-    ///
-    /// Orthogonal to [`Runtime::with_transcripts`] — mix and match: a
-    /// seeded run can be recorded, and recording a live run is a record
-    /// of what happened, not a promise it can be reproduced.
-    pub fn with_determinism(self, determinism: Determinism) -> Self {
-        if let Some(seed) = determinism.simulation_seed() {
-            let turnstile = Turnstile::new(seed);
-            let runtime = Arc::downgrade(&self.inner);
-            // A wedged schedule can never recover on its own (all wakes
-            // happen on turns), so shut the assembly down loudly.
-            turnstile.set_deadlock_handler(move || {
-                if let Some(runtime) = runtime.upgrade() {
-                    for block in runtime.ctx.lock_blocks().values() {
-                        block
-                            .cell
-                            .request_shutdown(crate::block::ShutdownMode::Immediate);
-                        // Free any caller stuck awaiting this block: the
-                        // cycle means its response is never coming.
-                        block.cell.fail_in_flight();
-                    }
-                }
-            });
-            *self
-                .inner
-                .ctx
-                .turnstile
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(turnstile);
-        }
-        *self
-            .inner
-            .ctx
-            .determinism
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = determinism;
-        self
-    }
-
-    /// Attach a session log (spec 12): an assembly-wide, arrival-order
-    /// forensic witness of every block's boundary operations, written to
-    /// `store` with the append-log convention. Observation-class — it
-    /// answers nothing, replay never reads it, and it works in every
-    /// mode: live (a flight recorder with no transcripts), recording
-    /// (entries link into the transcripts), and replay (the re-run's own
-    /// timeline). Orthogonal to transcripts and determinism — mix freely.
-    pub fn with_session_log(self, store: HostStore) -> Self {
-        *self
-            .inner
-            .ctx
-            .session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(SessionLog::new(store));
-        self
-    }
-
-    /// Set guest metering (fuel and epoch interruption) for wasm blocks.
-    /// Default: epoch interruption at 10ms, no fuel cap.
-    pub fn with_metering(self, metering: Metering) -> Self {
-        *self
-            .inner
-            .ctx
-            .metering
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = metering;
-        self
-    }
-
-    /// Override stdio selection by block name (checked before the block
-    /// definition's `stdio` field). Used by tests and embedders.
-    pub fn with_stdio_provider(self, provider: Arc<StdioProvider>) -> Self {
-        *self
-            .inner
-            .ctx
-            .stdio_provider
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = provider;
-        self
-    }
-
-    /// Register a binding adapter's artifact loader. Registered loaders
-    /// are consulted before the built-in core-wasm loader, in
-    /// registration order.
-    pub fn register_loader(&mut self, loader: Arc<dyn ArtifactLoader>) {
-        self.inner
-            .loaders
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(0, loader);
-    }
-
-    /// Register a native block under `builtin:{name}`.
-    pub fn register_builtin(
-        &mut self,
-        name: impl Into<String>,
-        factory: Arc<dyn NativeBlockFactory>,
-    ) {
-        self.inner.lock_builtins().insert(name.into(), factory);
-    }
-
     /// Instantiate an assembly definition.
     ///
     /// `imports` provides stores for the definition's declared imports;
     /// `base_dir` resolves relative artifact paths (wasm files, nested
-    /// definitions).
+    /// definitions). On error nothing stays registered: blocks already
+    /// created (nested assemblies included) are shut down and deregistered.
     pub fn instantiate(
         &self,
         def: &AssemblyDef,
@@ -1428,13 +1474,6 @@ impl Runtime {
             // concept.
             None,
         )
-    }
-}
-
-impl Default for Runtime {
-    /// Equivalent to [`Runtime::new`]; requires a current tokio runtime.
-    fn default() -> Self {
-        Self::new()
     }
 }
 

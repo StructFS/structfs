@@ -189,7 +189,7 @@ async fn typed_helpers_preserve_raw_validation_and_do_not_start_invalid_writes()
     let count = store.writes.clone();
     let invalid = std::collections::BTreeMap::from([(1i64, "value")]);
     assert!(store
-        .write_as_detached(&path!("key"), &invalid)
+        .write_typed_detached(&path!("key"), &invalid)
         .await
         .is_err());
     assert_eq!(count.load(Ordering::SeqCst), 0);

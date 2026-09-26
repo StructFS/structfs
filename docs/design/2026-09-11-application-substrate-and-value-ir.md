@@ -2,7 +2,7 @@
 
 Date: 2026-09-11
 
-Status: Proposed design for the next coordinated crate release
+Status: Shipped in 0.2.0
 
 Scope: StructFS core and service libraries, Isotope contracts, Featherweight embedding
 
@@ -133,6 +133,8 @@ these revisions. Ox references are evidence, not build dependencies.
   vector and all-available tail pages; `featherweight/guest/src/lib.rs:62,73`
   returns string errors. Bounded duplex streams already exist in
   `packages/handles/src/duplex.rs`. Scope is extending/reusing these primitives.
+  (Note, 0.5: `packages/handles/src/tail.rs` and its `TailLog`/`TailPage` have
+  since been deleted; bounded retained tails are `service::OwnedTail`.)
 - [x] **B13. Ox cleanup and durability have independent owners.** Verified with
   `sed -n '56,99p' ../ox/crates/ox-gateway/src/broker_block.rs`: cancellation
   interrupts reads while writes remain available. `ox-kernel/src/log.rs:282`

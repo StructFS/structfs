@@ -29,6 +29,7 @@ use crate::Path;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PathPattern {
     /// Matches exactly one path.
     Exact(Path),

@@ -8,7 +8,7 @@ pre-1.0 release. No persisted records are rewritten automatically.
 | Area | Contract and action |
 | --- | --- |
 | Path macro | Expressions must be `PathComponent`. The macro borrows them, preserving reuse. Add a direct dependency named `structfs-core-store` even when importing `path!` through `structfs`; renamed dependencies are not supported by the expansion. |
-| Path construction | `from_validated_components` now validates in release builds too. Invalid strings panic; use `try_from_components` for fallible construction. |
+| Path construction | `from_validated_components` validated in release builds too (it has since been folded into `Path::from_components` in 0.5). Invalid strings panic; use `try_from_components` for fallible construction. |
 | Path iteration | Iterate component strings with `path.iter()`. Paths are validated refinements of component byte paths; avoid assumptions about their internal storage. |
 | Path persistence | Default Serde remains a slash-separated string. Use `path_serde::components` or `path_serde::optional_components` for legacy arrays. Arrays validate each element without splitting or normalization; `[]` is root, `null` is absent for the optional adapter. |
 | Pattern matching | `prefix_suffix` still allows an empty middle. `prefix_suffix_with_min_middle(prefix, suffix, 1)` requires an account-instance component. Handle `PrefixSuffixMinMiddle` in exhaustive matches. Matching remains component-wise. |

@@ -102,9 +102,9 @@ async fn erased_shared_operations_do_not_hold_construction_lock() {
     let shared = Arc::new(DetachedShared::new(Provider(accepted.clone())));
     let reader: Arc<dyn SharedReader> = shared.clone();
     let writer: Arc<dyn SharedWriter> = shared;
-    let parked = reader.read(path!("pending"));
-    let first = writer.write(path!("one"), Record::parsed(Value::Null));
-    let second = writer.write(path!("two"), Record::parsed(Value::Null));
+    let parked = reader.read_shared(path!("pending"));
+    let first = writer.write_shared(path!("one"), Record::parsed(Value::Null));
+    let second = writer.write_shared(path!("two"), Record::parsed(Value::Null));
     assert_eq!(accepted.load(Ordering::SeqCst), 3);
     assert_eq!(first.await.unwrap(), path!("one"));
     assert_eq!(second.await.unwrap(), path!("two"));
@@ -113,7 +113,10 @@ async fn erased_shared_operations_do_not_hold_construction_lock() {
 
 #[cfg(feature = "async")]
 #[tokio::test]
-async fn construction_panic_prevents_reentry_through_either_interface() {
+async fn construction_panic_is_recovered_through_either_interface() {
+    // Crate-wide poison policy: a panic while constructing an operation
+    // leaves the provider as it was; the next operation proceeds against
+    // that state instead of failing forever.
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -122,17 +125,26 @@ async fn construction_panic_prevents_reentry_through_either_interface() {
         DetachedFuture, DetachedReader, DetachedShared, DetachedWriter, Path, SharedReader,
         SharedWriter,
     };
+    /// Panics on its first construction only, then serves normally.
     struct Provider(Arc<AtomicUsize>);
+    impl Provider {
+        fn enter(&self) {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("partially updated provider");
+            }
+        }
+    }
     impl DetachedReader for Provider {
         fn read_detached(&mut self, _: &Path) -> DetachedFuture<Option<Record>> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            panic!("partially updated provider");
+            self.enter();
+            Box::pin(async { Ok(Some(Record::parsed(Value::Bool(true)))) })
         }
     }
     impl DetachedWriter for Provider {
-        fn write_detached(&mut self, _: &Path, _: Record) -> DetachedFuture<Path> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            panic!("partially updated provider");
+        fn write_detached(&mut self, p: &Path, _: Record) -> DetachedFuture<Path> {
+            self.enter();
+            let p = p.clone();
+            Box::pin(async move { Ok(p) })
         }
     }
     for panic_on_write in [false, true] {
@@ -141,28 +153,32 @@ async fn construction_panic_prevents_reentry_through_either_interface() {
         let other = provider.clone();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if panic_on_write {
-                drop(SharedWriter::write(
-                    &provider,
-                    path!("key"),
-                    Record::parsed(Value::Null),
-                ));
+                drop(provider.write_shared(path!("key"), Record::parsed(Value::Null)));
             } else {
-                drop(SharedReader::read(&provider, path!("key")));
+                drop(provider.read_shared(path!("key")));
             }
         }))
         .is_err());
-        assert!(SharedReader::read(&other, path!("key")).await.is_err());
-        assert!(
-            SharedWriter::write(&other, path!("key"), Record::parsed(Value::Null))
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
+        // Every interface recovers and reaches the provider again.
+        assert!(other.read_shared(path!("key")).await.unwrap().is_some());
+        assert_eq!(
+            other
+                .write_shared(path!("key"), Record::parsed(Value::Null))
                 .await
-                .is_err()
+                .unwrap(),
+            path!("key")
         );
-        assert!(provider.read_detached(&path!("key")).await.is_err());
+        assert!(provider
+            .read_detached(&path!("key"))
+            .await
+            .unwrap()
+            .is_some());
         assert!(provider
             .write_detached(&path!("key"), Record::parsed(Value::Null))
             .await
-            .is_err());
-        assert_eq!(entered.load(Ordering::SeqCst), 1);
+            .is_ok());
+        assert_eq!(entered.load(Ordering::SeqCst), 5);
     }
 }
 
@@ -225,10 +241,10 @@ fn child_projection_uses_override_and_distinguishes_missing_leaf_and_pages() {
         ) -> Result<Option<ChildPage>, Error> {
             assert_eq!(p, &path!("huge"));
             assert_eq!(limit, 2);
-            Ok(Some(ChildPage {
-                names: vec![offset.to_string(), (offset + 1).to_string()],
-                next: Some(offset + 2),
-            }))
+            Ok(Some(ChildPage::new(
+                vec![offset.to_string(), (offset + 1).to_string()],
+                Some(offset + 2),
+            )))
         }
     }
     let mut projection = ChildNames::new(Raw, 2, 10).unwrap();

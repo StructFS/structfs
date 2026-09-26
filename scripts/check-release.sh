@@ -11,7 +11,7 @@ cargo test --workspace --all-features --locked --offline
 cargo clippy --workspace --all-features --all-targets --locked --offline -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked --offline
 # Avoid workspace feature unification hiding missing feature dependencies.
-for feature in '' serde json http http-streaming sys async service state profiles full; do
+for feature in '' async typed persist net net-blocking net-streaming os handles service state profiles full; do
     if [[ -z "$feature" ]]; then
         cargo check -p structfs --no-default-features --locked --offline
     else

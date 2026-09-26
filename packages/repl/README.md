@@ -24,31 +24,59 @@ $ structfs
 
 Type 'help' for available commands, 'exit' to quit.
 
-2 mount(s) /[I]>
+6 mount(s) / >
 ```
+
+Pass `--vi` or `--emacs` to choose the line-editing mode; otherwise
+`STRUCTFS_EDIT_MODE`, then a vi-family `EDITOR`/`VISUAL`, then the inputrc's
+`set editing-mode` directive decide.
 
 ## Commands
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `read [path]` | `get`, `r` | Read and display JSON at path |
-| `write <path> <json>` | `set`, `w` | Write JSON to path |
-| `cd <path>` | | Change current directory |
-| `pwd` | | Print current directory |
-| `mounts` | `ls` | List current mounts |
-| `help` | `?` | Show help |
+| `read [path\|@reg]` | `get`, `r` | Read the value at a path or register |
+| `write <path> <json\|@reg>` | `set`, `w` | Write a value to a path or register |
+| `ls [path]` | | List the child names at a path |
+| `cd <path>` | | Change the current path |
+| `pwd` | | Print the current path |
+| `mounts` | | List mounts and their configs (read /ctx/mounts) |
+| `registers` | `regs` | List all registers |
+| `help [topic]` | `?` | Show help (try: help ctx/http) |
 | `exit` | `quit`, `q` | Exit the REPL |
 
 ## Default Mounts
 
-The REPL starts with these mounts:
+The REPL starts with these mounts (this table is checked against the code):
 
 | Path | Description |
 |------|-------------|
-| `/ctx/http` | Async HTTP broker (background execution) |
-| `/ctx/http_sync` | Sync HTTP broker (blocks until complete) |
-| `/ctx/help` | Built-in documentation system |
-| `/ctx/sys` | System primitives (env, time, proc, fs, random) |
+| `/ctx/repl` | REPL documentation |
+| `/ctx/http` | HTTP broker (background threads) |
+| `/ctx/http_sync` | HTTP broker (sync, blocks on read) |
+| `/ctx/sys` | System primitives (env, time, random, proc, fs); unconfined filesystem access |
+| `/ctx/registers` | Registers (session-local named values) |
+| `/ctx/help` | Documentation system |
+
+`/ctx/sys` can read and write any file the REPL process can: it is not
+confined to a directory. Embedders that need confinement use
+`structfs_sys::SysStore::rooted`.
+
+## Mount types
+
+Write a config to `/ctx/mounts/<name>` to mount a store at `/<name>`;
+write `null` to unmount.
+
+| `type` | Fields | Store |
+|--------|--------|-------|
+| `memory` | | In-memory store (lost on exit) |
+| `local` | `path` | A JSON document on disk, saved atomically after every write |
+| `http` | `url` | HTTP client for a base URL: read is GET, write is POST |
+| `httpbroker` | | Sync HTTP request broker |
+| `backgroundhttpbroker` | | Background HTTP request broker (`asynchttpbroker` is accepted as an alias) |
+| `log` | `path` | A JSONL append log; page with `entries/from/{n}` |
+| `recording` | `path` | A recorded `fw` run's directory, read-only |
+| `sys`, `help`, `repl`, `registers` | | The built-in stores |
 
 ## Examples
 
@@ -68,20 +96,27 @@ ok
   "name": "Alice"
 }
 
-# Make an HTTP request
-> write /ctx/http {"method": "GET", "path": "https://httpbin.org/get"}
+# Make an HTTP request with the sync broker: write queues, read executes
+> write /ctx/http_sync {"method": "GET", "path": "https://httpbin.org/get"}
 ok
-result path: /ctx/http/outstanding/0
-(read from this path to get the result)
+→ /ctx/http_sync/outstanding/0
 
-> read /ctx/http/outstanding/0
+> read /ctx/http_sync/outstanding/0
 {
   "status": 200,
   "body": {...}
 }
 
-# Get help
-> read /ctx/help/http
+# The background broker at /ctx/http starts the request on write; reading
+# the handle returns its status, and response/wait parks until it is done
+> @req write /ctx/http {"method": "GET", "path": "https://httpbin.org/get"}
+> read *@req
+> read *@req/response/wait
+
+# Get help: topics are keyed by mount path
+> read /ctx/help
+> read /ctx/help/ctx/http
+> read /ctx/help/ctx/repl/commands
 ```
 
 ## Registers
@@ -111,7 +146,7 @@ Registers store command output for later use:
 - **Tab completion**: Complete commands with Tab
 - **History**: Command history persisted across sessions
 - **Registers**: Store and reuse command output with `@name` and `*@name`
-- **Vi mode**: Automatically detected from EDITOR, .inputrc, or STRUCTFS_EDIT_MODE
+- **Vi mode**: `--vi`/`--emacs`, then `STRUCTFS_EDIT_MODE`, then a vi-family `EDITOR`/`VISUAL`, then `.inputrc`
 
 ## Path Syntax
 

@@ -27,10 +27,9 @@ meaning and output.
 | `ExplicitOption<T>` | Opt-in exact `kind`/`value` option representation |
 | `ValueJsonCodec` | Default-limits canonical tagged JSON |
 | `JsonCodec`, `CborCodec`, `FlexbuffersCodec` | Default-limits native v1 profiles |
-| `ValueCodec::new(Profile::…)` | Explicit profile with configurable `Limits` |
-| `ValueCodec::canonical()` | Require canonical tagged JSON on decode |
+| `ValueCodec::new(CodecProfile::…)` | Explicit profile with configurable `Limits` |
+| `ValueCodec::canonical()` | Require canonical tagged JSON on decode; `Err(InvalidArgument)` for a profile with no canonical form |
 | `transcode` | Decode, validate, and encode, including same-profile conversions |
-| `validate_value` | Check an existing tree against bounds |
 
 `MultiCodec::standard()` includes all four codecs. `Format::VALUE_JSON` selects
 the tagged representation; `Format::VALUE` remains an in-memory hint. No content
@@ -39,14 +38,14 @@ sniffing selects a codec. `Error::Codec` now includes `CodecErrorKind`, whose
 format selection retains the existing `Error::UnsupportedFormat` variant.
 
 ```rust
-use structfs_serde_store::{Codec, Format, Profile, Value, ValueCodec};
+use structfs_serde_store::{Codec, CodecProfile, Format, Value, ValueCodec};
 
 let value = Value::Array(vec![
     Value::from(u64::MAX),
     Value::Bytes(vec![0, 255]),
     Value::Null,
 ]);
-let codec = ValueCodec::new(Profile::ValueJson).canonical();
+let codec = ValueCodec::new(CodecProfile::ValueJson).canonical().unwrap();
 let bytes = codec.encode(&value, &Format::VALUE_JSON).unwrap();
 let decoded = codec.decode(&bytes, &Format::VALUE_JSON).unwrap();
 assert!(value.semantic_eq(&decoded));

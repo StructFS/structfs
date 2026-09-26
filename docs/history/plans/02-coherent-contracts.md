@@ -2,9 +2,10 @@
 
 Date: 2026-09-14
 
-Status: Implemented and validated as the 0.4.0 candidate on 2026-09-15.
-No publication was performed. See [validation evidence](../docs/release-validation-2026-09-15.md)
-and [implementation decisions](../docs/design/2026-09-14-coherent-contracts.md).
+Status: Implemented and validated as the 0.4.0 candidate on 2026-09-15;
+0.4.0 was published on 2026-09-16 (see [registry status](../../release-status.md)).
+See [validation evidence](../release-validation-2026-09-15.md)
+and [implementation decisions](../../design/2026-09-14-coherent-contracts.md).
 The sections below preserve the implementation objectives and acceptance criteria.
 
 ## Purpose
@@ -17,7 +18,7 @@ integration machinery, rather than simply adding every requested adapter.
 
 This plan supersedes compatibility-preserving recommendations made in response
 to that letter. It follows the completed [consumer contract work](01-consumer-contracts.md)
-and refines the earlier [application substrate design](../docs/design/2026-09-11-application-substrate-and-value-ir.md).
+and refines the earlier [application substrate design](../../design/2026-09-11-application-substrate-and-value-ir.md).
 The source letter is `local/structfs-featherweight-maintainer-letter.md`; the
 requirements below are self-contained because that local file is not a published
 dependency.
@@ -387,7 +388,7 @@ writes translate at the store boundary rather than normalizing internal Values.
 The validation report records the package hashes, coverage, independent consumers,
 platform limits and remaining downstream responsibilities. Publication is separate.
 
-A subsequent [Ox letter audit](../docs/ox-letter-audit-2026-09-15.md) checks each
+A subsequent [Ox letter audit](../ox-letter-audit-2026-09-15.md) checks each
 request against source, records actual downstream subscription tests, and adds
 queued-cancellation and panic regressions. Ox application adoption remains distinct
 from upstream contract completion.

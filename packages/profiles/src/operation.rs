@@ -4,10 +4,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 use structfs_core_store::{DetachedFuture, Error, Record, Value};
+use structfs_handles::CancelToken;
 use structfs_serde_store::to_value;
 use structfs_service::{
-    CallContext, CancelToken, Lease, Operation, OwnerHandle, Registration, ResourceId,
-    ResourceKind, Response, Service,
+    CallContext, Lease, Operation, OwnerHandle, Registration, ResourceId, ResourceKind, Response,
+    Service,
 };
 
 struct State {
@@ -41,18 +42,19 @@ impl Drop for Completion {
 impl OperationHandle {
     /// Admission and retained-result capacity are reserved before invoking work.
     /// The callback must bound its own working memory and observe cancellation.
+    /// Wrap the result in `Arc` to mount it as a service.
     pub fn start<F, Fut>(
         owner: &OwnerHandle,
         id: String,
         max_result_bytes: usize,
         work: F,
-    ) -> Result<Arc<Self>, Error>
+    ) -> Result<Self, Error>
     where
         F: FnOnce(CancelToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Vec<u8>, Error>> + Send + 'static,
     {
         if id.is_empty() || id.len() > 128 || max_result_bytes == 0 {
-            return Err(Error::resource_limit("operation bounds"));
+            return Err(Error::invalid_argument("operation bounds"));
         }
         let charge = Lease::new(owner.track(ResourceKind::Registration, max_result_bytes)?);
         let inner = Arc::new(Inner {
@@ -101,13 +103,13 @@ impl OperationHandle {
             // Application failure is a terminal outcome, not a cleanup failure.
             Ok(())
         })?;
-        Ok(Arc::new(Self {
+        Ok(Self {
             id,
             inner,
             owner: owner.clone(),
             task,
             registration,
-        }))
+        })
     }
     pub fn status(&self) -> OperationStatus {
         let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -136,12 +138,26 @@ impl OperationHandle {
         }
         Ok(state.result.clone())
     }
+    /// Ask the work to stop while keeping the operation's result slot. This is
+    /// a request to the *work*, not a teardown of the handle: use
+    /// [`OperationHandle::close`] for that.
     pub fn cancel(&self) {
         self.inner.cancel.cancel();
     }
-    pub fn release(&self) {
+    /// Request teardown: cancel the work and release the retained result.
+    /// Non-blocking; the owner joins the work.
+    pub fn close(&self) {
         self.cancel();
-        self.registration.release();
+        self.registration.close();
+    }
+    /// [`OperationHandle::close`], then wait at most `timeout` for the result
+    /// slot to be released, and report the owner's remaining resources. The
+    /// work itself is joined by the owner; see [`OperationStatus::joined`].
+    ///
+    /// [`OperationStatus::joined`]: crate::OperationStatus::joined
+    pub async fn join(&self, timeout: std::time::Duration) -> structfs_service::CloseReport {
+        self.close();
+        self.registration.join(timeout).await
     }
 }
 impl Service for OperationHandle {
@@ -155,11 +171,11 @@ impl Service for OperationHandle {
                 .map(|v| Response::Read(v.map(|b| Record::parsed(Value::Bytes(b))))),
             Operation::Write(p, r) => {
                 if r.into_value(&structfs_core_store::NoCodec)? != Value::Null {
-                    return Err(Error::conflict("operation control expects null"));
+                    return Err(Error::invalid_argument("operation control expects null"));
                 }
                 match p.to_string().as_str() {
                     "cancel" => self.cancel(),
-                    "release" => self.release(),
+                    "release" => self.close(),
                     _ => return Err(Error::permission_denied("operation path")),
                 }
                 Ok(Response::Written(p))

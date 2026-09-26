@@ -21,4 +21,4 @@ bytes = "1.9"
 wasmtime = { workspace = true, default-features = true, features = ["component-model"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

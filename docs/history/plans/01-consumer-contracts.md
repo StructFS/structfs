@@ -15,6 +15,6 @@ behavior in independent consumers and packaged artifacts.
 Application persistence formats, provider protocols, and conversation policy
 remain downstream. No publication is part of this implementation work.
 
-Validation: [2026-09-13 consumer contract checks](../docs/release-validation-2026-09-13.md).
+Validation: [2026-09-13 consumer contract checks](../release-validation-2026-09-13.md).
 The implementation targets unreleased 0.3.0 because public pattern and feature
 surfaces changed. Published 0.2.0 records keep their existing defaults.

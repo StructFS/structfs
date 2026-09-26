@@ -13,6 +13,7 @@ type Cleanup = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), Error>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResourceId(u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResourceKind {
     Task,
     Provider,
@@ -21,6 +22,7 @@ pub enum ResourceKind {
     Child,
 }
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct OwnerLimits {
     pub resources: usize,
     pub retained_bytes: usize,
@@ -33,7 +35,20 @@ impl Default for OwnerLimits {
         }
     }
 }
+impl OwnerLimits {
+    /// At most `resources` live registrations, tasks and reservations.
+    pub fn with_resources(mut self, resources: usize) -> Self {
+        self.resources = resources;
+        self
+    }
+    /// At most `bytes` of retained payload charged across those resources.
+    pub fn with_retained_bytes(mut self, bytes: usize) -> Self {
+        self.retained_bytes = bytes;
+        self
+    }
+}
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RemainingResource {
     pub id: ResourceId,
     pub kind: ResourceKind,
@@ -41,6 +56,7 @@ pub struct RemainingResource {
     pub failed: bool,
 }
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CloseReport {
     pub owner_id: u64,
     pub closed: bool,
@@ -231,6 +247,19 @@ impl CleanupSupervisor {
             parent: None,
         })
     }
+    /// Stop admitting new owners and request cleanup of every live one.
+    /// Non-blocking; use [`CleanupSupervisor::join`] to wait for the result.
+    pub fn close(&self) {
+        *self.closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        for o in self
+            .owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            o.cancel();
+        }
+    }
     pub fn reports(&self) -> Vec<CloseReport> {
         self.owners
             .lock()
@@ -250,10 +279,11 @@ impl CleanupSupervisor {
             .ok_or_else(|| Error::conflict("unknown owner"))?;
         OwnerHandle(inner).acknowledge_failure(resource)
     }
-    /// Cancel all owners and wait at most `timeout` in total. Dropping this future
-    /// leaves cleanup running under the supervisor.
-    pub async fn close(&self, timeout: Duration) -> Vec<CloseReport> {
-        *self.closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    /// [`CleanupSupervisor::close`], then wait at most `timeout` in total for
+    /// every owner to finish. Dropping this future leaves cleanup running
+    /// under the supervisor.
+    pub async fn join(&self, timeout: Duration) -> Vec<CloseReport> {
+        self.close();
         let owners: Vec<_> = self
             .owners
             .lock()
@@ -261,9 +291,6 @@ impl CleanupSupervisor {
             .values()
             .cloned()
             .collect();
-        for o in &owners {
-            o.cancel();
-        }
         let _ = tokio::time::timeout(timeout, async {
             for o in &owners {
                 o.join().await;
@@ -285,7 +312,7 @@ impl Drop for CleanupSupervisor {
         }
     }
 }
-/// The unique scope lifetime. Drop signals cancellation without blocking.
+/// The unique scope lifetime. Drop closes the scope without blocking.
 pub struct Owner {
     handle: OwnerHandle,
     parent: Option<Registration>,
@@ -294,29 +321,33 @@ impl Owner {
     pub fn handle(&self) -> OwnerHandle {
         self.handle.clone()
     }
-    pub fn cancel(&self) {
+    /// Close admissions and request cleanup of every resource. Non-blocking
+    /// and idempotent; [`Owner::join`] waits for the result.
+    pub fn close(&self) {
         self.handle.0.cancel();
         if let Some(p) = &self.parent {
-            p.release();
+            p.close();
         }
     }
-    /// Close admissions and join all resources without a timeout. Dropping this
+    /// [`Owner::close`], then wait for every resource to finish. Dropping this
     /// wait leaves cleanup owned by the supervisor. Failed cleanup must be
-    /// acknowledged before this can complete; use close for a bounded report.
-    pub async fn join(&self) -> CloseReport {
-        self.cancel();
+    /// acknowledged before this can complete; pass a timeout for a bounded
+    /// report.
+    pub async fn join_indefinitely(&self) -> CloseReport {
+        self.close();
         self.handle.0.join().await;
         self.handle.report()
     }
-    pub async fn close(&self, timeout: Duration) -> CloseReport {
-        self.cancel();
+    /// [`Owner::close`], then wait at most `timeout` and report what remains.
+    pub async fn join(&self, timeout: Duration) -> CloseReport {
+        self.close();
         let _ = tokio::time::timeout(timeout, self.handle.0.join()).await;
         self.handle.report()
     }
 }
 impl Drop for Owner {
     fn drop(&mut self) {
-        self.cancel();
+        self.close();
     }
 }
 /// Cloneable admission authority; clones do not extend the unique owner's lifetime.
@@ -326,11 +357,13 @@ impl OwnerHandle {
     pub fn id(&self) -> u64 {
         self.0.id
     }
-    pub fn cancel(&self) {
+    /// Close admissions and request cleanup of every resource. Non-blocking.
+    pub fn close(&self) {
         self.0.cancel();
     }
-    pub async fn close(&self, timeout: Duration) -> CloseReport {
-        self.cancel();
+    /// [`OwnerHandle::close`], then wait at most `timeout` and report what remains.
+    pub async fn join(&self, timeout: Duration) -> CloseReport {
+        self.close();
         let _ = tokio::time::timeout(timeout, self.0.join()).await;
         self.report()
     }
@@ -354,12 +387,16 @@ impl OwnerHandle {
             Ok(())
         }
     }
+    /// Insert a resource and return its id together with the cancellation
+    /// token the entry was inserted with, so callers never have to re-lock to
+    /// look up what they just stored.
     fn insert(
         &self,
         kind: ResourceKind,
         bytes: usize,
         cleanup: Option<Cleanup>,
-    ) -> Result<ResourceId, Error> {
+        cancel: CancelToken,
+    ) -> Result<(ResourceId, CancelToken), Error> {
         let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.closed || self.0.ancestors.iter().any(CancelToken::is_cancelled) {
             return Err(Error::cancelled("owner closed"));
@@ -377,16 +414,16 @@ impl OwnerHandle {
                 kind,
                 bytes,
                 cleanup,
-                cancel: CancelToken::new(),
+                cancel: cancel.clone(),
                 failed: false,
             },
         );
-        Ok(id)
+        Ok((id, cancel))
     }
     pub fn track(&self, kind: ResourceKind, bytes: usize) -> Result<Reservation, Error> {
         Ok(Reservation {
             inner: self.0.clone(),
-            id: self.insert(kind, bytes, None)?,
+            id: self.insert(kind, bytes, None, CancelToken::new())?.0,
         })
     }
     /// Reserve cleanup before starting an asynchronous handle open. Once started,
@@ -472,26 +509,42 @@ impl OwnerHandle {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
     {
-        let id = self.insert(kind, bytes, Some(Box::new(move || Box::pin(cleanup()))))?;
-        let cancel = self
-            .0
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entries
-            .get(&id)
-            .map(|e| e.cancel.clone())
-            .unwrap_or_else(|| {
-                let t = CancelToken::new();
-                t.cancel();
-                t
-            });
+        self.register_with_cancellation(kind, bytes, CancelToken::new(), cleanup)
+    }
+    /// [`OwnerHandle::register`] driven by a caller-supplied cancellation
+    /// token instead of a fresh one.
+    ///
+    /// Use this when another structure already owns a token that must mean
+    /// "this resource is gone" — a [`structfs_handles::HandleStore`] entry,
+    /// for instance. Sharing one token keeps the two views from disagreeing
+    /// about whether the resource is still live.
+    pub fn register_with_cancellation<F, Fut>(
+        &self,
+        kind: ResourceKind,
+        bytes: usize,
+        cancel: CancelToken,
+        cleanup: F,
+    ) -> Result<Registration, Error>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        let (id, cancel) = self.insert(
+            kind,
+            bytes,
+            Some(Box::new(move || Box::pin(cleanup()))),
+            cancel,
+        )?;
         Ok(Registration {
             inner: self.0.clone(),
             id,
             cancel,
         })
     }
+    /// A nested scope whose lifetime is bounded by this one: closing this
+    /// owner closes the child, and the child occupies one of this owner's
+    /// resource slots until it is quiescent. The only constructor for nested
+    /// scopes, and therefore the only producer of [`ResourceKind::Child`].
     pub fn child(
         &self,
         supervisor: &CleanupSupervisor,
@@ -528,7 +581,7 @@ impl OwnerHandle {
         F: FnOnce(CancelToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
     {
-        let id = self.insert(ResourceKind::Task, 0, None)?;
+        let (id, _) = self.insert(ResourceKind::Task, 0, None, CancelToken::new())?;
         let token = self.cancellation();
         let task = self.0.runtime.spawn(async move { work(token).await });
         let inner = self.0.clone();
@@ -575,11 +628,13 @@ impl<T> OwnedResource<T> {
                 .ok_or_else(|| Error::cancelled("resource released"))
         }
     }
-    pub fn release(&self) {
-        self.registration.release();
+    /// Request release of the resource. Non-blocking; access fails immediately.
+    pub fn close(&self) {
+        self.registration.close();
     }
-    pub async fn close(&self, timeout: Duration) -> CloseReport {
-        self.registration.close(timeout).await
+    /// [`OwnedResource::close`], then wait at most `timeout` for cleanup.
+    pub async fn join(&self, timeout: Duration) -> CloseReport {
+        self.registration.join(timeout).await
     }
 }
 impl Registration {
@@ -599,13 +654,15 @@ impl Registration {
     pub fn cancellation(&self) -> CancelToken {
         self.cancel.clone()
     }
-    pub fn release(&self) {
+    /// Request cleanup of this registration. Non-blocking and idempotent.
+    pub fn close(&self) {
         self.cancel.cancel();
         self.inner.cleanup(self.id);
     }
-    /// Wait for this registration, then return the entire owner's resource report.
-    pub async fn close(&self, timeout: Duration) -> CloseReport {
-        self.release();
+    /// [`Registration::close`], then wait at most `timeout` for this
+    /// registration, and return the entire owner's resource report.
+    pub async fn join(&self, timeout: Duration) -> CloseReport {
+        self.close();
         let _ = tokio::time::timeout(
             timeout,
             self.inner.gate.wait_until(|| {
@@ -625,6 +682,6 @@ impl Registration {
 }
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.release();
+        self.close();
     }
 }

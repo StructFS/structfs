@@ -649,6 +649,9 @@ impl<'de> de::VariantAccess<'de> for Enum<'de> {
 }
 
 /// Schema-visible option that can preserve Some(()) and nested optional states.
+///
+/// Deliberately an exhaustive newtype: `ExplicitOption(Some(x))` is the
+/// constructor, and the `{kind, value}` wire form has no room for a field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitOption<T>(pub Option<T>);
 impl<T: Serialize> Serialize for ExplicitOption<T> {

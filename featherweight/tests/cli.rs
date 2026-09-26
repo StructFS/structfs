@@ -1,5 +1,6 @@
 //! End-to-end checks of the shipped entry point, including file-loaded prepared
-//! code and recording/replay. These exercise Runtime::with_handle outside block_on.
+//! code and recording/replay. These exercise a runtime built from an explicit
+//! handle outside block_on.
 use std::{
     io::Write,
     path::Path,
@@ -130,6 +131,35 @@ fn cli_rejects_invalid_flags_and_files_with_nonzero_exit() {
         Some(1)
     );
 }
+#[test]
+fn flags_are_position_free_and_documented() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    success(run(dir.path(), &["--seed", "7", "run", "assembly.json"]));
+    success(run(dir.path(), &["run", "--sim", "3", "assembly.json"]));
+    let help = run(dir.path(), &["--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--record",
+        "--replay",
+        "--seek",
+        "--at",
+        "--seed",
+        "--sim",
+        "--session",
+    ] {
+        assert!(text.contains(flag), "{flag} missing from:\n{text}");
+    }
+    // --at is meaningful only with --seek.
+    assert_eq!(
+        run(dir.path(), &["run", "assembly.json", "--at", "1"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
 #[test]
 fn demo_shell_exits_cleanly() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fw"))

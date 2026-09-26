@@ -45,35 +45,46 @@ pub fn is_xid_identifier(s: &str) -> bool {
 /// Check if a string needs encoding.
 ///
 /// A string needs encoding if:
+/// - It is empty (the empty string is not an identifier), OR
 /// - It's not a valid XID identifier, OR
 /// - It starts with `_N_` (prefix collision)
+///
+/// The `_N_` rule is unconditional: `_N_test` is a perfectly good identifier,
+/// but passing it through would make it indistinguishable from the encoding
+/// of `test`, and `decode` would then answer `test` for a string that was
+/// never encoded. Encoding every `_N_`-prefixed input keeps `encode`
+/// injective, and keeps the passthrough set disjoint from the encodings, so
+/// `decode` never mistakes a passthrough for an encoding.
 ///
 /// Note: Strings containing `__` do NOT need encoding just because of that.
 /// The delimiter `__` only has meaning after the `_N_` prefix, so `foo__bar`
 /// passes through unchanged since it can't be confused with an encoded string.
 pub(crate) fn needs_encoding(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-
-    // Prefix collision - only strings starting with _N_ could be confused with encodings
-    if s.starts_with(PREFIX) {
-        return true;
-    }
-
-    // Not a valid XID identifier
-    !is_xid_identifier(s)
+    // Prefix collision - only strings starting with _N_ could be confused
+    // with encodings. Everything that is not a valid XID identifier (the
+    // empty string included) has to be encoded anyway.
+    s.starts_with(PREFIX) || !is_xid_identifier(s)
 }
 
 /// Encode a Unicode string into a valid UAX 31 identifier.
 ///
-/// Returns input unchanged if already a valid XID identifier that doesn't
-/// conflict with our encoding format.
+/// Returns input unchanged if it is already a valid XID identifier that
+/// cannot be confused with an encoding — that is, one that does not start
+/// with `_N_`. Everything else, including the empty string and anything
+/// already `_N_`-prefixed, is encoded.
+///
+/// The output is always a valid XID identifier, and `encode` is injective:
+/// when `encode(s) != s`, [`decode`](crate::decode) returns exactly `s`; when
+/// `encode(s) == s`, the passthrough stands for itself and `decode` answers
+/// `NotEncoded`. `encode` is therefore *not* idempotent — `encode(encode(x))` double-encodes
+/// — which is the price of a lossless round trip. Use
+/// [`is_encoded`](crate::is_encoded) if you need to know whether a string is
+/// already an encoding.
 ///
 /// # Examples
 ///
 /// ```
-/// use namecode::encode;
+/// use namecode::{decode, encode};
 ///
 /// // Valid identifiers pass through
 /// assert_eq!(encode("foo"), "foo");
@@ -83,34 +94,62 @@ pub(crate) fn needs_encoding(s: &str) -> bool {
 /// assert_eq!(encode("hello world"), "_N_helloworld__fa0b");
 /// assert_eq!(encode("foo-bar"), "_N_foobar__da1d");
 ///
-/// // Idempotent: encoding twice gives the same result
-/// let encoded = encode("hello world");
-/// assert_eq!(encode(&encoded), encoded);
+/// // The empty string has an encoding of its own
+/// assert_eq!(encode(""), "_N_");
+/// assert_eq!(decode("_N_").unwrap(), "");
+///
+/// // Anything that looks like an encoding is encoded again, so the round
+/// // trip never loses the original
+/// let literal = "_N_helloworld__fa0b";
+/// assert_ne!(encode(literal), literal);
+/// assert_eq!(decode(&encode(literal)).unwrap(), literal);
 /// ```
 pub fn encode(input: &str) -> String {
-    // Empty string passes through
-    if input.is_empty() {
-        return String::new();
+    if needs_encoding(input) {
+        encode_impl(input)
+    } else {
+        input.to_string()
     }
+}
 
-    // Check if encoding is needed
-    if !needs_encoding(input) {
-        return input.to_string();
-    }
-
-    // Idempotency: if this is already a valid encoding whose decoded value
-    // needs encoding, return it unchanged. The identity property guarantees
-    // encode_impl(decode(s)) == s for any valid encoding s.
-    if input.starts_with(PREFIX) {
-        if let Ok(decoded) = crate::decode::decode(input) {
-            if needs_encoding(&decoded) {
-                debug_assert_eq!(encode_impl(&decoded), input, "identity violation");
-                return input.to_string();
-            }
-        }
-    }
-
+/// Encode a string unconditionally, even when it is already a valid
+/// identifier that `encode` would pass through.
+///
+/// The result always starts with `_N_` and always decodes back to `input`.
+/// This exists for callers whose identifier grammar is narrower than UAX 31 —
+/// StructFS path components, for instance, reject a bare `_` that
+/// [`encode`] happily passes through — and that therefore need an escape
+/// hatch that is guaranteed to produce a `_N_`-prefixed form.
+///
+/// # Examples
+///
+/// ```
+/// use namecode::{decode, encode, encode_forced};
+///
+/// assert_eq!(encode("foo"), "foo");
+/// assert_eq!(encode_forced("foo"), "_N_foo");
+/// assert_eq!(decode(&encode_forced("foo")).unwrap(), "foo");
+/// ```
+pub fn encode_forced(input: &str) -> String {
     encode_impl(input)
+}
+
+/// Report whether `s` is a canonical Namecode encoding, i.e. whether
+/// [`decode`](crate::decode) accepts it.
+///
+/// # Examples
+///
+/// ```
+/// use namecode::{encode, is_encoded};
+///
+/// assert!(is_encoded(&encode("hello world")));
+/// assert!(!is_encoded("hello"));
+/// // Non-canonical spellings are not encodings
+/// assert!(!is_encoded("_N_helloworld__FA0B"));
+/// assert!(!is_encoded("_N___"));
+/// ```
+pub fn is_encoded(s: &str) -> bool {
+    crate::decode::decode(s).is_ok()
 }
 
 /// Internal encoding implementation.
@@ -242,94 +281,64 @@ fn encode_varint(output: &mut String, mut value: u32, bias: u32) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_is_xid_identifier() {
-        // Valid identifiers
-        assert!(is_xid_identifier("foo"));
-        assert!(is_xid_identifier("_foo"));
-        assert!(is_xid_identifier("foo123"));
-        assert!(is_xid_identifier("café"));
-        assert!(is_xid_identifier("名前"));
-        assert!(is_xid_identifier("_1"));
-        assert!(is_xid_identifier("_")); // Single underscore is valid
-
-        // Invalid identifiers
-        assert!(!is_xid_identifier("")); // Empty
-        assert!(!is_xid_identifier("123")); // Starts with digit
-        assert!(!is_xid_identifier("foo bar")); // Contains space
-        assert!(!is_xid_identifier("foo-bar")); // Contains hyphen
-    }
+    // Contract-level behaviour (passthrough, round trip, error cases) lives in
+    // the crate-root test module. These tests cover the internals: which
+    // strings the encoder decides to touch, and the structural invariants of
+    // the encoded form.
 
     #[test]
     fn test_needs_encoding() {
         // Don't need encoding
         assert!(!needs_encoding("foo"));
         assert!(!needs_encoding("café"));
-        assert!(!needs_encoding("")); // Empty passes through
         assert!(!needs_encoding("foo__bar")); // Valid XID, no prefix collision
+        assert!(!needs_encoding("_")); // Bare underscore is a valid identifier
 
         // Need encoding
+        assert!(needs_encoding("")); // Empty is not an identifier
         assert!(needs_encoding("foo bar")); // Space
         assert!(needs_encoding("foo-bar")); // Hyphen
         assert!(needs_encoding("123foo")); // Starts with digit
         assert!(needs_encoding("_N_test")); // Prefix collision
         assert!(needs_encoding("_N_foo__bar")); // Prefix collision (__ irrelevant)
+        assert!(needs_encoding("_N_helloworld__fa0b")); // Even a real encoding
     }
 
     #[test]
-    fn test_encode_valid_xid() {
-        // Valid XID identifiers pass through unchanged
-        assert_eq!(encode("foo"), "foo");
-        assert_eq!(encode("café"), "café");
-        assert_eq!(encode("名前"), "名前");
-        assert_eq!(encode("foo123"), "foo123");
-    }
-
-    #[test]
-    fn test_encode_empty() {
-        assert_eq!(encode(""), "");
-    }
-
-    #[test]
-    fn test_encode_with_space() {
+    fn test_encode_structure() {
+        // Basic chars are preserved in order, ahead of the delimiter
         let encoded = encode("hello world");
         assert!(encoded.starts_with(PREFIX));
         assert!(encoded.contains(DELIMITER));
-        // Basic chars should be extracted
         assert!(encoded.contains("helloworld"));
+
+        // No delimiter when every character is basic
+        assert_eq!(encode("123foo"), "_N_123foo");
     }
 
     #[test]
-    fn test_encode_with_hyphen() {
-        let encoded = encode("foo-bar");
-        assert!(encoded.starts_with(PREFIX));
-        assert!(encoded.contains("foobar"));
+    fn test_encode_forced_always_prefixes() {
+        for input in ["foo", "_", "", "café"] {
+            let encoded = encode_forced(input);
+            assert!(
+                encoded.starts_with(PREFIX),
+                "{input:?} -> {encoded:?} lacks prefix"
+            );
+            assert_eq!(crate::decode::decode(&encoded).unwrap(), input);
+        }
     }
 
     #[test]
-    fn test_encode_starts_with_digit() {
-        let encoded = encode("123foo");
-        assert!(encoded.starts_with(PREFIX));
-    }
-
-    #[test]
-    fn test_encode_prefix_collision() {
-        let encoded = encode("_N_test");
-        assert!(encoded.starts_with(PREFIX));
-        // Should NOT equal the input (would be ambiguous)
-        assert_ne!(encoded, "_N_test");
-    }
-
-    #[test]
-    fn test_encode_prefix_collision_invalid_encoding() {
-        // A string starting with _N_ that isn't a valid encoding
-        // (digit '9' is not in the bootstring alphabet)
-        let input = "_N_abc__9";
-        let encoded = encode(input);
-        assert!(encoded.starts_with(PREFIX));
-        assert_ne!(encoded, input);
-        let decoded = crate::decode::decode(&encoded).unwrap();
-        assert_eq!(decoded, input);
+    fn test_encode_non_canonical_encoding_is_raw_input() {
+        // '9' is not in the bootstring alphabet, so this is not an encoding
+        // at all; uppercase digits parse but are non-canonical. Both are
+        // treated as ordinary strings that need encoding.
+        for input in ["_N_abc__9", "_N_helloworld__FA0B"] {
+            let encoded = encode(input);
+            assert!(encoded.starts_with(PREFIX));
+            assert_ne!(encoded, input);
+            assert_eq!(crate::decode::decode(&encoded).unwrap(), input);
+        }
     }
 
     #[test]
@@ -340,26 +349,6 @@ mod tests {
         assert!(encoded.starts_with(PREFIX));
         let decoded = crate::decode::decode(&encoded).unwrap();
         assert_eq!(decoded, "a__b c");
-    }
-
-    #[test]
-    fn test_encode_double_underscore_passthrough() {
-        // foo__bar is a valid XID and doesn't start with _N_, so it passes through
-        assert_eq!(encode("foo__bar"), "foo__bar");
-        assert_eq!(encode("a__b__c"), "a__b__c");
-    }
-
-    #[test]
-    fn test_encode_prefix_with_double_underscore() {
-        // _N_foo__bar starts with _N_, but it happens to be a valid encoding
-        // (of a string with a control character). Due to idempotency, it's returned unchanged.
-        let encoded = encode("_N_foo__bar");
-        assert!(encoded.starts_with(PREFIX));
-        // This is returned unchanged because it's a valid encoding
-        assert_eq!(encoded, "_N_foo__bar");
-        // Verify it actually decodes (to something with a control char)
-        let decoded = crate::decode::decode(&encoded).unwrap();
-        assert_ne!(decoded, "_N_foo__bar"); // The decoded value is different
     }
 
     #[test]

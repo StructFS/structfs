@@ -1,146 +1,35 @@
-//! Guest metering: fuel caps and epoch interruption.
+//! Guest metering: the per-run fuel cap.
 //!
-//! Store operations are governed by deadlines and cancellation, but
-//! guest *code* between host calls was previously ungoverned — a
-//! spinning guest could not be stopped. Metering closes that:
+//! Store operations are governed by deadlines and cancellation; guest
+//! *code* between host calls is governed by two engine mechanisms:
 //!
-//! - **Epoch interruption** (default on): a ticker advances the engine
-//!   epoch; at every deadline the guest yields to a callback that traps
-//!   it if its block's cancel token has fired (immediate shutdown) and
-//!   otherwise lets it continue. Parked host calls are unaffected — a
-//!   block waiting on its mailbox is *supposed* to wait.
-//! - **Fuel** (default off): a hard cap on total guest instructions per
-//!   run, for hosts that want budgeted execution.
+//! - **Epoch interruption** is an engine concern, always on in both wasm
+//!   bindings. One ticker per engine advances the epoch (every 10 ms by
+//!   default; see [`crate::CoreWasmEngine::with_epoch_interval`]); at each
+//!   tick a running guest checks its cancellation token and deadline and is
+//!   trapped once either has fired, otherwise it continues (or yields, when
+//!   run asynchronously). Parked host calls are unaffected — a block
+//!   waiting on its mailbox is *supposed* to wait. There is no per-run
+//!   epoch knob: a run cannot change a shared engine's ticker, and turning
+//!   interruption off would make a spinning guest unstoppable.
+//! - **Fuel** is per run, and this type selects it: `None` (the default)
+//!   leaves fuel unbounded but still counted; `Some(n)` traps the guest
+//!   after `n` units of Wasmtime fuel.
 //!
-//! Adapted from the ox runtime's engine configuration, which proved the
-//! parked-vs-spinning distinction matters: epoch/fuel govern guest
-//! execution only, never store waits.
+//! Both the core-wasm binding and the component adapter honour the same
+//! `Metering` value.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-
-use structfs_handles::CancelToken;
-use wasmtime::UpdateDeadline;
-
-/// Metering configuration for wasm guests (both bindings).
-#[derive(Clone, Debug)]
+/// Per-run metering for wasm guests (both bindings).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Metering {
-    /// Total fuel per run; `None` disables fuel accounting.
+    /// Total Wasmtime fuel per run; `None` means unbounded (still counted).
     pub fuel: Option<u64>,
-    /// Epoch tick interval; `None` disables interruption (a spinning
-    /// guest then cannot be stopped).
-    pub epoch_interval: Option<Duration>,
-}
-
-impl Default for Metering {
-    fn default() -> Self {
-        Self {
-            fuel: None,
-            epoch_interval: Some(Duration::from_millis(10)),
-        }
-    }
 }
 
 impl Metering {
-    /// Timer task for async guests: no OS thread or blocking join per store.
-    pub(crate) fn start_async_ticker(&self, engine: &wasmtime::Engine) -> Option<AsyncEpochTicker> {
-        let interval = self.epoch_interval?;
-        let engine = engine.clone();
-        Some(AsyncEpochTicker(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                engine.increment_epoch();
-            }
-        })))
-    }
-
-    /// No fuel, no interruption — for tests and fully trusted guests.
-    /// A spinning guest cannot be stopped under this configuration.
-    pub fn disabled() -> Self {
-        Self {
-            fuel: None,
-            epoch_interval: None,
-        }
-    }
-
-    /// Apply engine-level settings. Public for binding adapters, which
-    /// build their own engines but must meter guests identically.
-    pub fn configure_engine(&self, config: &mut wasmtime::Config) {
-        if self.fuel.is_some() {
-            config.consume_fuel(true);
-        }
-        if self.epoch_interval.is_some() {
-            config.epoch_interruption(true);
-        }
-    }
-
-    /// Arm a store: fuel budget, and an epoch deadline whose callback
-    /// traps the guest once `cancel` fires.
-    pub fn arm_store<T>(
-        &self,
-        store: &mut wasmtime::Store<T>,
-        cancel: CancelToken,
-    ) -> crate::error::Result<()> {
-        if let Some(fuel) = self.fuel {
-            store
-                .set_fuel(fuel)
-                .map_err(|e| crate::error::RuntimeError::wasm("fuel", e))?;
-        }
-        if self.epoch_interval.is_some() {
-            store.set_epoch_deadline(1);
-            store.epoch_deadline_callback(move |_| {
-                if cancel.is_cancelled() {
-                    Err(wasmtime::Error::msg(
-                        "guest interrupted: immediate shutdown",
-                    ))
-                } else {
-                    Ok(UpdateDeadline::Continue(1))
-                }
-            });
-        }
-        Ok(())
-    }
-
-    /// Start the epoch ticker for an engine, if interruption is enabled.
-    /// The ticker stops when the returned guard drops.
-    pub fn start_ticker(&self, engine: &wasmtime::Engine) -> Option<EpochTicker> {
-        let interval = self.epoch_interval?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = stop.clone();
-        let engine = engine.clone();
-        let handle = std::thread::spawn(move || {
-            while !thread_stop.load(Ordering::Relaxed) {
-                std::thread::sleep(interval);
-                engine.increment_epoch();
-            }
-        });
-        Some(EpochTicker {
-            stop,
-            handle: Some(handle),
-        })
-    }
-}
-
-/// Stops the epoch ticker thread on drop.
-pub struct EpochTicker {
-    stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-pub(crate) struct AsyncEpochTicker(tokio::task::JoinHandle<()>);
-
-impl Drop for AsyncEpochTicker {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-impl Drop for EpochTicker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+    /// Cap each run at `fuel` units of Wasmtime fuel.
+    pub fn with_fuel(fuel: u64) -> Self {
+        Self { fuel: Some(fuel) }
     }
 }

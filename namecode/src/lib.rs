@@ -7,8 +7,26 @@
 //! # Key Properties
 //!
 //! - Encode/decode in O(n) time
-//! - Idempotent: `encode(encode(x)) == encode(x)`
-//! - Strict roundtrip: `encode(decode(s)) == s` for valid encodings
+//! - **Lossless**: `decode(encode(s)) == s` whenever `encode(s) != s`; a
+//!   passthrough (`encode(s) == s`) stands for itself, and `decode` answers
+//!   `NotEncoded` for it. So "decode, falling back to the input on
+//!   `NotEncoded`" inverts `encode` for *every* `s`, the empty string and
+//!   look-alike encodings included
+//! - **Forced form is a bijection**: `decode(encode_forced(s)) == s` for every
+//!   `s`, and `encode_forced(decode(t)) == t` for every `t` that `decode`
+//!   accepts — each value has exactly one encoding, and non-canonical
+//!   spellings (uppercase digits, redundant delimiters) are rejected
+//! - **Stable passthrough**: `encode(t) == t` exactly when `t` is a valid
+//!   UAX 31 identifier that does not start with `_N_`
+//!
+//! Note that `encode(decode(t))` need not equal `t`: `decode("_N_foo")` is
+//! `"foo"`, which `encode` passes through. `_N_foo` is the canonical *forced*
+//! encoding of `foo`, not something `encode` ever produces.
+//!
+//! `encode` is deliberately *not* idempotent: `encode(encode(x))` encodes
+//! twice, because passing an encoding through unchanged would make it
+//! impossible to tell an encoded string from a literal one that happens to
+//! look encoded. Use [`is_encoded`] when you need that distinction.
 //!
 //! # Examples
 //!
@@ -38,7 +56,7 @@ mod decode;
 mod encode;
 
 pub use decode::decode;
-pub use encode::{encode, is_xid_identifier};
+pub use encode::{encode, encode_forced, is_encoded, is_xid_identifier};
 
 /// Errors that can occur during Namecode decoding.
 ///
@@ -53,10 +71,14 @@ pub use encode::{encode, is_xid_identifier};
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
-    /// Input doesn't have the _N_ prefix.
+    /// Input doesn't have the _N_ prefix, or has it but is structurally not
+    /// an encoding (a basic portion containing characters the encoder never
+    /// emits, for instance).
     NotEncoded,
-    /// Invalid character in encoded portion.
+    /// Invalid character in encoded portion. Note that the bootstring
+    /// alphabet is lowercase-only: `'A'` is as invalid as `'!'`.
     InvalidDigit(char),
     /// Encoded data ended unexpectedly.
     UnexpectedEnd,
@@ -64,6 +86,10 @@ pub enum DecodeError {
     InvalidCodepoint(u32),
     /// Overflow during delta calculation.
     Overflow,
+    /// The input parses, but it is not the canonical encoding of the value it
+    /// parses to — re-encoding that value yields a different string. Accepting
+    /// it would give one value two encodings.
+    NonCanonical,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -74,6 +100,9 @@ impl std::fmt::Display for DecodeError {
             DecodeError::UnexpectedEnd => write!(f, "encoded data ended unexpectedly"),
             DecodeError::InvalidCodepoint(cp) => write!(f, "invalid Unicode codepoint: {}", cp),
             DecodeError::Overflow => write!(f, "overflow during decoding"),
+            DecodeError::NonCanonical => {
+                write!(f, "input is not the canonical encoding of its value")
+            }
         }
     }
 }
@@ -84,150 +113,230 @@ impl std::error::Error for DecodeError {}
 mod tests {
     use super::*;
 
-    // ==================== Basic Encoding Tests ====================
-
-    #[test]
-    fn test_encode_valid_xid_ascii() {
-        assert_eq!(encode("foo"), "foo");
-        assert_eq!(encode("bar123"), "bar123");
-        assert_eq!(encode("_private"), "_private");
-        assert_eq!(encode("CamelCase"), "CamelCase");
-    }
-
-    #[test]
-    fn test_encode_valid_xid_unicode() {
-        assert_eq!(encode("café"), "café");
-        assert_eq!(encode("名前"), "名前");
-        assert_eq!(encode("привет"), "привет");
-    }
-
-    #[test]
-    fn test_encode_empty() {
-        assert_eq!(encode(""), "");
-    }
-
-    #[test]
-    fn test_encode_with_space() {
-        let encoded = encode("hello world");
-        assert!(encoded.starts_with("_N_"));
-    }
-
-    #[test]
-    fn test_encode_with_hyphen() {
-        let encoded = encode("foo-bar");
-        assert!(encoded.starts_with("_N_"));
-    }
-
-    #[test]
-    fn test_encode_with_multiple_non_basic() {
-        let encoded = encode("a b-c");
-        assert!(encoded.starts_with("_N_"));
-    }
-
-    #[test]
-    fn test_encode_starts_with_digit() {
-        let encoded = encode("123foo");
-        assert!(encoded.starts_with("_N_"));
-    }
-
-    #[test]
-    fn test_encode_just_underscore() {
-        // Single underscore is a valid identifier, passes through
-        assert_eq!(encode("_"), "_");
-    }
-
-    // ==================== Prefix/Delimiter Collision Tests ====================
-
-    #[test]
-    fn test_encode_prefix_collision() {
-        let encoded = encode("_N_test");
-        assert!(encoded.starts_with("_N_"));
-        // Should not equal the input (would be ambiguous)
-        assert_ne!(encoded, "_N_test");
-    }
-
-    #[test]
-    fn test_encode_double_underscore_passthrough() {
-        // foo__bar is a valid XID and doesn't start with _N_, so it passes through
-        assert_eq!(encode("foo__bar"), "foo__bar");
-    }
-
-    // ==================== Roundtrip Tests ====================
-
-    #[test]
-    fn test_roundtrip_simple() {
-        let cases = vec![
+    /// A corpus of strings that between them exercise every branch of the
+    /// encoder: passthrough, prefix collision, delimiter collision, leading
+    /// digits, whitespace, punctuation, astral planes, combining marks, ZWJ
+    /// sequences and lengths past every internal buffer heuristic.
+    fn corpus() -> Vec<String> {
+        let mut cases: Vec<String> = [
+            // Empty and single characters
+            "",
+            "a",
+            "A",
+            "_",
+            " ",
+            "-",
+            "0",
+            // Underscore runs (all valid identifiers)
+            "__",
+            "___",
+            "____",
+            "a__b",
+            "__ _x",
+            // Prefix collisions
+            "_N",
+            "_N_",
+            "_N_x",
+            "_N_test",
+            "_N__N_test",
+            "_N_hello world",
+            // Strings that look like encodings but are not canonical ones
+            "_N_helloworld__fa0b",
+            "_N_helloworld__FA0B",
+            "_N_abc__9",
+            "_N___",
+            // Numbers and leading digits
+            "123",
+            "007",
+            "1abc",
+            "abc1",
+            "3.14159",
+            // Whitespace and punctuation
             "hello world",
+            "   ",
+            " leading",
+            "trailing ",
             "foo-bar",
-            "a b-c",
-            "test@example",
+            "foo.bar",
+            "foo/bar",
+            "a/b/c",
+            "foo@bar.com",
+            "50% off",
+            "price: $100",
             "with\ttab",
             "new\nline",
-        ];
+            "null\u{0}byte",
+            // Mixed case
+            "CamelCase",
+            "mixedCASE123",
+            "SCREAMING_SNAKE",
+            // Non-ASCII
+            "café",
+            "CAFÉ",
+            "名前",
+            "привет",
+            "مرحبا",
+            "hello→world",
+            "ＦＵＬＬＷＩＤＴＨ",
+            // Combining marks, emoji, ZWJ sequences, flags
+            "e\u{301}",
+            "🦀",
+            "oxide-🦀",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦",
+            "🇺🇸",
+            "\u{200b}",
+            "\u{feff}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
-        for original in cases {
-            let encoded = encode(original);
-            let decoded = decode(&encoded)
-                .unwrap_or_else(|e| panic!("decode failed for {}: {:?}", original, e));
-            assert_eq!(
-                decoded, original,
-                "roundtrip failed for: {} (encoded: {})",
-                original, encoded
+        // Very long inputs, basic and mixed
+        cases.push("a".repeat(1000));
+        cases.push("_N_".to_string() + &"a".repeat(500));
+        cases.push("a b".repeat(300));
+        cases.push("🦀".repeat(200));
+        cases
+    }
+
+    /// The contract every caller relies on, checked over the whole corpus:
+    /// the encoding is always a valid identifier, and decoding it (falling
+    /// back to the literal for passthrough forms, exactly as
+    /// `PathComponent::decode` does) returns the original string.
+    #[test]
+    fn corpus_roundtrip() {
+        for original in corpus() {
+            let encoded = encode(&original);
+
+            assert!(
+                is_xid_identifier(&encoded),
+                "encode({original:?}) = {encoded:?} is not a valid identifier"
             );
+
+            let recovered = match decode(&encoded) {
+                Ok(value) => value,
+                Err(DecodeError::NotEncoded) => encoded.clone(),
+                Err(e) => panic!("decode({encoded:?}) failed for {original:?}: {e}"),
+            };
+            assert_eq!(
+                recovered, original,
+                "roundtrip failed (encoded: {encoded:?})"
+            );
+
+            // Anything not passed through is a canonical encoding.
+            if encoded != original {
+                assert!(encoded.starts_with("_N_"), "{encoded:?} lacks the prefix");
+                assert!(is_encoded(&encoded), "{encoded:?} is not canonical");
+                assert_eq!(encode(&decode(&encoded).unwrap()), encoded);
+            }
+        }
+    }
+
+    /// `encode_forced` is total and lossless for the same corpus, and always
+    /// produces a prefixed form even where `encode` would pass through.
+    #[test]
+    fn corpus_forced_roundtrip() {
+        for original in corpus() {
+            let encoded = encode_forced(&original);
+            assert!(encoded.starts_with("_N_"), "{encoded:?} lacks the prefix");
+            assert!(
+                is_xid_identifier(&encoded),
+                "encode_forced({original:?}) = {encoded:?} is not a valid identifier"
+            );
+            assert_eq!(decode(&encoded).unwrap(), original);
+        }
+    }
+
+    /// Encoding is injective: no two corpus entries share an encoding.
+    #[test]
+    fn corpus_encodings_are_distinct() {
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for original in corpus() {
+            let encoded = encode(&original);
+            if let Some(other) = seen.insert(encoded.clone(), original.clone()) {
+                panic!("{original:?} and {other:?} both encode to {encoded:?}");
+            }
         }
     }
 
     #[test]
-    fn test_roundtrip_unicode_non_xid() {
-        let cases = vec!["hello→world", "price: $100", "50% off"];
+    fn passthrough_is_exactly_non_prefixed_identifiers() {
+        for s in [
+            "foo",
+            "bar123",
+            "_private",
+            "CamelCase",
+            "café",
+            "名前",
+            "привет",
+            "_",
+            "__",
+            "foo__bar",
+            "a___b",
+        ] {
+            assert_eq!(encode(s), s, "should pass through: {s:?}");
+            assert!(!is_encoded(s), "{s:?} should not read as an encoding");
+        }
 
-        for original in cases {
-            let encoded = encode(original);
-            let decoded = decode(&encoded)
-                .unwrap_or_else(|e| panic!("decode failed for {}: {:?}", original, e));
-            assert_eq!(decoded, original);
+        for s in ["", "123", "foo bar", "foo-bar", "_N_test", "_N_"] {
+            assert_ne!(encode(s), s, "should be encoded: {s:?}");
         }
     }
 
-    // ==================== Idempotency Tests ====================
-
     #[test]
-    fn test_idempotent_valid_xid() {
-        let s = "foo";
-        assert_eq!(encode(&encode(s)), encode(s));
+    fn empty_string_has_an_encoding() {
+        assert_eq!(encode(""), "_N_");
+        assert!(is_xid_identifier("_N_"));
+        assert_eq!(decode("_N_").unwrap(), "");
     }
 
     #[test]
-    fn test_idempotent_encoded() {
-        let s = "hello world";
-        let once = encode(s);
+    fn encode_is_not_idempotent_but_is_lossless() {
+        // Encoding an encoding encodes it again; the round trip still works.
+        let once = encode("hello world");
         let twice = encode(&once);
-        assert_eq!(once, twice);
+        assert_ne!(once, twice);
+        assert_eq!(decode(&twice).unwrap(), once);
     }
 
-    // ==================== Identity Tests ====================
-
     #[test]
-    fn test_identity_encode_decode() {
-        // For valid encodings: encode(decode(s)) == s
-        let original = "hello world";
-        let encoded = encode(original);
-        let decoded = decode(&encoded).unwrap();
-        let re_encoded = encode(&decoded);
-        assert_eq!(re_encoded, encoded);
+    fn is_xid_identifier_grammar() {
+        assert!(is_xid_identifier("foo"));
+        assert!(is_xid_identifier("_foo"));
+        assert!(is_xid_identifier("foo123"));
+        assert!(is_xid_identifier("café"));
+        assert!(is_xid_identifier("名前"));
+        assert!(is_xid_identifier("_")); // Single underscore is valid
+
+        assert!(!is_xid_identifier(""));
+        assert!(!is_xid_identifier("123"));
+        assert!(!is_xid_identifier("foo bar"));
+        assert!(!is_xid_identifier("foo-bar"));
     }
 
-    // ==================== Decode Error Tests ====================
-
     #[test]
-    fn test_decode_not_encoded() {
+    fn decode_error_cases() {
+        // No prefix
         assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
         assert_eq!(decode("hello world"), Err(DecodeError::NotEncoded));
+        // '6' is outside the base-32 alphabet
+        assert!(matches!(
+            decode("_N_abc__6"),
+            Err(DecodeError::InvalidDigit('6'))
+        ));
+        // Uppercase digits are outside it too
+        assert!(matches!(
+            decode("_N_helloworld__FA0B"),
+            Err(DecodeError::InvalidDigit('F'))
+        ));
+        // 'z' = 25 >= threshold(32, 72) = 1, so more digits are expected
+        assert_eq!(decode("_N_abc__z"), Err(DecodeError::UnexpectedEnd));
+        // Parses, but is not the canonical spelling of ""
+        assert_eq!(decode("_N___"), Err(DecodeError::NonCanonical));
     }
 
     #[test]
-    fn test_decode_error_display() {
-        // Test Display implementation for all error variants
+    fn decode_error_display() {
         assert_eq!(
             DecodeError::NotEncoded.to_string(),
             "input is not a namecode-encoded string"
@@ -248,121 +357,10 @@ mod tests {
             DecodeError::Overflow.to_string(),
             "overflow during decoding"
         );
-    }
-
-    #[test]
-    fn test_decode_invalid_digit() {
-        // The encoded portion contains invalid characters (6-9, symbols)
-        // Note: uppercase letters are treated as lowercase in decode_digit
-        let result = decode("_N_abc__6");
-        assert!(
-            matches!(result, Err(DecodeError::InvalidDigit(_))),
-            "expected InvalidDigit, got {:?}",
-            result
+        assert_eq!(
+            DecodeError::NonCanonical.to_string(),
+            "input is not the canonical encoding of its value"
         );
-    }
-
-    #[test]
-    fn test_decode_unexpected_end() {
-        // Create a malformed encoding where the varint is incomplete
-        // A digit >= threshold signals "more digits coming", but then we end
-        // With initial bias of 72, threshold(32, 72) = 1, so any digit >= 1 needs more
-        let result = decode("_N_abc__z"); // 'z' = 25, which is >= threshold
-        assert!(matches!(result, Err(DecodeError::UnexpectedEnd)));
-    }
-
-    // ==================== is_xid_identifier Tests ====================
-
-    #[test]
-    fn test_is_xid_identifier() {
-        assert!(is_xid_identifier("foo"));
-        assert!(is_xid_identifier("_foo"));
-        assert!(is_xid_identifier("foo123"));
-        assert!(is_xid_identifier("café"));
-        assert!(is_xid_identifier("名前"));
-        assert!(is_xid_identifier("_")); // Single underscore is valid
-
-        assert!(!is_xid_identifier(""));
-        assert!(!is_xid_identifier("123"));
-        assert!(!is_xid_identifier("foo bar"));
-        assert!(!is_xid_identifier("foo-bar"));
-    }
-
-    // ==================== Edge Cases ====================
-
-    #[test]
-    fn test_all_non_basic() {
-        let original = "   "; // All spaces
-        let encoded = encode(original);
-        assert!(encoded.starts_with("_N_"));
-        let decoded = decode(&encoded).expect("decode failed");
-        assert_eq!(decoded, original);
-    }
-
-    #[test]
-    fn test_single_char() {
-        // Single basic char
-        assert_eq!(encode("a"), "a");
-
-        // Single non-basic char
-        let encoded = encode(" ");
-        assert!(encoded.starts_with("_N_"));
-        assert_eq!(decode(&encoded).unwrap(), " ");
-    }
-
-    #[test]
-    fn test_very_long_basic() {
-        let long = "a".repeat(1000);
-        assert_eq!(encode(&long), long);
-    }
-
-    // ==================== Additional Edge Cases ====================
-
-    #[test]
-    fn test_passthrough_double_underscore() {
-        // foo__bar passes through unchanged (valid XID, no _N_ prefix)
-        let original = "foo__bar";
-        let encoded = encode(original);
-        assert_eq!(encoded, original);
-        // decode fails since it's not encoded
-        assert!(decode(&encoded).is_err());
-    }
-
-    #[test]
-    fn test_roundtrip_prefix_collision() {
-        let original = "_N_test";
-        let encoded = encode(original);
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded, original);
-    }
-
-    #[test]
-    fn test_multiple_underscores_passthrough() {
-        // All these are valid XID identifiers and don't start with _N_
-        let cases = vec!["a__b", "a___b", "a____b", "__a", "___a", "____a"];
-
-        for original in cases {
-            let encoded = encode(original);
-            assert_eq!(encoded, original, "should passthrough for: {}", original);
-        }
-    }
-
-    #[test]
-    fn test_just_underscores_passthrough() {
-        // Multiple underscores ARE valid XID identifiers (underscore followed by XID_Continue,
-        // and underscore IS XID_Continue). They pass through unchanged.
-        let cases = vec!["__", "___", "____"];
-
-        for original in cases {
-            let encoded = encode(original);
-            assert_eq!(encoded, original, "should passthrough: {}", original);
-        }
-    }
-
-    #[test]
-    fn test_single_underscore_passthrough() {
-        // Single underscore is a valid identifier, passes through
-        assert_eq!(encode("_"), "_");
     }
 }
 
@@ -410,7 +408,7 @@ mod spec_vectors {
     #[test]
     fn edge_cases() {
         let cases: &[(&str, &str)] = &[
-            ("", ""),
+            ("", "_N_"),
             (" ", "_N___a0b"),
             ("a", "a"),
             ("_", "_"),
@@ -444,7 +442,7 @@ mod spec_vectors {
         assert_eq!(encode("123foo"), "_N_123foo");
         assert_eq!(encode("_N_test"), "_N__N_test");
         assert_eq!(encode("_"), "_");
-        assert_eq!(encode(""), "");
+        assert_eq!(encode(""), "_N_");
     }
 
     // SPEC.md § Collision Handling examples
@@ -455,6 +453,13 @@ mod spec_vectors {
 
         assert_eq!(encode("foo__bar"), "foo__bar");
         assert_eq!(encode("__"), "__");
+
+        // A literal that is itself a valid encoding is still encoded.
+        assert_eq!(encode("_N_helloworld__fa0b"), "_N__N_helloworld_fa0b__oa3l");
+        assert_eq!(
+            decode("_N__N_helloworld_fa0b__oa3l").unwrap(),
+            "_N_helloworld__fa0b"
+        );
     }
 
     // Prefix collision with non-basic characters: _N_ prefix AND non-XID chars
@@ -486,13 +491,6 @@ mod spec_vectors {
                 )
             });
             assert_eq!(decoded, input, "roundtrip failed for {:?}", input);
-            // Idempotency
-            assert_eq!(
-                encode(&encoded),
-                encoded,
-                "idempotency failed for {:?}",
-                input
-            );
         }
     }
 }
@@ -503,49 +501,46 @@ mod proptests {
     use proptest::prelude::*;
 
     proptest! {
-        /// Roundtrip property: for strings that need encoding, decode(encode(s)) == s
+        /// Roundtrip property: decode(encode(s)) == s, with passthrough forms
+        /// standing for themselves.
         #[test]
         fn prop_roundtrip(s in ".*") {
-            if !s.is_empty() {
-                let encoded = encode(&s);
-                // Only try to decode if it was actually encoded (has prefix)
-                if encoded.starts_with("_N_") {
-                    let decoded = decode(&encoded).unwrap_or_else(|e| {
-                        panic!("decode failed for input '{}' with encoding '{}': {:?}", s, encoded, e)
-                    });
-                    prop_assert_eq!(&decoded, &s, "roundtrip failed for: {}", &s);
-                } else {
-                    // If not encoded, the output should equal input (passthrough)
-                    prop_assert_eq!(&encoded, &s, "passthrough failed for: {}", &s);
-                }
+            let encoded = encode(&s);
+            // Only try to decode if it was actually encoded (has prefix)
+            if encoded.starts_with("_N_") {
+                let decoded = decode(&encoded).unwrap_or_else(|e| {
+                    panic!("decode failed for input '{}' with encoding '{}': {:?}", s, encoded, e)
+                });
+                prop_assert_eq!(&decoded, &s, "roundtrip failed for: {}", &s);
+            } else {
+                // If not encoded, the output should equal input (passthrough)
+                prop_assert_eq!(&encoded, &s, "passthrough failed for: {}", &s);
             }
         }
 
-        /// Idempotency: encode(encode(x)) == encode(x)
+        /// `encode_forced` is total and lossless for every input.
         #[test]
-        fn prop_idempotent(s in ".*") {
-            let once = encode(&s);
-            let twice = encode(&once);
-            prop_assert_eq!(&once, &twice, "idempotency failed for: {}", &s);
+        fn prop_forced_roundtrip(s in ".*") {
+            let encoded = encode_forced(&s);
+            prop_assert!(encoded.starts_with("_N_"));
+            prop_assert_eq!(decode(&encoded).unwrap(), s);
         }
 
-        /// Identity: for encoded strings, encode(decode(s)) == s
+        /// Canonicality: for encodings, encode_forced(decode(s)) == s
         #[test]
         fn prop_identity(s in ".*") {
-            if !s.is_empty() {
-                let encoded = encode(&s);
-                // Only test identity for actually encoded strings
-                if encoded.starts_with("_N_") {
-                    let decoded = decode(&encoded).unwrap();
-                    let re_encoded = encode(&decoded);
-                    prop_assert_eq!(&re_encoded, &encoded, "identity failed for: {}", &s);
-                }
+            let encoded = encode(&s);
+            // Only test identity for actually encoded strings
+            if encoded.starts_with("_N_") {
+                let decoded = decode(&encoded).unwrap();
+                let re_encoded = encode_forced(&decoded);
+                prop_assert_eq!(&re_encoded, &encoded, "identity failed for: {}", &s);
             }
         }
 
-        /// Valid output: encode produces valid XID identifiers (for non-empty)
+        /// Valid output: encode always produces valid XID identifiers
         #[test]
-        fn prop_valid_output(s in ".+") {
+        fn prop_valid_output(s in ".*") {
             let encoded = encode(&s);
             prop_assert!(
                 is_xid_identifier(&encoded),
@@ -644,9 +639,8 @@ mod kani_proofs {
                 assert!(result.unwrap() < 26);
             }
             'A'..='Z' => {
-                // Case insensitive
-                assert!(result.is_some());
-                assert!(result.unwrap() < 26);
+                // Case sensitive: the encoder never emits uppercase
+                assert!(result.is_none());
             }
             '0'..='5' => {
                 assert!(result.is_some());
@@ -726,11 +720,11 @@ mod kani_proofs {
 
     // ==================== Encode/Decode Proofs ====================
 
-    /// Verify encode returns empty for empty input
+    /// Verify the empty string gets the bare-prefix encoding
     #[kani::proof]
     fn verify_encode_empty() {
-        let result = encode("");
-        assert!(result.is_empty());
+        assert_eq!(encode(""), "_N_");
+        assert_eq!(decode("_N_").unwrap(), "");
     }
 
     /// Verify decode fails for non-encoded strings
@@ -741,14 +735,14 @@ mod kani_proofs {
         assert!(matches!(result, Err(DecodeError::NotEncoded)));
     }
 
-    /// Verify idempotency for simple ASCII
+    /// Verify encoding an encoding is lossless (it is not idempotent)
     #[kani::proof]
-    fn verify_idempotent_ascii() {
-        // Test with a simple string that needs encoding
+    fn verify_double_encode_is_lossless() {
         let input = "a b";
         let once = encode(input);
         let twice = encode(&once);
-        assert_eq!(once, twice, "encode should be idempotent");
+        assert_ne!(once, twice, "encode should not pass an encoding through");
+        assert_eq!(decode(&twice).unwrap(), once);
     }
 
     /// Verify roundtrip for simple ASCII with space

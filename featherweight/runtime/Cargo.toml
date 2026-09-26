@@ -12,7 +12,6 @@ categories = ["wasm", "virtualization", "asynchronous"]
 
 [dependencies]
 structfs-core-store = { workspace = true, features = ["async"] }
-structfs-ll-store = { workspace = true }
 structfs-serde-store = { workspace = true }
 structfs-handles = { workspace = true }
 structfs-service = { workspace = true }
@@ -32,13 +31,15 @@ wasmtime = { workspace = true, default-features = false, features = [
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = "0.9"
+# Maintained fork of the archived serde_yaml (RUSTSEC-2024-0320), same API.
+serde_norway = "0.9"
 chrono = "0.4"
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+structfs-ll-store = { workspace = true }
 structfs-state = { workspace = true, features = ["service"] }
 featherweight-wasi = { version = "0.4.0", path = "../wasi" }
 structfs-json-store = { workspace = true }

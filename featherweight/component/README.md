@@ -12,8 +12,9 @@ running as Isotope blocks — wasm components built with wit-bindgen or
 wasip2 tooling — packaged as an `ArtifactLoader` the embedder registers:
 
 ```rust,ignore
-let mut runtime = featherweight_runtime::Runtime::new();
-featherweight_component::register(&mut runtime);
+let mut config = featherweight_runtime::RuntimeConfig::new(handle);
+featherweight_component::register(&mut config);
+let runtime = featherweight_runtime::Runtime::new(config);
 // component .wasm artifacts (layer 1) now load alongside core modules
 ```
 
@@ -28,10 +29,18 @@ featherweight_component::register(&mut runtime);
   are byte-component sequences and data is raw bytes in the block's
   manifest-declared serialization (JSON, CBOR, or FlexBuffers). The WIT
   never changes when serialization formats do.
+- A loader shares one `ComponentEngine` (and one epoch ticker) across
+  every component it loads. Each component is compiled and its
+  `manifest()` inspected once (`ComponentEngine::prepare`); every run gets
+  a fresh store.
 - The adapter wraps the block's namespace in a `CoreToLL` bridge with
-  the declared codec, arms the same metering (fuel, epoch interruption)
-  the core runtime applies, and calls the guest's `manifest()` and
-  `run()` exports.
+  the declared codec, arms the same metering the core binding applies
+  (the per-run fuel cap from `Metering`, epoch interruption on
+  cancellation), and calls the guest's `run()` export on a blocking
+  worker. Errors are typed as in the core binding: engine setup failures
+  are `RuntimeError::EngineConfig`, a panicked or cancelled worker is
+  `HostPanic` or `ExecutionLost`, and instantiate or run failures are
+  `RuntimeError::Wasm`.
 
 ## Why adapter-tier
 
@@ -44,8 +53,10 @@ one `register` call, no core changes.
 
 ## Hosting support boundary
 
-The 0.4 native core-Wasm recoverable-host API is not implemented by this adapter.
-It does not advertise host-state recovery or arbitrary ExecutionPolicy support.
-Its existing documented execution/teardown contract remains separate. Matching
-core import signatures is not a claim that native scheduling and limit policies
-are available here. Pin SDK/runtime pairs to the documented specification snapshot.
+Components run only inside assemblies, through the loader; there is no
+standalone run entry point. The native core-Wasm recoverable-host API
+(`start_sync`/`start_async`) is not implemented by this adapter, and it does
+not advertise host-state recovery or `ExecutionPolicy` support beyond the fuel
+cap. Matching core import signatures is not a claim that native scheduling and
+limit policies are available here. Pin SDK/runtime pairs to the documented
+specification snapshot.

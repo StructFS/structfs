@@ -286,12 +286,23 @@ can say:
 | a value | `{"found": {"parsed": <value>}}` |
 | nothing at that path | `"absent"` |
 | a write acknowledgement | `{"wrote": "<result path>"}` |
-| a refusal | `{"failed": {"kind": "<kind>", "message": "...", "path"?: "..."}}` |
+| a refusal | `{"failed": {"kind": "<kind>", "message": "...", "path"?: "...", "component"?: "...", "position"?: n, "codec"?: {...}}}` |
 
 Error kinds are the closed set `not_found`, `no_route`,
-`permission_denied`, `conflict`, `overloaded`, `deadline_exceeded`,
-`resource_limit`, `cancelled`, and `other` — replayed code must branch
-on the same typed error the recorded run saw. Integer values are
+`permission_denied`, `conflict`, `invalid_argument`, `overloaded`,
+`deadline_exceeded`, `resource_limit`, `cancelled`, `invalid_path`,
+`codec`, and `other` — replayed code must branch on the same typed error
+the recorded run saw. `path` accompanies `not_found`/`no_route`,
+`component`/`position` accompany `invalid_path`, and `codec` carries the
+portable codec diagnostic (spec 11) for `codec`; a reader that does not
+know a kind replays it as `other` with its message.
+
+The line form above is the interchange form: the cross-host fixtures, and
+any host that exchanges transcripts, use one plain JSON object per line. A
+host's own store may encode each entry losslessly instead — the reference
+`fw` writes each line as a tagged StructFS Value v1 envelope
+(`["structfs-value",1,…]`), which keeps bytes and full-width integers
+exact — provided it still reads plain interchange lines. Integer values are
 written at full precision; a replaying host whose numbers are narrower
 than the recording's must preserve the exact rendering (nanosecond
 timestamps exceed 2^53).

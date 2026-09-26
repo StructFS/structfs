@@ -1,70 +1,31 @@
-//! The async HTTP broker's handle protocol, on `structfs-handles`.
+//! The background HTTP broker's handle protocol, on `structfs-handles`.
 //!
-//! `AsyncHttpBrokerStore` is a thin sync facade (in `core.rs`) over a
-//! [`HandleStore`] running this protocol. The scaffolding — id minting,
-//! `outstanding/{id}` routing, the no-overwrite rule, Null-write release
-//! with cancellation, listing — comes from the handles crate; this module
-//! only defines what an HTTP request handle *is*: queued request, status,
-//! response, and a parked `response/wait` read that cancels on release
-//! instead of sleep-polling.
+//! [`crate::BackgroundHttpBrokerStore`] is a thin sync facade (in
+//! `background_broker.rs`) over a [`HandleStore`] running this protocol. The
+//! scaffolding — id minting, `outstanding/{id}` routing, the no-overwrite
+//! rule, Null-write release with cancellation, listing — comes from the
+//! handles crate; this module only defines what an HTTP request handle *is*:
+//! queued request, status, response, and a parked `response/wait` read that
+//! cancels on release instead of sleep-polling.
+//!
+//! Requests run through the same [`BlockingHttpExecutor`] seam the other
+//! stores use, one blocking call per background thread.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use structfs_core_store::{DetachedFuture, Error, Path, Record, Value};
 use structfs_handles::{CancelToken, Gate, HandleCx, HandleProtocol};
 use structfs_serde_store::{from_value, to_value};
 
+use crate::broker_common::{navigate, CachedFailure};
+use crate::executor::BlockingHttpExecutor;
 use crate::handle::RequestStatus;
 use crate::types::{HttpRequest, HttpResponse};
-
-/// Navigate into a Value structure using path components.
-fn navigate(value: Value, path: &[String]) -> Result<Value, Error> {
-    let mut current = value;
-    for (i, key) in path.iter().enumerate() {
-        current = match current {
-            Value::Map(map) => map
-                .into_iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v)
-                .ok_or_else(|| {
-                    Error::store(
-                        "async_http_broker",
-                        "read",
-                        format!("Path not found at index {}: '{}'", i, key),
-                    )
-                })?,
-            Value::Array(arr) => {
-                let index: usize = key.parse().map_err(|_| {
-                    Error::store(
-                        "async_http_broker",
-                        "read",
-                        format!("Path not found at index {}: '{}'", i, key),
-                    )
-                })?;
-                arr.into_iter().nth(index).ok_or_else(|| {
-                    Error::store(
-                        "async_http_broker",
-                        "read",
-                        format!("Path not found at index {}: '{}'", i, key),
-                    )
-                })?
-            }
-            _ => {
-                return Err(Error::store(
-                    "async_http_broker",
-                    "read",
-                    format!("Path not found at index {}: '{}'", i, key),
-                ))
-            }
-        };
-    }
-    Ok(current)
-}
 
 struct HandleState {
     status: RequestStatus,
     response: Option<HttpResponse>,
+    failure: Option<CachedFailure>,
 }
 
 struct Shared {
@@ -99,54 +60,49 @@ impl HttpHandle {
     /// Whether the request finished (successfully or not).
     pub(crate) fn is_settled(&self) -> bool {
         let state = self.shared.lock();
-        state.response.is_some() || state.status.is_failed()
+        state.response.is_some() || state.failure.is_some()
     }
 }
 
 /// How the protocol executes requests.
-pub(crate) enum Execution {
-    /// Spawn a thread per request running the blocking HTTP client.
-    Threaded {
-        timeout: Duration,
-        execute: fn(HttpRequest, Duration) -> Result<HttpResponse, String>,
-    },
+pub(crate) enum Execution<E> {
+    /// Spawn a thread per request running the blocking executor.
+    Threaded(Arc<E>),
     /// Never execute — handles stay pending forever. Test-only: makes
     /// parked-read cancellation deterministic.
     #[cfg(test)]
     Never,
 }
 
-/// The handle protocol for the async HTTP broker.
-pub(crate) struct HttpBrokerProtocol {
-    pub(crate) execution: Execution,
+/// The handle protocol for the background HTTP broker.
+pub(crate) struct HttpBrokerProtocol<E: BlockingHttpExecutor + 'static> {
+    pub(crate) execution: Execution<E>,
 }
 
-impl HandleProtocol for HttpBrokerProtocol {
+impl<E: BlockingHttpExecutor + 'static> HandleProtocol for HttpBrokerProtocol<E> {
     type Handle = HttpHandle;
 
     fn open(&self, cx: HandleCx, request_value: Value) -> Result<Self::Handle, Error> {
-        let request: HttpRequest = from_value(request_value).map_err(|e| {
-            Error::decode(
-                structfs_core_store::Format::JSON,
-                format!("Data must be an HttpRequest: {}", e),
-            )
-        })?;
+        let request: HttpRequest = from_value(request_value)
+            .map_err(|e| Error::invalid_argument(format!("Data must be an HttpRequest: {e}")))?;
 
         let shared = Arc::new(Shared {
             state: Mutex::new(HandleState {
                 status: RequestStatus::pending(cx.id.to_string()),
                 response: None,
+                failure: None,
             }),
             gate: Gate::new(),
         });
 
-        match self.execution {
-            Execution::Threaded { timeout, execute } => {
+        match &self.execution {
+            Execution::Threaded(executor) => {
                 let worker_shared = shared.clone();
                 let worker_request = request.clone();
+                let executor = executor.clone();
                 let id = cx.id;
                 std::thread::spawn(move || {
-                    let result = execute(worker_request, timeout);
+                    let result = executor.execute(&worker_request);
                     {
                         let mut state = worker_shared.lock();
                         match result {
@@ -155,7 +111,10 @@ impl HandleProtocol for HttpBrokerProtocol {
                                 state.response = Some(response);
                             }
                             Err(error) => {
-                                state.status = RequestStatus::failed(id.to_string(), error);
+                                let failure = CachedFailure::new(error);
+                                state.status =
+                                    RequestStatus::failed(id.to_string(), failure.message().into());
+                                state.failure = Some(failure);
                             }
                         }
                     }
@@ -175,28 +134,25 @@ impl HandleProtocol for HttpBrokerProtocol {
 
     fn read(&self, handle: Arc<Self::Handle>, sub: Path) -> DetachedFuture<Option<Record>> {
         Box::pin(async move {
-            let components: Vec<String> = sub.iter().map(str::to_string).collect();
-
             // outstanding/{id} — status snapshot
-            if components.is_empty() {
+            if sub.is_empty() {
                 let value = to_value(&handle.status())
                     .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
                 return Ok(Some(Record::parsed(value)));
             }
 
             // outstanding/{id}/request[/...]
-            if components[0] == "request" {
+            if &sub[0] == "request" {
                 let value = to_value(handle.request())
                     .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
-                let value = navigate(value, &components[1..])?;
-                return Ok(Some(Record::parsed(value)));
+                return Ok(navigate(value, &sub.slice(1, sub.len())).map(Record::parsed));
             }
 
-            if components[0] == "response" {
+            if &sub[0] == "response" {
                 // outstanding/{id}/response/wait[/...] — parked read: no
                 // sleep-polling, and release cancels it (the read fails,
                 // the caller unwinds).
-                let nav_start = if components.get(1).map(String::as_str) == Some("wait") {
+                let nav_start = if sub.len() > 1 && &sub[1] == "wait" {
                     handle
                         .shared
                         .gate
@@ -216,45 +172,31 @@ impl HandleProtocol for HttpBrokerProtocol {
                         Error::encode(structfs_core_store::Format::JSON, e.to_string())
                     })?;
                     drop(state);
-                    let value = navigate(value, &components[nav_start..])?;
-                    return Ok(Some(Record::parsed(value)));
+                    return Ok(
+                        navigate(value, &sub.slice(nav_start, sub.len())).map(Record::parsed)
+                    );
                 }
-                if state.status.is_failed() {
-                    return Err(Error::store(
-                        "async_http_broker",
-                        "read",
-                        format!(
-                            "HTTP request failed: {}",
-                            state.status.error.as_deref().unwrap_or("unknown error")
-                        ),
-                    ));
+                if let Some(ref failure) = state.failure {
+                    return Err(failure.to_error());
                 }
                 // Non-blocking read of a pending response.
                 return Ok(None);
             }
 
-            Err(Error::store(
-                "async_http_broker",
-                "read",
-                format!(
-                    "Unknown sub-path '{}'. Use 'request', 'response', or 'response/wait'.",
-                    components[0]
-                ),
-            ))
+            Err(Error::invalid_argument(format!(
+                "Unknown sub-path '{}'. Use 'request', 'response', or 'response/wait'.",
+                &sub[0]
+            )))
         })
     }
 
     fn write(&self, _handle: Arc<Self::Handle>, sub: Path, _data: Record) -> DetachedFuture<Path> {
         Box::pin(async move {
-            Err(Error::store(
-                "async_http_broker",
-                "write",
-                format!(
-                    "Invalid write path 'outstanding/{{id}}/{}'. Write to root to queue a \
-                     request, or write null to outstanding/{{id}} to delete.",
-                    sub
-                ),
-            ))
+            Err(Error::invalid_argument(format!(
+                "Invalid write path 'outstanding/{{id}}/{}'. Write to root to queue a \
+                 request, or write null to outstanding/{{id}} to delete.",
+                sub
+            )))
         })
     }
 }
@@ -262,17 +204,25 @@ impl HandleProtocol for HttpBrokerProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::mock::MockExecutor;
+    use std::time::Duration;
     use structfs_core_store::{path, DetachedReader, DetachedWriter};
     use structfs_handles::HandleStore;
 
-    fn pending_store() -> HandleStore<HttpBrokerProtocol> {
+    fn pending_store() -> HandleStore<HttpBrokerProtocol<MockExecutor>> {
         HandleStore::new(HttpBrokerProtocol {
             execution: Execution::Never,
         })
     }
 
+    fn executing_store(executor: MockExecutor) -> HandleStore<HttpBrokerProtocol<MockExecutor>> {
+        HandleStore::new(HttpBrokerProtocol {
+            execution: Execution::Threaded(Arc::new(executor)),
+        })
+    }
+
     fn request_value() -> Value {
-        to_value(&HttpRequest::get("https://example.com/test")).unwrap()
+        to_value(&HttpRequest::get("https://api.test/thing")).unwrap()
     }
 
     #[tokio::test]
@@ -327,5 +277,73 @@ mod tests {
         let status = store.read_detached(&handle).await.unwrap().unwrap();
         let status: RequestStatus = from_value(status.as_value().unwrap().clone()).unwrap();
         assert!(!status.is_failed());
+    }
+
+    #[tokio::test]
+    async fn executed_requests_go_through_the_executor_seam() {
+        let executor = MockExecutor::new().with_response(
+            "https://api.test/thing",
+            MockExecutor::success_response(serde_json::json!({"ok": true})),
+        );
+        let mut store = executing_store(executor.clone());
+        let handle = store
+            .write_detached(&path!(""), Record::parsed(request_value()))
+            .await
+            .unwrap();
+
+        let record = store
+            .read_detached(&handle.join(&path!("response/wait")))
+            .await
+            .unwrap()
+            .unwrap();
+        let response: HttpResponse = from_value(record.as_value().unwrap().clone()).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, serde_json::json!({"ok": true}));
+
+        assert_eq!(executor.recorded_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn executor_failures_surface_as_typed_errors() {
+        let mut store = executing_store(MockExecutor::new().fail_with("Connection refused"));
+        let handle = store
+            .write_detached(&path!(""), Record::parsed(request_value()))
+            .await
+            .unwrap();
+
+        let error = store
+            .read_detached(&handle.join(&path!("response/wait")))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Connection refused"), "{error}");
+
+        // The status snapshot reports the same failure.
+        let record = store.read_detached(&handle).await.unwrap().unwrap();
+        let status: RequestStatus = from_value(record.as_value().unwrap().clone()).unwrap();
+        assert!(status.is_failed());
+        assert!(status.error.unwrap().contains("Connection refused"));
+    }
+
+    #[tokio::test]
+    async fn missing_response_fields_read_as_absent() {
+        let executor = MockExecutor::new().with_response(
+            "https://api.test/thing",
+            MockExecutor::success_response(serde_json::json!({"a": 1})),
+        );
+        let mut store = executing_store(executor);
+        let handle = store
+            .write_detached(&path!(""), Record::parsed(request_value()))
+            .await
+            .unwrap();
+
+        store
+            .read_detached(&handle.join(&path!("response/wait")))
+            .await
+            .unwrap();
+        let missing = store
+            .read_detached(&handle.join(&path!("response/body/nope")))
+            .await
+            .unwrap();
+        assert!(missing.is_none());
     }
 }

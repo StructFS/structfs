@@ -9,9 +9,9 @@ description = "Featherweight Isotope runtime CLI: run assemblies and the demo sh
 readme = "README.md"
 keywords = ["isotope", "wasm", "runtime", "cli", "store"]
 categories = ["command-line-utilities", "wasm", "virtualization"]
-# The JS browser host and AssemblyScript SDK live in this directory but
-# are not part of the CLI crate's package.
-exclude = ["host/", "sdk/"]
+# The JS browser host, AssemblyScript SDK and Eleventy site live in this
+# directory but are not part of the CLI crate's package.
+exclude = ["host/", "sdk/", "site/"]
 
 [[bin]]
 name = "fw"
@@ -22,8 +22,13 @@ featherweight-runtime = { version = "0.4.0", path = "runtime" }
 featherweight-component = { version = "0.4.0", path = "component" }
 structfs-core-store = { workspace = true }
 structfs-json-store = { workspace = true }
-serde_json = { workspace = true }
+structfs-serde-store = { workspace = true }
+clap = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+# The published libraries accept any semver-compatible Wasmtime 48 release;
+# the `fw` binary pins the exact engine release it is tested against, so
+# `cargo install featherweight` builds that engine. Not used directly.
+wasmtime = { version = "=48.0.1", default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

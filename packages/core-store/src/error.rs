@@ -45,18 +45,69 @@ impl CodecErrorKind {
     }
 }
 
+impl std::str::FromStr for CodecErrorKind {
+    type Err = Error;
+
+    /// Parse the machine-readable name produced by [`CodecErrorKind::as_str`].
+    fn from_str(s: &str) -> Result<Self, Error> {
+        Ok(match s {
+            "unsupported_profile" => Self::UnsupportedProfile,
+            "unsupported_version" => Self::UnsupportedVersion,
+            "syntax" => Self::Syntax,
+            "invalid_unicode" => Self::InvalidUnicode,
+            "invalid_node" => Self::InvalidNode,
+            "invalid_base64" => Self::InvalidBase64,
+            "duplicate_key" => Self::DuplicateKey,
+            "out_of_range" => Self::OutOfRange,
+            "unsupported_value" => Self::UnsupportedValue,
+            "type_mismatch" => Self::TypeMismatch,
+            "ambiguous_option" => Self::AmbiguousOption,
+            "noncanonical" => Self::Noncanonical,
+            "resource_limit" => Self::ResourceLimit,
+            "io" => Self::Io,
+            other => {
+                return Err(Error::invalid_argument(format!(
+                    "unknown codec error kind '{other}'"
+                )))
+            }
+        })
+    }
+}
+
 /// Whether a codec error occurred during encoding or decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CodecOperation {
     Encode,
     Decode,
 }
 
+impl CodecOperation {
+    /// Stable machine-readable name (`encode` / `decode`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CodecOperation::Encode => "encode",
+            CodecOperation::Decode => "decode",
+        }
+    }
+}
+
 impl std::fmt::Display for CodecOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CodecOperation::Encode => write!(f, "encode"),
-            CodecOperation::Decode => write!(f, "decode"),
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CodecOperation {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Error> {
+        match s {
+            "encode" => Ok(Self::Encode),
+            "decode" => Ok(Self::Decode),
+            other => Err(Error::invalid_argument(format!(
+                "unknown codec operation '{other}'"
+            ))),
         }
     }
 }
@@ -67,9 +118,26 @@ impl std::fmt::Display for CodecOperation {
 /// to the transport errors from the LL layer.
 ///
 /// The typed variants (`NotFound`, `PermissionDenied`, `Conflict`,
-/// `Overloaded`, `DeadlineExceeded`, `ResourceLimit`) exist so that stores
-/// and transports can map errors structurally instead of string-matching
-/// messages. Prefer them over `Store` when one fits.
+/// `InvalidArgument`, `Overloaded`, `DeadlineExceeded`, `ResourceLimit`,
+/// `Cancelled`) exist so that stores and transports can map errors
+/// structurally instead of string-matching messages. Prefer them over
+/// `Store` when one fits.
+///
+/// # `InvalidArgument` versus `Conflict`
+///
+/// `InvalidArgument` means the *request itself* is malformed and would be
+/// rejected no matter what the store currently holds: a zero page limit, a
+/// cursor past the end, a config map missing its `type`, an array index that
+/// is not numeric, a child set on a scalar. Retrying without changing the
+/// request cannot succeed.
+///
+/// `Conflict` means the request was well-formed but clashes with *existing
+/// or concurrent state*: a stale version, a handle that already exists, a
+/// mount name already taken. The same request may succeed once the state
+/// changes.
+///
+/// Structural failures in path *syntax* are `Path`; a well-formed path that
+/// no store is mounted for is `NoRoute`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -116,6 +184,10 @@ pub enum Error {
     /// The operation conflicts with concurrent or existing state
     /// (stale version, handle already exists, etc.).
     Conflict { message: String },
+
+    /// The request is malformed independent of store state (bad page
+    /// limit, cursor past the end, invalid config, child set on a scalar).
+    InvalidArgument { message: String },
 
     /// The store is temporarily unable to accept the operation.
     Overloaded { message: String },
@@ -176,6 +248,13 @@ impl Error {
     /// Create a conflict error.
     pub fn conflict(message: impl Into<String>) -> Self {
         Error::Conflict {
+            message: message.into(),
+        }
+    }
+
+    /// Create an invalid-argument error.
+    pub fn invalid_argument(message: impl Into<String>) -> Self {
+        Error::InvalidArgument {
             message: message.into(),
         }
     }
@@ -245,6 +324,7 @@ impl std::fmt::Display for Error {
             Error::NotFound { path } => write!(f, "not found: {}", path),
             Error::PermissionDenied { message } => write!(f, "permission denied: {}", message),
             Error::Conflict { message } => write!(f, "conflict: {}", message),
+            Error::InvalidArgument { message } => write!(f, "invalid argument: {}", message),
             Error::Overloaded { message } => write!(f, "overloaded: {}", message),
             Error::DeadlineExceeded { message } => write!(f, "deadline exceeded: {}", message),
             Error::ResourceLimit { message } => write!(f, "resource limit: {}", message),
@@ -279,6 +359,64 @@ impl From<structfs_ll_store::LLError> for Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
+    }
+}
+
+/// Optional, portable codec diagnostic. Unknown kinds remain printable and may
+/// be ignored by older readers. This is diagnostic data, not provider identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct CodecDiagnostic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    pub format: Format,
+}
+
+impl Error {
+    /// Portable diagnostic for codec-family errors; `None` for everything else.
+    pub fn codec_diagnostic(&self) -> Option<CodecDiagnostic> {
+        match self {
+            Self::Codec {
+                kind,
+                operation,
+                format,
+                message,
+            } => Some(CodecDiagnostic {
+                message: Some(message.clone()),
+                kind: kind.as_str().into(),
+                operation: Some(operation.as_str().into()),
+                format: format.clone(),
+            }),
+            Self::UnsupportedFormat(format) => Some(CodecDiagnostic {
+                message: None,
+                kind: "unsupported_format".into(),
+                operation: None,
+                format: format.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl CodecDiagnostic {
+    /// Reconstruct the typed error, using `message` when the diagnostic
+    /// carried none. Returns `None` for kinds or operations this version
+    /// does not know.
+    pub fn into_error(self, message: String) -> Option<Error> {
+        if self.kind == "unsupported_format" {
+            return Some(Error::UnsupportedFormat(self.format));
+        }
+        let kind: CodecErrorKind = self.kind.parse().ok()?;
+        let operation: CodecOperation = self.operation.as_deref()?.parse().ok()?;
+        Some(Error::Codec {
+            kind,
+            operation,
+            format: self.format,
+            message: self.message.unwrap_or(message),
+        })
     }
 }
 
@@ -351,7 +489,9 @@ mod tests {
 
     #[test]
     fn path_error_source() {
-        let e = Error::Path(PathError::InvalidPath {
+        let e = Error::Path(PathError::InvalidComponent {
+            component: "bad-name".to_string(),
+            position: 0,
             message: "test".to_string(),
         });
         assert!(StdError::source(&e).is_some());
@@ -379,7 +519,9 @@ mod tests {
 
     #[test]
     fn path_error_conversion() {
-        let path_err = PathError::InvalidPath {
+        let path_err = PathError::InvalidComponent {
+            component: "bad-name".to_string(),
+            position: 0,
             message: "test".to_string(),
         };
         let e: Error = path_err.into();
@@ -435,6 +577,82 @@ mod tests {
     }
 
     #[test]
+    fn invalid_argument_display() {
+        let e = Error::invalid_argument("limit must be positive");
+        assert_eq!(e.to_string(), "invalid argument: limit must be positive");
+        assert!(matches!(e, Error::InvalidArgument { .. }));
+        assert!(StdError::source(&e).is_none());
+    }
+
+    #[test]
+    fn codec_error_kind_from_str_roundtrips() {
+        let kinds = [
+            CodecErrorKind::UnsupportedProfile,
+            CodecErrorKind::UnsupportedVersion,
+            CodecErrorKind::Syntax,
+            CodecErrorKind::InvalidUnicode,
+            CodecErrorKind::InvalidNode,
+            CodecErrorKind::InvalidBase64,
+            CodecErrorKind::DuplicateKey,
+            CodecErrorKind::OutOfRange,
+            CodecErrorKind::UnsupportedValue,
+            CodecErrorKind::TypeMismatch,
+            CodecErrorKind::AmbiguousOption,
+            CodecErrorKind::Noncanonical,
+            CodecErrorKind::ResourceLimit,
+            CodecErrorKind::Io,
+        ];
+        for kind in kinds {
+            assert_eq!(kind.as_str().parse::<CodecErrorKind>().unwrap(), kind);
+        }
+        assert!(matches!(
+            "bogus".parse::<CodecErrorKind>(),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert_eq!(
+            "encode".parse::<CodecOperation>().unwrap(),
+            CodecOperation::Encode
+        );
+        assert!("bogus".parse::<CodecOperation>().is_err());
+    }
+
+    #[test]
+    fn codec_diagnostic_roundtrips_and_tolerates_missing_operation() {
+        let e = Error::Codec {
+            kind: CodecErrorKind::DuplicateKey,
+            operation: CodecOperation::Decode,
+            format: Format::JSON,
+            message: "dup".to_string(),
+        };
+        let diagnostic = e.codec_diagnostic().unwrap();
+        let json = serde_json::to_string(&diagnostic).unwrap();
+        let back: CodecDiagnostic = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, diagnostic);
+        assert!(matches!(
+            back.into_error("fallback".into()),
+            Some(Error::Codec {
+                kind: CodecErrorKind::DuplicateKey,
+                operation: CodecOperation::Decode,
+                ..
+            })
+        ));
+
+        // `operation` is optional on the wire.
+        let sparse: CodecDiagnostic =
+            serde_json::from_str(r#"{"kind":"syntax","format":"application/json"}"#).unwrap();
+        assert_eq!(sparse.operation, None);
+        assert!(sparse.clone().into_error("m".into()).is_none());
+        let unsupported: CodecDiagnostic =
+            serde_json::from_str(r#"{"kind":"unsupported_format","format":"application/cbor"}"#)
+                .unwrap();
+        assert!(matches!(
+            unsupported.into_error("m".into()),
+            Some(Error::UnsupportedFormat(f)) if f == Format::CBOR
+        ));
+        assert!(Error::conflict("x").codec_diagnostic().is_none());
+    }
+
+    #[test]
     fn codec_operation_display() {
         assert_eq!(CodecOperation::Encode.to_string(), "encode");
         assert_eq!(CodecOperation::Decode.to_string(), "decode");
@@ -455,75 +673,5 @@ mod tests {
                 ..
             }
         ));
-    }
-}
-
-/// Optional, portable codec diagnostic. Unknown kinds remain printable and may
-/// be ignored by older readers. This is diagnostic data, not provider identity.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CodecDiagnostic {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    pub kind: String,
-    pub operation: Option<String>,
-    pub format: Format,
-}
-impl Error {
-    pub fn codec_diagnostic(&self) -> Option<CodecDiagnostic> {
-        match self {
-            Self::Codec {
-                kind,
-                operation,
-                format,
-                message,
-            } => Some(CodecDiagnostic {
-                message: Some(message.clone()),
-                kind: kind.as_str().into(),
-                operation: Some(operation.to_string()),
-                format: format.clone(),
-            }),
-            Self::UnsupportedFormat(format) => Some(CodecDiagnostic {
-                message: None,
-                kind: "unsupported_format".into(),
-                operation: None,
-                format: format.clone(),
-            }),
-            _ => None,
-        }
-    }
-}
-impl CodecDiagnostic {
-    pub fn into_error(self, message: String) -> Option<Error> {
-        if self.kind == "unsupported_format" {
-            return Some(Error::UnsupportedFormat(self.format));
-        }
-        let kind = match self.kind.as_str() {
-            "unsupported_profile" => CodecErrorKind::UnsupportedProfile,
-            "unsupported_version" => CodecErrorKind::UnsupportedVersion,
-            "syntax" => CodecErrorKind::Syntax,
-            "invalid_unicode" => CodecErrorKind::InvalidUnicode,
-            "invalid_node" => CodecErrorKind::InvalidNode,
-            "invalid_base64" => CodecErrorKind::InvalidBase64,
-            "duplicate_key" => CodecErrorKind::DuplicateKey,
-            "out_of_range" => CodecErrorKind::OutOfRange,
-            "unsupported_value" => CodecErrorKind::UnsupportedValue,
-            "type_mismatch" => CodecErrorKind::TypeMismatch,
-            "ambiguous_option" => CodecErrorKind::AmbiguousOption,
-            "noncanonical" => CodecErrorKind::Noncanonical,
-            "resource_limit" => CodecErrorKind::ResourceLimit,
-            "io" => CodecErrorKind::Io,
-            _ => return None,
-        };
-        let operation = match self.operation.as_deref() {
-            Some("encode") => CodecOperation::Encode,
-            Some("decode") => CodecOperation::Decode,
-            _ => return None,
-        };
-        Some(Error::Codec {
-            kind,
-            operation,
-            format: self.format,
-            message: self.message.unwrap_or(message),
-        })
     }
 }

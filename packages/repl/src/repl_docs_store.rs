@@ -1,12 +1,17 @@
 //! REPL documentation store.
 //!
 //! Mounted at `/ctx/repl`, with docs at `/ctx/repl/docs`.
-//! Discovery creates redirect: `/ctx/help/repl` -> `/ctx/repl/docs`.
+//! Mounting registers the redirect `/ctx/help/ctx/repl` -> `/ctx/repl/docs`.
+//! The command list and mount types are generated from the command table
+//! and `MountConfig::TYPES`.
 
 use collection_literals::btree;
 use std::collections::BTreeMap;
 
 use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
+
+use crate::command_table::COMMANDS;
+use crate::mounts::MountConfig;
 
 /// Documentation for the REPL itself.
 ///
@@ -55,30 +60,27 @@ impl ReplDocsStore {
     }
 
     fn commands_docs() -> Value {
-        let commands = [
-            ("read", "read <path>", "Read value at path (alias: get, r)"),
-            (
-                "write",
-                "write <path> <json>",
-                "Write JSON value to path (alias: set, w)",
-            ),
-            ("ls", "ls [path]", "List children at path"),
-            ("cd", "cd <path>", "Change current directory"),
-            ("pwd", "pwd", "Print current directory"),
-            ("mounts", "mounts", "List all mount points"),
-            ("registers", "registers", "List all registers (alias: regs)"),
-            ("help", "help [topic]", "Show help"),
-            ("exit", "exit", "Exit the REPL (alias: quit, q)"),
-        ];
-
-        let command_list: Vec<Value> = commands
+        let command_list: Vec<Value> = COMMANDS
             .iter()
-            .map(|(name, syntax, desc)| {
+            .map(|cmd| {
+                let syntax = if cmd.usage.is_empty() {
+                    cmd.name.to_string()
+                } else {
+                    format!("{} {}", cmd.name, cmd.usage)
+                };
                 Value::Map(btree! {
-                    "name".into() => Value::String(name.to_string()),
-                    "syntax".into() => Value::String(syntax.to_string()),
-                    "description".into() => Value::String(desc.to_string()),
+                    "name".into() => Value::String(cmd.name.to_string()),
+                    "syntax".into() => Value::String(syntax),
+                    "description".into() => Value::String(cmd.summary.to_string()),
                 })
+            })
+            .collect();
+        let aliases: BTreeMap<String, Value> = COMMANDS
+            .iter()
+            .flat_map(|cmd| {
+                cmd.aliases
+                    .iter()
+                    .map(|alias| (alias.to_string(), Value::String(cmd.name.to_string())))
             })
             .collect();
 
@@ -86,15 +88,7 @@ impl ReplDocsStore {
             "title".into() => Value::String("Commands".into()),
             "description".into() => Value::String("Available REPL commands and their syntax".into()),
             "commands".into() => Value::Array(command_list),
-            "aliases".into() => Value::Map(btree! {
-                "r".into() => Value::String("read".into()),
-                "get".into() => Value::String("read".into()),
-                "w".into() => Value::String("write".into()),
-                "set".into() => Value::String("write".into()),
-                "regs".into() => Value::String("registers".into()),
-                "quit".into() => Value::String("exit".into()),
-                "q".into() => Value::String("exit".into()),
-            }),
+            "aliases".into() => Value::Map(aliases),
         })
     }
 
@@ -155,25 +149,7 @@ impl ReplDocsStore {
     }
 
     fn mounts_docs() -> Value {
-        let mount_types = [
-            ("memory", "In-memory JSON store"),
-            ("local", "Local filesystem directory"),
-            ("http", "HTTP client to base URL"),
-            ("httpbroker", "Sync HTTP request broker"),
-            ("asynchttpbroker", "Async HTTP request broker"),
-            (
-                "log",
-                "A JSONL append log (ledger, transcript, session log); \
-                 page with entries/from/{n}",
-            ),
-            (
-                "recording",
-                "A recorded run's directory, read-only: session timeline \
-                 plus per-block transcripts",
-            ),
-        ];
-
-        let type_list: Vec<Value> = mount_types
+        let type_list: Vec<Value> = MountConfig::TYPES
             .iter()
             .map(|(name, desc)| {
                 Value::Map(btree! {
@@ -202,7 +178,7 @@ impl ReplDocsStore {
             (
                 "Make HTTP request",
                 &[
-                    "@req write /ctx/http {\"method\": \"GET\", \"path\": \"https://api.example.com/data\"}",
+                    "@req write /ctx/http_sync {\"method\": \"GET\", \"path\": \"https://api.example.com/data\"}",
                     "read *@req",
                 ],
             ),
@@ -270,11 +246,7 @@ impl Reader for ReplDocsStore {
 
 impl Writer for ReplDocsStore {
     fn write(&mut self, _to: &Path, _data: Record) -> Result<Path, Error> {
-        Err(Error::store(
-            "repl_docs",
-            "write",
-            "REPL docs are read-only",
-        ))
+        Err(Error::permission_denied("REPL docs are read-only"))
     }
 }
 
@@ -310,8 +282,14 @@ mod tests {
 
         match value {
             Value::Map(map) => {
-                assert!(map.contains_key("commands"));
-                assert!(map.contains_key("aliases"));
+                let Some(Value::Array(commands)) = map.get("commands") else {
+                    panic!("commands list");
+                };
+                assert_eq!(commands.len(), COMMANDS.len());
+                let Some(Value::Map(aliases)) = map.get("aliases") else {
+                    panic!("alias map");
+                };
+                assert_eq!(aliases.get("regs"), Some(&Value::from("registers")));
             }
             _ => panic!("Expected map"),
         }

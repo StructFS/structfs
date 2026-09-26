@@ -9,11 +9,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use featherweight_runtime::{
-    host_store, register_builtins, AssemblyDef, BlockState, Determinism, HostStore, Namespace,
-    NativeBlock, Runtime, TranscriptMode, TranscriptProvider,
+    host_store, register_builtins, AssemblyDef, BlockState, BlockView, Determinism, HostStore,
+    Namespace, NativeBlock, Runtime, RuntimeConfig, TranscriptMode, TranscriptProvider,
 };
 use structfs_core_store::{path, Error, Reader, Record, Value, Writer};
 use structfs_json_store::{LogStore, MemoryAppendBacking};
+
+fn config() -> RuntimeConfig {
+    RuntimeConfig::new(tokio::runtime::Handle::current())
+}
+
+/// A runtime with one extra native block registered.
+fn runtime_with(
+    config: RuntimeConfig,
+    name: &str,
+    factory: Arc<dyn featherweight_runtime::NativeBlockFactory>,
+) -> Runtime {
+    let mut config = config;
+    config.register_builtin(name, factory);
+    Runtime::new(config)
+}
 
 /// What one run of the probe saw, as strings: every answer, including
 /// refusals — the sequence a replay must reproduce exactly.
@@ -86,25 +101,29 @@ fn shared_transcripts() -> (
     (transcripts, provider)
 }
 
-fn probe_runtime(seen: &Seen, transcript_mode: TranscriptMode) -> Runtime {
-    let mut runtime = Runtime::new().with_transcripts(transcript_mode);
-    register_builtins(&mut runtime);
+fn probe_config(seen: &Seen, transcript_mode: TranscriptMode) -> RuntimeConfig {
+    let mut config = config().with_transcripts(transcript_mode);
+    register_builtins(&mut config);
     let seen = seen.clone();
-    runtime.register_builtin(
+    config.register_builtin(
         "probe",
         Arc::new(move || Box::new(Probe { seen: seen.clone() }) as Box<dyn NativeBlock>),
     );
-    runtime
+    config
 }
 
-async fn run_assembly(runtime: &Runtime, def: &str) -> Arc<featherweight_runtime::BlockCell> {
+fn probe_runtime(seen: &Seen, transcript_mode: TranscriptMode) -> Runtime {
+    Runtime::new(probe_config(seen, transcript_mode))
+}
+
+async fn run_assembly(runtime: &Runtime, def: &str) -> BlockView {
     let def = AssemblyDef::from_str(def).unwrap();
     let assembly = runtime
         .instantiate(&def, HashMap::new(), &std::env::temp_dir())
         .unwrap();
     assembly.wait_public_terminal().await;
     assembly.shutdown(Duration::from_secs(2)).await;
-    assembly.public_cell().clone()
+    assembly.public_cell()
 }
 
 // Record and replay definitions share one assembly name: transcript keys
@@ -174,9 +193,8 @@ async fn a_replay_that_asks_a_different_question_diverges_loudly() {
             Ok(())
         }
     }
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Replay(provider));
-    register_builtins(&mut runtime);
-    runtime.register_builtin(
+    let runtime = runtime_with(
+        config().with_transcripts(TranscriptMode::Replay(provider)),
         "probe",
         Arc::new(|| Box::new(Impostor) as Box<dyn NativeBlock>),
     );
@@ -198,8 +216,11 @@ async fn a_replay_that_asks_more_than_the_transcript_holds_runs_out() {
             Ok(())
         }
     }
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider.clone()));
-    runtime.register_builtin("probe", Arc::new(|| Box::new(Once) as Box<dyn NativeBlock>));
+    let runtime = runtime_with(
+        config().with_transcripts(TranscriptMode::Record(provider.clone())),
+        "probe",
+        Arc::new(|| Box::new(Once) as Box<dyn NativeBlock>),
+    );
     run_assembly(&runtime, UNWIRED).await;
 
     // Replay a probe that asks twice.
@@ -211,8 +232,8 @@ async fn a_replay_that_asks_more_than_the_transcript_holds_runs_out() {
             Ok(())
         }
     }
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Replay(provider));
-    runtime.register_builtin(
+    let runtime = runtime_with(
+        config().with_transcripts(TranscriptMode::Replay(provider)),
         "probe",
         Arc::new(|| Box::new(Twice) as Box<dyn NativeBlock>),
     );
@@ -241,18 +262,19 @@ async fn seeded_runs_transcribe_identically() {
 
     let transcript_of = |seed: u64| async move {
         let (_, provider) = shared_transcripts();
-        let mut runtime = Runtime::new()
-            .with_transcripts(TranscriptMode::Record(provider.clone()))
-            .with_determinism(Determinism::Seeded { seed });
-        runtime.register_builtin(
+        let runtime = runtime_with(
+            config()
+                .with_transcripts(TranscriptMode::Record(provider.clone()))
+                .with_determinism(Determinism::Seeded { seed }),
             "probe",
             Arc::new(|| Box::new(Sensors) as Box<dyn NativeBlock>),
         );
         let cell = run_assembly(&runtime, UNWIRED).await;
         assert_eq!(cell.state(), BlockState::Stopped);
-        let mut store = provider("probed/probe").unwrap();
-        store
+        provider("probed/probe")
+            .unwrap()
             .read(&path!(""))
+            .await
             .unwrap()
             .unwrap()
             .into_value(&structfs_core_store::NoCodec)
@@ -294,9 +316,10 @@ impl NativeBlock for TwinSpawner {
 #[tokio::test(flavor = "multi_thread")]
 async fn transcript_keys_scope_assemblies_and_disambiguate_spawns() {
     let (transcripts, provider) = shared_transcripts();
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider.clone()));
-    register_builtins(&mut runtime);
-    runtime.register_builtin(
+    let mut config = config().with_transcripts(TranscriptMode::Record(provider.clone()));
+    register_builtins(&mut config);
+    let runtime = runtime_with(
+        config,
         "boss",
         Arc::new(|| Box::new(TwinSpawner) as Box<dyn NativeBlock>),
     );
@@ -334,9 +357,10 @@ async fn nested_assembly_blocks_get_scoped_transcript_keys() {
         }
     }
     let (transcripts, provider) = shared_transcripts();
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider));
-    register_builtins(&mut runtime);
-    runtime.register_builtin(
+    let mut config = config().with_transcripts(TranscriptMode::Record(provider));
+    register_builtins(&mut config);
+    let runtime = runtime_with(
+        config,
         "toucher",
         Arc::new(|| Box::new(Toucher) as Box<dyn NativeBlock>),
     );
@@ -372,8 +396,8 @@ async fn a_replay_that_writes_different_data_diverges() {
             Ok(())
         }
     }
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Record(provider.clone()));
-    runtime.register_builtin(
+    let runtime = runtime_with(
+        config().with_transcripts(TranscriptMode::Record(provider.clone())),
         "probe",
         Arc::new(|| Box::new(Honest) as Box<dyn NativeBlock>),
     );
@@ -390,8 +414,11 @@ async fn a_replay_that_writes_different_data_diverges() {
             Ok(())
         }
     }
-    let mut runtime = Runtime::new().with_transcripts(TranscriptMode::Replay(provider));
-    runtime.register_builtin("probe", Arc::new(|| Box::new(Liar) as Box<dyn NativeBlock>));
+    let runtime = runtime_with(
+        config().with_transcripts(TranscriptMode::Replay(provider)),
+        "probe",
+        Arc::new(|| Box::new(Liar) as Box<dyn NativeBlock>),
+    );
     let cell = run_assembly(&runtime, UNWIRED).await;
     assert_eq!(cell.state(), BlockState::Failed);
     let error = cell.last_error().unwrap_or_default();
@@ -404,13 +431,92 @@ async fn a_replay_that_writes_different_data_diverges() {
 // fixtures beside its tests pin that byte-for-byte in both directions.
 // A transcript recorded by this runtime replays there, and one recorded
 // there replays here — the tests below are the "here" half.
+//
+// The committed fixtures are in spec 12's interchange form: one plain
+// JSON object per line. That is the form both hosts read and write, so
+// the fixtures are recorded through `Spec12File` below. `fw --record`
+// instead stores transcripts with `JsonlFileBacking`, whose lines carry
+// the tagged StructFS Value envelope (lossless for bytes and full-width
+// numbers); it still reads plain lines, which is how these fixtures
+// replay through it, and `a_value_envelope_recording_replays` covers the
+// envelope form.
 
 fn fixtures_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-/// A provider that serves one committed JSONL fixture, whatever the key.
+/// The browser host's copy of the cross-host fixtures, which the release
+/// gate requires to be byte-identical to this directory's.
+fn browser_fixtures_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/browser/test/fixtures")
+}
+
+/// Publish a regenerated fixture to the browser host's copy.
+fn mirror_fixture(name: &str) {
+    std::fs::copy(fixtures_dir().join(name), browser_fixtures_dir().join(name)).unwrap();
+}
+
+/// Every cross-host fixture exists, byte-identically, on both sides.
+///
+/// The browser host is outside this crate's package, so the check is
+/// skipped when running from an extracted `.crate`; the release script
+/// compares the two directories in the source tree instead.
+#[test]
+fn the_cross_host_fixtures_are_mirrored() {
+    if !browser_fixtures_dir().exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(browser_fixtures_dir()).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert_eq!(
+            std::fs::read(fixtures_dir().join(&name)).ok(),
+            std::fs::read(browser_fixtures_dir().join(&name)).ok(),
+            "{name:?} differs between the native and browser fixtures"
+        );
+    }
+}
+
+/// Spec 12's interchange line format: one plain JSON object per entry.
+struct Spec12File(std::path::PathBuf);
+
+impl structfs_json_store::AppendBacking for Spec12File {
+    fn load(&mut self) -> Result<Vec<Value>, Error> {
+        let text = match std::fs::read_to_string(&self.0) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str(line)
+                    .map_err(|e| Error::decode(structfs_core_store::Format::JSON, e.to_string()))
+            })
+            .collect()
+    }
+
+    fn append(&mut self, entry: &Value) -> Result<(), Error> {
+        use std::io::Write as _;
+        let line = serde_json::to_string(entry)
+            .map_err(|e| Error::encode(structfs_core_store::Format::JSON, e.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.0)?;
+        writeln!(file, "{line}")?;
+        Ok(())
+    }
+}
+
+/// A provider that records to (or serves) one spec 12 interchange file,
+/// whatever the key.
 fn fixture_provider(file: std::path::PathBuf) -> Arc<TranscriptProvider> {
+    Arc::new(move |_| Ok(host_store(LogStore::open(Spec12File(file.clone()))?)))
+}
+
+/// A provider over `fw`'s own file store: the Value-envelope JSONL
+/// backing, which also reads legacy plain lines.
+fn jsonl_provider(file: std::path::PathBuf) -> Arc<TranscriptProvider> {
     Arc::new(move |_| {
         Ok(host_store(LogStore::open(
             structfs_json_store::JsonlFileBacking::new(&file),
@@ -418,18 +524,19 @@ fn fixture_provider(file: std::path::PathBuf) -> Arc<TranscriptProvider> {
     })
 }
 
-/// Instantiate the probe guest from the committed artifact and replay
-/// it against a fixture transcript.
-async fn replay_probe_against(fixture: &str) -> Arc<featherweight_runtime::BlockCell> {
+/// Instantiate the probe guest from the committed artifact under `mode`.
+async fn run_probe(mode: TranscriptMode, determinism: Determinism) -> BlockView {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(
         fixtures_dir().join("transcript-probe.wasm"),
         dir.path().join("probe.wasm"),
     )
     .unwrap();
-    let runtime = Runtime::new().with_transcripts(TranscriptMode::Replay(fixture_provider(
-        fixtures_dir().join(fixture),
-    )));
+    let runtime = Runtime::new(
+        config()
+            .with_transcripts(mode)
+            .with_determinism(determinism),
+    );
     let def = AssemblyDef::from_str(
         r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
     )
@@ -439,7 +546,17 @@ async fn replay_probe_against(fixture: &str) -> Arc<featherweight_runtime::Block
         .unwrap();
     assembly.wait_public_terminal().await;
     assembly.shutdown(Duration::from_secs(2)).await;
-    assembly.public_cell().clone()
+    assembly.public_cell()
+}
+
+/// Replay the probe guest against a committed fixture through `fw`'s
+/// file store — the legacy plain-line read path.
+async fn replay_probe_against(fixture: &str) -> BlockView {
+    run_probe(
+        TranscriptMode::Replay(jsonl_provider(fixtures_dir().join(fixture))),
+        Determinism::Live,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -454,6 +571,103 @@ async fn the_committed_js_fixture_replays_here() {
     assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
 }
 
+/// A transcript recorded the way `fw --record` records (tagged Value
+/// envelope lines) replays, and its entries are the same as the plain
+/// interchange recording's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_envelope_recording_replays() {
+    let out = tempfile::tempdir().unwrap();
+    let enveloped = out.path().join("enveloped.jsonl");
+    let seeded = Determinism::Seeded { seed: 42 };
+    let cell = run_probe(
+        TranscriptMode::Record(jsonl_provider(enveloped.clone())),
+        seeded.clone(),
+    )
+    .await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+    let text = std::fs::read_to_string(&enveloped).unwrap();
+    assert!(text.starts_with("[\"structfs-value\",1,"), "{text}");
+
+    let cell = run_probe(
+        TranscriptMode::Replay(jsonl_provider(enveloped.clone())),
+        seeded,
+    )
+    .await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+
+    let mut envelope =
+        LogStore::open(structfs_json_store::JsonlFileBacking::new(&enveloped)).unwrap();
+    let mut plain =
+        LogStore::open(Spec12File(fixtures_dir().join("seeded-recorded.jsonl"))).unwrap();
+    assert_eq!(
+        envelope
+            .read(&path!(""))
+            .unwrap()
+            .unwrap()
+            .into_value(&structfs_core_store::NoCodec)
+            .unwrap(),
+        plain
+            .read(&path!(""))
+            .unwrap()
+            .unwrap()
+            .into_value(&structfs_core_store::NoCodec)
+            .unwrap(),
+    );
+}
+
+/// Transcripts and the session log are driven asynchronously end to end.
+/// A core-wasm block records through a detached (non-blocking-bridge)
+/// transcript store and a service-backed session log on a current-thread
+/// runtime, where any blocking bridge would panic or deadlock; the
+/// recording then replays.
+#[tokio::test(flavor = "current_thread")]
+async fn a_wasm_block_records_through_async_and_service_stores() {
+    use structfs_core_store::Shared;
+    let transcript = Shared::new(LogStore::open(MemoryAppendBacking::new()).unwrap());
+    let log = transcript.clone();
+    let provider: Arc<TranscriptProvider> =
+        Arc::new(move |_| Ok(featherweight_runtime::async_host_store(log.clone())));
+    let session = Shared::new(LogStore::open(MemoryAppendBacking::new()).unwrap());
+    let session_store = featherweight_runtime::service_host_store(Arc::new(
+        structfs_service::DetachedProvider::new(session.clone()),
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures_dir().join("transcript-probe.wasm"),
+        dir.path().join("probe.wasm"),
+    )
+    .unwrap();
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
+    )
+    .unwrap();
+    for mode in [
+        TranscriptMode::Record(provider.clone()),
+        TranscriptMode::Replay(provider.clone()),
+    ] {
+        let runtime = Runtime::new(
+            config()
+                .with_transcripts(mode)
+                .with_determinism(Determinism::Seeded { seed: 42 })
+                .with_session_log(session_store.clone()),
+        );
+        let assembly = runtime
+            .instantiate(&def, HashMap::new(), dir.path())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), assembly.wait_public_terminal())
+            .await
+            .expect("the probe finished");
+        let cell = assembly.public_cell();
+        assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+        assert!(assembly.shutdown(Duration::from_secs(2)).await.complete());
+    }
+    let recorded = transcript.lock().len();
+    assert!(recorded > 0);
+    // Both runs were witnessed: the recording and the replay.
+    assert_eq!(session.lock().len(), 2 * recorded);
+}
+
 /// Regenerates the committed cross-host fixtures: assembles the probe
 /// wat and records a live run of it. Run by hand when the probe or the
 /// wire format changes:
@@ -465,28 +679,21 @@ async fn regenerate_rust_fixture() {
     let fixtures = fixtures_dir();
     let wasm = wat::parse_file(fixtures.join("transcript-probe.wat")).unwrap();
     std::fs::write(fixtures.join("transcript-probe.wasm"), &wasm).unwrap();
-
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("probe.wasm"), &wasm).unwrap();
     let recorded = fixtures.join("rust-recorded.jsonl");
     let _ = std::fs::remove_file(&recorded);
-    let runtime =
-        Runtime::new().with_transcripts(TranscriptMode::Record(fixture_provider(recorded)));
-    let def = AssemblyDef::from_str(
-        r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
+    let cell = run_probe(
+        TranscriptMode::Record(fixture_provider(recorded)),
+        Determinism::Live,
     )
-    .unwrap();
-    let assembly = runtime
-        .instantiate(&def, HashMap::new(), dir.path())
-        .unwrap();
-    assembly.wait_public_terminal().await;
-    assembly.shutdown(Duration::from_secs(2)).await;
-    assert_eq!(
-        assembly.public_cell().state(),
-        BlockState::Stopped,
-        "{:?}",
-        assembly.public_cell().last_error()
-    );
+    .await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
+    for name in [
+        "transcript-probe.wat",
+        "transcript-probe.wasm",
+        "rust-recorded.jsonl",
+    ] {
+        mirror_fixture(name);
+    }
 }
 
 // === The session log ===
@@ -497,10 +704,10 @@ fn session_store() -> HostStore {
     host_store(LogStore::open(MemoryAppendBacking::new()).unwrap())
 }
 
-fn session_entries(store: &HostStore) -> Vec<SessionEntry> {
-    let mut store = store.clone();
+async fn session_entries(store: &HostStore) -> Vec<SessionEntry> {
     let all = store
         .read(&structfs_core_store::path!(""))
+        .await
         .unwrap()
         .unwrap();
     let Some(Value::Array(items)) = all.as_value() else {
@@ -518,12 +725,13 @@ async fn the_session_log_witnesses_the_whole_assembly() {
     let session = session_store();
 
     let seen: Seen = Arc::default();
-    let mut runtime = probe_runtime(&seen, TranscriptMode::Record(provider));
-    runtime = runtime.with_session_log(session.clone());
+    let runtime = Runtime::new(
+        probe_config(&seen, TranscriptMode::Record(provider)).with_session_log(session.clone()),
+    );
     let cell = run_assembly(&runtime, WIRED).await;
     assert_eq!(cell.state(), BlockState::Stopped);
 
-    let entries = session_entries(&session);
+    let entries = session_entries(&session).await;
     // Arrival order is dense from zero — one witness, one clock.
     assert_eq!(
         entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
@@ -540,12 +748,13 @@ async fn the_session_log_witnesses_the_whole_assembly() {
         .find(|e| e.block == "probed/probe" && e.outcome == "failed:permission_denied")
         .expect("the probe's refusal is witnessed");
     let index = sample.entry.expect("recording links entries");
-    let mut probe_log = transcripts.lock().unwrap()["probed/probe"].clone();
+    let probe_log = transcripts.lock().unwrap()["probed/probe"].clone();
     let linked = probe_log
         .read(
             &structfs_core_store::path!("entries")
                 .join(&structfs_core_store::Path::parse(&index.to_string()).unwrap()),
         )
+        .await
         .unwrap()
         .expect("linked transcript entry exists");
     let Some(Value::Map(map)) = linked.as_value() else {
@@ -558,10 +767,11 @@ async fn the_session_log_witnesses_the_whole_assembly() {
 async fn a_live_run_flight_records_without_transcripts() {
     let session = session_store();
     let seen: Seen = Arc::default();
-    let runtime = probe_runtime(&seen, TranscriptMode::Off).with_session_log(session.clone());
+    let runtime =
+        Runtime::new(probe_config(&seen, TranscriptMode::Off).with_session_log(session.clone()));
     run_assembly(&runtime, WIRED).await;
 
-    let entries = session_entries(&session);
+    let entries = session_entries(&session).await;
     assert!(!entries.is_empty());
     // No transcript, no links — the flight recorder stands alone.
     assert!(entries.iter().all(|e| e.entry.is_none()));
@@ -575,14 +785,18 @@ async fn a_replay_writes_its_own_session_timeline() {
 
     let recorded_session = session_store();
     let seen: Seen = Arc::default();
-    let runtime = probe_runtime(&seen, TranscriptMode::Record(provider.clone()))
-        .with_session_log(recorded_session.clone());
+    let runtime = Runtime::new(
+        probe_config(&seen, TranscriptMode::Record(provider.clone()))
+            .with_session_log(recorded_session.clone()),
+    );
     run_assembly(&runtime, WIRED).await;
 
     let replayed_session = session_store();
     let seen: Seen = Arc::default();
-    let runtime = probe_runtime(&seen, TranscriptMode::Replay(provider))
-        .with_session_log(replayed_session.clone());
+    let runtime = Runtime::new(
+        probe_config(&seen, TranscriptMode::Replay(provider))
+            .with_session_log(replayed_session.clone()),
+    );
     let cell = run_assembly(&runtime, UNWIRED).await;
     assert_eq!(cell.state(), BlockState::Stopped);
 
@@ -597,8 +811,8 @@ async fn a_replay_writes_its_own_session_timeline() {
             .collect()
     };
     assert_eq!(
-        probe_line(&session_entries(&recorded_session)),
-        probe_line(&session_entries(&replayed_session))
+        probe_line(&session_entries(&recorded_session).await),
+        probe_line(&session_entries(&replayed_session).await)
     );
 }
 
@@ -628,11 +842,11 @@ fn entropy_runtime(
     mode: TranscriptMode,
     determinism: Determinism,
 ) -> Runtime {
-    let mut runtime = Runtime::new()
-        .with_transcripts(mode)
-        .with_determinism(determinism);
     let seen = seen.clone();
-    runtime.register_builtin(
+    runtime_with(
+        config()
+            .with_transcripts(mode)
+            .with_determinism(determinism),
         "probe",
         Arc::new(move || {
             Box::new(EntropyProbe {
@@ -640,8 +854,7 @@ fn entropy_runtime(
                 seen: seen.clone(),
             }) as Box<dyn NativeBlock>
         }),
-    );
-    runtime
+    )
 }
 
 /// The flagship: replay two of three seeded entropy reads, hand off,
@@ -733,43 +946,26 @@ async fn a_seek_past_peer_effects_is_refused() {
             to: Arc::new(|_| None),
         },
     );
-    let def = AssemblyDef::from_str(UNWIRED).unwrap();
-    let refused = runtime
-        .instantiate(&def, HashMap::new(), &std::env::temp_dir())
-        .map(|_| ())
-        .expect_err("a prefix with peer effects must not hand off");
-    let message = refused.to_string();
+    // The block is refused at start, before any of its code runs: the
+    // transcript is loaded (asynchronously) by the block's own task.
+    let cell = run_assembly(&runtime, UNWIRED).await;
+    assert_eq!(cell.state(), BlockState::Failed);
+    let message = cell.last_error().unwrap_or_default();
     assert!(message.contains("cannot seek"), "{message}");
     assert!(message.contains("services/kv"), "{message}");
+    assert!(seen.lock().unwrap().is_empty(), "the probe must not run");
 }
 
-/// Record the probe under seed 42 into `file` — the seeded fixture run.
+/// Record the probe under seed 42 into `file`, in the spec 12
+/// interchange form — the seeded fixture run.
 async fn record_seeded_probe(file: std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        fixtures_dir().join("transcript-probe.wasm"),
-        dir.path().join("probe.wasm"),
-    )
-    .unwrap();
     let _ = std::fs::remove_file(&file);
-    let runtime = Runtime::new()
-        .with_transcripts(TranscriptMode::Record(fixture_provider(file)))
-        .with_determinism(Determinism::Seeded { seed: 42 });
-    let def = AssemblyDef::from_str(
-        r#"{"assembly": "cross-host", "blocks": {"probe": "probe.wasm"}, "public": "probe"}"#,
+    let cell = run_probe(
+        TranscriptMode::Record(fixture_provider(file)),
+        Determinism::Seeded { seed: 42 },
     )
-    .unwrap();
-    let assembly = runtime
-        .instantiate(&def, HashMap::new(), dir.path())
-        .unwrap();
-    assembly.wait_public_terminal().await;
-    assembly.shutdown(Duration::from_secs(2)).await;
-    assert_eq!(
-        assembly.public_cell().state(),
-        BlockState::Stopped,
-        "{:?}",
-        assembly.public_cell().last_error()
-    );
+    .await;
+    assert_eq!(cell.state(), BlockState::Stopped, "{:?}", cell.last_error());
 }
 
 /// Determinism, pinned by the repository: a seeded run recorded today
@@ -797,6 +993,7 @@ async fn the_seeded_fixture_is_byte_reproducible() {
 #[ignore = "regenerates committed fixtures; run by hand"]
 async fn regenerate_seeded_fixture() {
     record_seeded_probe(fixtures_dir().join("seeded-recorded.jsonl")).await;
+    mirror_fixture("seeded-recorded.jsonl");
 }
 
 /// Block identity is a function of the assembly's shape, not the run:
@@ -818,8 +1015,8 @@ async fn block_ids_are_stable_across_runs() {
         }
     }
     let run = |seen: Seen| async move {
-        let mut runtime = Runtime::new();
-        runtime.register_builtin(
+        let runtime = runtime_with(
+            config(),
             "probe",
             Arc::new(move || Box::new(IdProbe { seen: seen.clone() }) as Box<dyn NativeBlock>),
         );
@@ -858,9 +1055,9 @@ async fn seeded_time_after_waits_in_virtual_time() {
         }
     }
     let seen: Seen = Arc::default();
-    let mut runtime = Runtime::new().with_determinism(Determinism::Seeded { seed: 7 });
     let captured = seen.clone();
-    runtime.register_builtin(
+    let runtime = runtime_with(
+        config().with_determinism(Determinism::Seeded { seed: 7 }),
         "probe",
         Arc::new(move || {
             Box::new(Sleeper {
@@ -916,10 +1113,10 @@ const RACY: &str = r#"{
 /// final counter.
 async fn racy_run(seed: u64) -> (Vec<(String, String, String)>, i64) {
     let session = session_store();
-    let mut runtime = Runtime::new()
-        .with_determinism(Determinism::Simulation { seed })
-        .with_session_log(session.clone());
-    runtime.register_builtin(
+    let runtime = runtime_with(
+        config()
+            .with_determinism(Determinism::Simulation { seed })
+            .with_session_log(session.clone()),
         "contender",
         Arc::new(|| Box::new(Contender) as Box<dyn NativeBlock>),
     );
@@ -943,12 +1140,13 @@ async fn racy_run(seed: u64) -> (Vec<(String, String, String)>, i64) {
     assembly.shutdown(Duration::from_secs(2)).await;
 
     let timeline: Vec<(String, String, String)> = session_entries(&session)
+        .await
         .into_iter()
         .map(|e| (e.block, e.op, e.path.to_string()))
         .collect();
-    let mut shared = shared;
     let counter = match shared
         .read(&structfs_core_store::path!("counter"))
+        .await
         .unwrap()
         .and_then(|r| r.as_value().cloned())
     {
@@ -999,15 +1197,16 @@ async fn simulation_detects_a_dependency_cycle() {
             Ok(())
         }
     }
-    let mut runtime = Runtime::new().with_determinism(Determinism::Simulation { seed: 3 });
-    runtime.register_builtin(
+    let mut config = config().with_determinism(Determinism::Simulation { seed: 3 });
+    config.register_builtin(
         "ping",
         Arc::new(|| Box::new(Caller { peer: "who" }) as Box<dyn NativeBlock>),
     );
-    runtime.register_builtin(
+    config.register_builtin(
         "pong",
         Arc::new(|| Box::new(Caller { peer: "who" }) as Box<dyn NativeBlock>),
     );
+    let runtime = Runtime::new(config);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "cycle",
             "blocks": {"ping": "builtin:ping", "pong": "builtin:pong"},
@@ -1058,8 +1257,9 @@ fn depot_dir() -> tempfile::TempDir {
 
 type Timeline = Vec<(String, String, String)>;
 
-fn timeline_of(session: &HostStore) -> Timeline {
+async fn timeline_of(session: &HostStore) -> Timeline {
     session_entries(session)
+        .await
         .into_iter()
         .map(|e| (e.block, e.op, e.path.to_string()))
         .collect()
@@ -1083,11 +1283,12 @@ async fn simulation_pins_races_through_a_nested_assembly() {
     async fn run(seed: u64) -> (Timeline, Option<Value>) {
         let dir = depot_dir();
         let session = session_store();
-        let mut runtime = Runtime::new()
+        let mut config = config()
             .with_determinism(Determinism::Simulation { seed })
             .with_session_log(session.clone());
-        register_builtins(&mut runtime);
-        runtime.register_builtin(
+        register_builtins(&mut config);
+        let runtime = runtime_with(
+            config,
             "chatter",
             Arc::new(|| Box::new(Chatter) as Box<dyn NativeBlock>),
         );
@@ -1112,7 +1313,7 @@ async fn simulation_pins_races_through_a_nested_assembly() {
             .unwrap_or_else(|_| panic!("{name} did not finish"));
         }
         // Snapshot the timeline before any host-driven read muddies it.
-        let timeline = timeline_of(&session);
+        let timeline = timeline_of(&session).await;
         let counter = assembly
             .read_block("depot", path!("counter"))
             .await
@@ -1161,18 +1362,19 @@ async fn simulation_pins_two_nested_assemblies_bridged_by_couriers() {
     async fn run(seed: u64) -> (Timeline, Option<Value>, Option<Value>) {
         let dir = depot_dir();
         let session = session_store();
-        let mut runtime = Runtime::new()
+        let mut config = config()
             .with_determinism(Determinism::Simulation { seed })
             .with_session_log(session.clone());
-        register_builtins(&mut runtime);
-        runtime.register_builtin(
+        register_builtins(&mut config);
+        config.register_builtin(
             "courier1",
             Arc::new(|| Box::new(Courier { tag: "k1" }) as Box<dyn NativeBlock>),
         );
-        runtime.register_builtin(
+        config.register_builtin(
             "courier2",
             Arc::new(|| Box::new(Courier { tag: "k2" }) as Box<dyn NativeBlock>),
         );
+        let runtime = Runtime::new(config);
         let def = AssemblyDef::from_str(
             r#"{"assembly": "bridge",
                 "blocks": {"k1": "builtin:courier1", "k2": "builtin:courier2",
@@ -1193,7 +1395,7 @@ async fn simulation_pins_two_nested_assemblies_bridged_by_couriers() {
             .await
             .unwrap_or_else(|_| panic!("{name} did not finish"));
         }
-        let timeline = timeline_of(&session);
+        let timeline = timeline_of(&session).await;
         let ledger = assembly.read_block("b", path!("")).await.unwrap();
         let counter = assembly.read_block("a", path!("counter")).await.unwrap();
         assembly.shutdown(Duration::from_secs(2)).await;
@@ -1266,9 +1468,11 @@ async fn wasm_race(seed: u64) -> (String, Timeline) {
     std::fs::write(dir.path().join("b.wasm"), racer_wat('B')).unwrap();
 
     let session = session_store();
-    let runtime = Runtime::new()
-        .with_determinism(Determinism::Simulation { seed })
-        .with_session_log(session.clone());
+    let runtime = Runtime::new(
+        config()
+            .with_determinism(Determinism::Simulation { seed })
+            .with_session_log(session.clone()),
+    );
     let shared = host_store(LogStore::open(MemoryAppendBacking::new()).unwrap());
     let def = AssemblyDef::from_str(
         r#"{"assembly": "race",
@@ -1293,10 +1497,10 @@ async fn wasm_race(seed: u64) -> (String, Timeline) {
         .await
         .unwrap_or_else(|_| panic!("racer {name} did not finish under seed {seed}"));
     }
-    let timeline = timeline_of(&session);
-    let mut shared = shared;
+    let timeline = timeline_of(&session).await;
     let order = match shared
         .read(&path!(""))
+        .await
         .unwrap()
         .and_then(|r| r.as_value().cloned())
     {

@@ -3,8 +3,8 @@
 Follow-up: the [September 16 audit](ox-supplement-audit-2026-09-16.md) corrects
 the lifecycle coverage claims below and records the subsequent fixes and checks.
 
-The [supplement plan](../plans/03-adoption-contracts.md) is implemented and
-validated. [Design and migration boundaries](design/2026-09-15-adoption-contracts.md)
+The [supplement plan](plans/03-adoption-contracts.md) is implemented and
+validated. [Design and migration boundaries](../design/2026-09-15-adoption-contracts.md)
 explain the final contracts. This record supersedes the original-letter validation
 for the current candidate; no package publication or tagging was performed.
 

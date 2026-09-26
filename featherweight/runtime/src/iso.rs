@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use structfs_core_store::{DetachedReader, DetachedWriter, Error, Path, Record, Value};
+use structfs_core_store::{path, DetachedReader, DetachedWriter, Error, Path, Record, Value};
 
 use crate::block::{BlockCell, BlockEvent};
 use crate::spawn::ProcStore;
@@ -54,9 +54,18 @@ pub(crate) struct IsoConfig {
     /// Time and entropy providers (spec 12): virtual under
     /// `Determinism::Seeded`, the world under `Determinism::Live`.
     pub sources: crate::determinism::IsoSources,
+    /// Granted mount prefixes, served at `iso/capabilities`.
+    pub capabilities: Vec<String>,
+    /// The runtime's shared call budget, reported at `iso/execution/budget`.
+    pub calls: Arc<crate::CallBudget>,
+    /// The instance execution scope, if the runtime has one.
+    pub execution: Option<crate::ExecutionScope>,
 }
 
 /// The per-block `/iso/` surface. Paths are relative to the `iso` mount.
+///
+/// Registered timers belong to the surface: they are cancelled, and their
+/// event reservations refunded, when the block's run ends for any reason.
 pub struct IsoSurface {
     cell: Arc<BlockCell>,
     log: Arc<dyn LogSink>,
@@ -68,6 +77,22 @@ pub struct IsoSurface {
     timers: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_timer: AtomicU64,
     sources: crate::determinism::IsoSources,
+    capabilities: Vec<String>,
+    calls: Arc<crate::CallBudget>,
+    execution: Option<crate::ExecutionScope>,
+}
+
+impl Drop for IsoSurface {
+    fn drop(&mut self) {
+        for (_, task) in self
+            .timers
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+        {
+            task.abort();
+        }
+    }
 }
 
 const SECTIONS: [(&str, &str); 12] = [
@@ -113,7 +138,27 @@ impl IsoSurface {
             timers: Mutex::new(HashMap::new()),
             next_timer: AtomicU64::new(0),
             sources: config.sources,
+            capabilities: config.capabilities,
+            calls: config.calls,
+            execution: config.execution,
         }
+    }
+
+    /// The instance budget view (spec 13): call, event, and reply budgets
+    /// plus measured execution usage.
+    fn budget(&self) -> Value {
+        let view = serde_json::json!({
+            "scope": "instance",
+            "calls": self.calls.hierarchy(),
+            "events": self.cell.events.snapshot(),
+            "replies": self.cell.replies.snapshot(),
+            "execution": self.cell.usage.snapshot(),
+            "deadline_remaining_ms": self.execution.as_ref().map(|scope|
+                scope.deadline().saturating_duration_since(tokio::time::Instant::now()).as_millis()),
+            "units": { "calls_bytes": "logical_payload_bytes", "linear_memory_bytes": "wasm_linear_memory_bytes",
+                "wasm_fuel_consumed": "wasmtime_fuel" },
+        });
+        structfs_serde_store::json_to_value(view)
     }
 
     fn directory(&self) -> Value {
@@ -155,7 +200,24 @@ impl IsoSurface {
                 "server/responses/{token}".to_string(),
                 descriptor(false, true, false),
             ),
+            (
+                "server/cancelled/{token}".to_string(),
+                descriptor(true, false, false),
+            ),
             ("self/id".to_string(), descriptor(true, false, false)),
+            (
+                "self/last_error".to_string(),
+                descriptor(true, false, false),
+            ),
+            ("shutdown/mode".to_string(), descriptor(true, false, false)),
+            ("time/monotonic".to_string(), descriptor(true, false, false)),
+            ("time/zone".to_string(), descriptor(true, false, false)),
+            ("random/int".to_string(), descriptor(true, false, false)),
+            (
+                "random/bytes/{n}".to_string(),
+                descriptor(true, false, false),
+            ),
+            ("timers/{id}".to_string(), descriptor(false, true, false)),
             (
                 "execution/budget".to_string(),
                 descriptor(true, false, false),
@@ -216,6 +278,18 @@ impl IsoSurface {
         let value = match (path.len(), &path[0]) {
             // === meta lens ===
             (1, "meta") => Some(self.meta()),
+            // === discovery and accounting ===
+            (1, "capabilities") => Some(Value::Array(
+                self.capabilities
+                    .iter()
+                    .map(|prefix| Value::String(prefix.clone()))
+                    .collect(),
+            )),
+            (1, "execution") => Some(Value::Map(BTreeMap::from([(
+                "budget".to_string(),
+                Value::from("read: instance budget and measured usage"),
+            )]))),
+            (2, "execution") if &path[1] == "budget" => Some(self.budget()),
             // === server (the mailbox) ===
             (1, "server") => Some(Value::Map(BTreeMap::from([
                 (
@@ -249,7 +323,7 @@ impl IsoSurface {
             (3, "server") if &path[1] == "cancelled" => {
                 let token = path[2]
                     .parse()
-                    .map_err(|_| Error::conflict("invalid response token"))?;
+                    .map_err(|_| Error::invalid_argument("invalid response token"))?;
                 Some(Value::Bool(
                     self.cell.request_cancellation(token).is_cancelled(),
                 ))
@@ -271,11 +345,20 @@ impl IsoSurface {
             (2, "env") => self.env.get(&path[1]).map(|v| Value::String(v.clone())),
             // === stdio ===
             (2, "stdio") if &path[1] == "stdin" => {
-                // Blocks the calling (block) thread until a line or EOF.
-                return Ok(self
-                    .stdio
-                    .read_line()
-                    .map(|line| Record::parsed(Value::String(line))));
+                // A parked read: the line (or EOF) is awaited on the
+                // blocking pool, never on a runtime worker. Immediate
+                // shutdown interrupts the wait; a blocking stdin read
+                // already in progress cannot be interrupted and finishes
+                // on its worker, its line discarded.
+                let stdio = self.stdio.clone();
+                let read = crate::turnstile::blocking(move || stdio.read_line());
+                let line = tokio::select! {
+                    line = read => line.map_err(|e| Error::store("iso", "stdin", e.to_string()))?,
+                    _ = self.cell.cancel.cancelled() => {
+                        return Err(Error::cancelled("stdin read interrupted by shutdown"));
+                    }
+                };
+                return Ok(line.map(|line| Record::parsed(Value::String(line))));
             }
             // === shutdown ===
             (2, "shutdown") if &path[1] == "requested" => {
@@ -313,7 +396,7 @@ impl IsoSurface {
             (3, "time") if &path[1] == "after" => {
                 let ms: u64 = path[2]
                     .parse()
-                    .map_err(|_| Error::store("iso", "time_after", "bad duration"))?;
+                    .map_err(|_| Error::invalid_argument("time/after: bad duration"))?;
                 // Simulation semantics under the virtual clock: the wait
                 // completes at once, having advanced virtual time.
                 if self.sources.advance_after(ms) {
@@ -351,7 +434,7 @@ impl IsoSurface {
             (3, "random") if &path[1] == "bytes" => {
                 let n: usize = path[2]
                     .parse()
-                    .map_err(|_| Error::store("iso", "random", "bad byte count"))?;
+                    .map_err(|_| Error::invalid_argument("random/bytes: bad byte count"))?;
                 if n > 1 << 20 {
                     return Err(Error::resource_limit("random/bytes limited to 1MiB"));
                 }
@@ -387,14 +470,14 @@ impl IsoSurface {
                 .clone()
                 .write_detached(&rel, Record::parsed(value))
                 .await?;
-            return Ok(Path::parse("proc").unwrap().join(&result));
+            return Ok(path!("proc").join(&result));
         }
         let components: Vec<&str> = path.iter().collect();
         match components.as_slice() {
             ["server", "responses", token] => {
                 let token: u64 = token
                     .parse()
-                    .map_err(|_| Error::store("iso", "respond", "bad response token"))?;
+                    .map_err(|_| Error::invalid_argument("bad response token"))?;
                 self.cell.respond(token, value);
                 Ok(path.clone())
             }
@@ -430,15 +513,18 @@ impl IsoSurface {
                     return Err(Error::store(
                         "iso",
                         "timers",
-                        "mailbox timers are not supported under deterministic                          simulation: their delivery order would be wall-clock,                          not seeded",
+                        "mailbox timers are not supported under deterministic \
+                         simulation: their delivery order would be wall-clock, \
+                         not seeded",
                     ));
                 }
                 let Value::Map(ref map) = value else {
-                    return Err(Error::store("iso", "timers", "expected {ms, tag}"));
+                    return Err(Error::invalid_argument("timers: expected {ms, tag}"));
                 };
                 let ms = match map.get("ms") {
                     Some(Value::Integer(ms)) if *ms >= 0 => *ms as u64,
-                    _ => return Err(Error::store("iso", "timers", "missing ms")),
+                    Some(Value::Unsigned(ms)) => *ms,
+                    _ => return Err(Error::invalid_argument("timers: missing ms")),
                 };
                 let tag = map.get("tag").cloned().unwrap_or(Value::Null);
                 let charge = self.cell.reserve_event(&tag)?;
@@ -447,7 +533,7 @@ impl IsoSurface {
                 let task = self.handle.spawn(async move {
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {
-                            let _ = cell.deliver_event(crate::BlockEvent::Timer { tag }, charge);
+                            let _ = cell.deliver_event(BlockEvent::Timer { tag }, charge);
                         }
                         _ = cell.cancel.cancelled() => {}
                     }
@@ -455,15 +541,12 @@ impl IsoSurface {
                 let mut timers = self.timers.lock().unwrap_or_else(|e| e.into_inner());
                 timers.retain(|_, task| !task.is_finished());
                 timers.insert(id, task);
-                Ok(Path::from_components(vec![
-                    "timers".to_string(),
-                    id.to_string(),
-                ]))
+                Ok(path!("timers").join(&Path::from_components(vec![id.to_string()])))
             }
             ["timers", id] => {
                 // Null-write cancels a pending timer (idempotent).
                 if !value.is_null() {
-                    return Err(Error::conflict("timers accept only Null (cancel)"));
+                    return Err(Error::invalid_argument("timers accept only Null (cancel)"));
                 }
                 if let Ok(id) = id.parse::<u64>() {
                     if let Some(task) = self
@@ -511,8 +594,66 @@ mod tests {
             proc: None,
             handle: tokio::runtime::Handle::current(),
             sources: crate::determinism::Determinism::Live.sources_for("test"),
+            capabilities: vec!["services/kv".to_string()],
+            calls: crate::CallBudget::shared(Default::default()),
+            execution: None,
         });
         (cell, iso)
+    }
+
+    #[tokio::test]
+    async fn meta_describes_every_served_path() {
+        let (_cell, iso) = surface();
+        let Some(Value::Map(meta)) = read_value(&iso, &path!("meta")).await else {
+            panic!("meta is a map");
+        };
+        for described in [
+            "capabilities",
+            "execution/budget",
+            "server/cancelled/{token}",
+            "self/last_error",
+        ] {
+            assert!(meta.contains_key(described), "{described}");
+        }
+        assert_eq!(
+            read_value(&iso, &path!("capabilities")).await,
+            Some(Value::Array(vec![Value::from("services/kv")]))
+        );
+        let Some(Value::Map(budget)) = read_value(&iso, &path!("execution/budget")).await else {
+            panic!("budget is a map");
+        };
+        assert_eq!(budget.get("scope"), Some(&Value::from("instance")));
+        // Every top-level section the directory advertises is served.
+        let Some(Value::Map(sections)) = read_value(&iso, &path!("")).await else {
+            panic!("directory");
+        };
+        for section in sections.keys() {
+            let at = Path::parse(section).unwrap();
+            if section == "server" || section == "stdio" {
+                continue; // directories of parking paths
+            }
+            assert!(iso.read(&at).await.is_ok(), "{section}");
+        }
+    }
+
+    #[tokio::test]
+    async fn timers_are_cancelled_when_the_surface_is_dropped() {
+        let (cell, iso) = surface();
+        iso.write(
+            &path!("timers"),
+            Value::Map(BTreeMap::from([("ms".to_string(), Value::Integer(60_000))])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cell.events.usage().calls, 1);
+        drop(iso);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while cell.events.usage().calls != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the timer's reservation was refunded");
     }
 
     fn surface() -> (Arc<BlockCell>, IsoSurface) {
@@ -529,11 +670,11 @@ mod tests {
     #[tokio::test]
     async fn timers_reserve_capacity_and_cancel_refunds_it() {
         let (cell, iso) = surface();
-        cell.events.set_limits(crate::CallLimits {
-            calls: 1,
-            calls_per_block: 1,
-            ..Default::default()
-        });
+        cell.events.set_limits(
+            crate::CallLimits::default()
+                .with_calls(1)
+                .with_calls_per_block(1),
+        );
         let value = Value::Map(BTreeMap::from([
             ("ms".into(), Value::Integer(60000)),
             ("tag".into(), Value::from("tick")),
@@ -649,6 +790,43 @@ mod tests {
         cell.cancel.cancel();
         let err = sleeper.await.unwrap().unwrap_err();
         assert!(err.is_cancelled());
+    }
+
+    /// A stdin that blocks until released: the parked read must still
+    /// answer an immediate shutdown.
+    struct BlockedStdin(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+    impl Stdio for BlockedStdin {
+        fn read_line(&self) -> Option<String> {
+            let _ = self.0.lock().unwrap().recv();
+            None
+        }
+        fn write_out(&self, _: &str) {}
+        fn write_err(&self, _: &str) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parked_stdin_read_is_cancelled_by_shutdown() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (cell, iso) = surface_with(
+            Arc::new(BlockedStdin(std::sync::Mutex::new(blocked))),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        let iso = Arc::new(iso);
+        let reader = {
+            let iso = iso.clone();
+            tokio::spawn(async move { iso.read(&path!("stdio/stdin")).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        cell.cancel.cancel();
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), reader)
+            .await
+            .expect("shutdown interrupted the stdin wait")
+            .unwrap()
+            .unwrap_err();
+        assert!(err.is_cancelled(), "{err}");
+        // Let the blocking worker finish its (discarded) read.
+        release.send(()).unwrap();
     }
 
     #[tokio::test]

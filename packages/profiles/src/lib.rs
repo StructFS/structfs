@@ -1,9 +1,24 @@
 //! Optional, independently versioned store contracts above StructFS core.
 //! Stores implement their semantics; the runtime does not supply them.
 //! Profile discovery never invokes effects.
+//!
+//! # Conventions
+//!
+//! **Constructors return `Self`**, matching `structfs-service`: wrap a
+//! [`Session`] or [`OperationHandle`] in `Arc` yourself to mount it.
+//!
+//! **Stop verbs**: [`Session`] and [`OperationHandle`] have `close()`, which
+//! requests cleanup without blocking, and `join(timeout)`, which waits for it
+//! and returns the owner's report.
+//! [`OperationHandle::cancel`] is deliberately *not* a stop verb — it asks the
+//! running work to stop while keeping the result slot.
+//!
+//! **`#[non_exhaustive]`.** Every schema type here is a wire form that can
+//! gain variants or fields; match with a wildcard arm.
 use serde::{Deserialize, Serialize};
-pub use structfs_state::Token;
+use structfs_state::Token;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Profile {
     #[serde(rename = "structfs.state")]
     State,
@@ -20,6 +35,7 @@ pub enum Profile {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Implementation {
     Reference,
     Compatibility,
@@ -27,13 +43,25 @@ pub enum Implementation {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Declaration {
     pub profile: Profile,
     pub version: u32,
     pub implementation: Implementation,
 }
+impl Declaration {
+    /// Declare `profile` at version 1 with the given implementation tier.
+    pub fn new(profile: Profile, implementation: Implementation) -> Self {
+        Self {
+            profile,
+            version: 1,
+            implementation,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum Input {
     Key { text: String },
     Paste { text: String },
@@ -43,6 +71,7 @@ pub enum Input {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct InputEnvelope {
     pub version: u32,
     pub session: String,
@@ -50,6 +79,15 @@ pub struct InputEnvelope {
     pub input: Input,
 }
 impl InputEnvelope {
+    /// Version 1 envelope for `session` at `sequence`.
+    pub fn new(session: impl Into<String>, sequence: u64, input: Input) -> Self {
+        Self {
+            version: 1,
+            session: session.into(),
+            sequence,
+            input,
+        }
+    }
     /// Logical retained input weight; identical in Rust and the browser reference.
     pub fn weight(&self) -> Option<usize> {
         64usize
@@ -79,6 +117,7 @@ impl InputEnvelope {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SessionStatus {
     pub session: String,
     pub accepted: u64,
@@ -88,6 +127,7 @@ pub struct SessionStatus {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Phase {
     Pending,
     Running,
@@ -96,6 +136,7 @@ pub enum Phase {
 }
 /// Cancellation is a request, not a terminal phase or proof of rollback.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OperationStatus {
     pub operation: String,
     pub phase: Phase,
@@ -107,6 +148,7 @@ pub struct OperationStatus {
 /// This is not a universal taxonomy of store durability guarantees.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Durability {
     Memory,
     FileSynced,
@@ -115,12 +157,21 @@ pub enum Durability {
 /// result or runtime persistence mechanism. Other stores may acknowledge durable
 /// writes without this payload or a separate save operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CommitAck {
     pub token: Token,
     pub persisted: bool,
     pub durability: Durability,
 }
 impl CommitAck {
+    /// An acknowledgment whose `persisted` flag matches its durability level.
+    pub fn new(token: Token, durability: Durability) -> Self {
+        Self {
+            token,
+            persisted: matches!(durability, Durability::FileSynced),
+            durability,
+        }
+    }
     /// Check this schema's field consistency; does not verify persistence.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.persisted != matches!(self.durability, Durability::FileSynced) {
@@ -131,13 +182,25 @@ impl CommitAck {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Approval {
     pub version: u32,
     pub operation: String,
     pub approved: bool,
 }
+impl Approval {
+    /// A version 1 approval decision for `operation`.
+    pub fn new(operation: impl Into<String>, approved: bool) -> Self {
+        Self {
+            version: 1,
+            operation: operation.into(),
+            approved,
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ProcessRequest {
     pub version: u32,
     pub operation: String,
@@ -145,6 +208,25 @@ pub struct ProcessRequest {
     pub args: Vec<String>,
     pub environment_grant: String,
     pub workspace_grant: String,
+}
+impl ProcessRequest {
+    /// A version 1 request to run `program` with no arguments under the named
+    /// grants. Set `args` afterwards when the program takes any.
+    pub fn new(
+        operation: impl Into<String>,
+        program: impl Into<String>,
+        environment_grant: impl Into<String>,
+        workspace_grant: impl Into<String>,
+    ) -> Self {
+        Self {
+            version: 1,
+            operation: operation.into(),
+            program: program.into(),
+            args: Vec::new(),
+            environment_grant: environment_grant.into(),
+            workspace_grant: workspace_grant.into(),
+        }
+    }
 }
 #[cfg(feature = "host")]
 mod host;

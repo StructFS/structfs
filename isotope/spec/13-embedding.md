@@ -21,8 +21,10 @@ Servers must bound their internal work queues and observe cancellation at safe
 points. CPU used by a shared interpreter is not automatically attributable to an
 individual request.
 
-Instance shutdown stops admissions, requests graceful exit, escalates after one
-grace deadline and joins execution tasks. `ShutdownReport.remaining` identifies
+Instance shutdown stops admissions, requests graceful exit, escalates, and joins
+execution tasks, all within one deadline for the whole instance tree (the
+reference runtime escalates at half the deadline); work not joined by the
+deadline is reported, not waited for. `ShutdownReport.remaining` identifies
 execution work not joined; `ShutdownReport.providers` reports provider owners
 and resources still pending cleanup. Use `complete()` for aggregate completion,
 and retain the cleanup supervisor and reservations until reconciliation. Blocking native code can
@@ -33,7 +35,8 @@ assembly reference is not shutdown.
 
 Hosts prepare artifacts asynchronously using their adapter's own API and bounded
 compilation resources, then register an `Arc<dyn WasmBlockDriver>` with
-`Runtime::register_artifact`. File-based `ArtifactLoader` remains available.
+`RuntimeConfig::register_artifact` before the runtime is built. File-based
+`ArtifactLoader` remains available.
 Each `execute(DriverContext)` receives a fresh namespace, format, cancellation,
 instance execution scope, shared call budget, metering policy and instance meter.
 The core Wasm driver uses this same entry point. Adapters must join child tasks
@@ -127,14 +130,13 @@ charge until consumed; an oversized reply returns a typed overload error. Shutdo
 never requires an extra mailbox slot. Host-provided log sinks, provider queues and
 interpreter-internal queues remain separately bounded by their owners.
 
-## Optional resumable execution
+## Resumable execution and inspection
 
-An adapter may advertise `DriverCapabilities { resumable, checkpoints }` and
-provide a host-only per-instance `DriverControl` store. This is an extension
-point, not a claim that an ordinary suspended async import is snapshot-safe.
-The adapter documents its control schema, safe points, state version and artifact
-identity. Checkpoint support requires provider-state capture, validated rebinding
-or explicit rejection. Live sockets cannot be reconstructed from guest memory.
+This release defines no resumable-execution or checkpoint interface. An
+ordinary suspended async import is not snapshot-safe; a future adapter
+extension would have to document its control schema, safe points, state
+version and artifact identity, and capture or explicitly reject provider state.
+Live sockets cannot be reconstructed from guest memory.
 
 Inspection is not automatically excluded from replay. An adapter may expose a
 separate host-only inspection surface whose operations cannot change guest-visible

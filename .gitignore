@@ -30,3 +30,7 @@ node_modules/
 # Coverage artifacts
 *.profraw
 featherweight/host/browser/kv.wasm
+
+# Agent tooling and standalone release-fixture build trees
+.pnpm-store/
+tests/**/target/

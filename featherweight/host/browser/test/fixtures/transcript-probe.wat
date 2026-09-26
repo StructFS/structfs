@@ -1,7 +1,10 @@
 ;; The cross-host transcript probe: a spec 11 guest that touches every
 ;; transcript answer kind — entropy and the ns clock (inputs no live
-;; rerun can reproduce), a refusal (an unwired path), and two writes
-;; whose payload digests both hosts must compute identically.
+;; rerun can reproduce), refusals of three kinds (an unwired path, a
+;; resource limit, an invalid argument), an invalid path the binding
+;; rejects before any store sees it (so it is never a transcript entry),
+;; and two writes whose payload digests both hosts must compute
+;; identically.
 ;;
 ;; Recorded under the native runtime and replayed by the TS host, and
 ;; vice versa; the committed transcripts beside this file pin the wire
@@ -31,6 +34,9 @@
   (data (i32.const 1210) "\22ran\22")              ;; 5
   (data (i32.const 1232)
     "{\22name\22:\22transcript-probe\22,\22serialization\22:\22application/json\22}") ;; 62
+  (data (i32.const 1300) "bad-path")                 ;; 8
+  (data (i32.const 1320) "iso/random/bytes/2000000") ;; 24
+  (data (i32.const 1350) "iso/time/after/soon")      ;; 19
 
   (func (export "manifest") (param $ret i32) (result i32)
     (i32.store (local.get $ret) (i32.const 1232))
@@ -53,6 +59,21 @@
           (call $read (i32.const 1144) (i32.const 7) (i32.const 1024))
           (i32.const -2))
       (then (return (i32.const 3))))
+    ;; read bad-path -> invalid path (-7), refused by the binding itself
+    (if (i32.ne
+          (call $read (i32.const 1300) (i32.const 8) (i32.const 1024))
+          (i32.const -7))
+      (then (return (i32.const 6))))
+    ;; read iso/random/bytes/2000000 -> resource limit (-8)
+    (if (i32.ne
+          (call $read (i32.const 1320) (i32.const 24) (i32.const 1024))
+          (i32.const -8))
+      (then (return (i32.const 7))))
+    ;; read iso/time/after/soon -> invalid argument (-10)
+    (if (i32.ne
+          (call $read (i32.const 1350) (i32.const 19) (i32.const 1024))
+          (i32.const -10))
+      (then (return (i32.const 8))))
     ;; write "hi" to iso/stdio/stdout -> acknowledged
     (if (i32.ne
           (call $write (i32.const 1160) (i32.const 16)

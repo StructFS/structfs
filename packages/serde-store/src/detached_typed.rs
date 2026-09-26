@@ -1,4 +1,8 @@
 //! Typed operations with no retained store, path, or input borrow.
+//!
+//! These mirror the synchronous [`TypedReader`](crate::TypedReader) /
+//! [`TypedWriter`](crate::TypedWriter) surface; see the
+//! [crate docs](crate#typed-access) for the matrix and the codec convention.
 use crate::{from_value, to_value};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
@@ -8,7 +12,11 @@ use structfs_core_store::{Codec, DetachedFuture, DetachedReader, DetachedWriter,
 /// Parsed records are converted directly; raw records require the supplied
 /// codec. Codec format, validation, and typed conversion errors are preserved.
 /// The owned codec handle lives until decoding completes.
+///
+/// There is no `read_children_typed_detached`: [`DetachedReader`] has no
+/// child enumeration to build it on.
 pub trait DetachedTypedReader: DetachedReader {
+    /// Read and deserialize, parsing raw records with `codec`.
     fn read_as_detached<T: DeserializeOwned + Send + 'static>(
         &mut self,
         from: &Path,
@@ -30,15 +38,6 @@ pub trait DetachedTypedReader: DetachedReader {
     ) -> DetachedFuture<Option<T>> {
         self.read_as_detached(from, Arc::new(structfs_core_store::NoCodec))
     }
-
-    fn read_json_detached(
-        &mut self,
-        from: &Path,
-        codec: Arc<dyn Codec>,
-    ) -> DetachedFuture<Option<serde_json::Value>> {
-        let operation = self.read_as_detached::<structfs_core_store::Value>(from, codec);
-        Box::pin(async move { operation.await?.map(crate::value_to_json).transpose() })
-    }
 }
 impl<R: DetachedReader + ?Sized> DetachedTypedReader for R {}
 
@@ -46,7 +45,9 @@ impl<R: DetachedReader + ?Sized> DetachedTypedReader for R {}
 /// conversion constructs no store operation. The returned future borrows neither
 /// the input nor the store; creating a successful operation may have effects.
 pub trait DetachedTypedWriter: DetachedWriter {
-    fn write_as_detached<T: Serialize + ?Sized>(
+    /// Serialize and write. As in the other flavours there is no codec-taking
+    /// counterpart: a typed write always produces a parsed record.
+    fn write_typed_detached<T: Serialize + ?Sized>(
         &mut self,
         to: &Path,
         data: &T,
@@ -55,18 +56,6 @@ pub trait DetachedTypedWriter: DetachedWriter {
             Ok(value) => self.write_detached(to, Record::parsed(value)),
             Err(error) => Box::pin(async move { Err(error) }),
         }
-    }
-
-    fn write_typed_detached<T: Serialize + ?Sized>(
-        &mut self,
-        to: &Path,
-        data: &T,
-    ) -> DetachedFuture<Path> {
-        self.write_as_detached(to, data)
-    }
-
-    fn write_json_detached(&mut self, to: &Path, data: serde_json::Value) -> DetachedFuture<Path> {
-        self.write_as_detached(to, &data)
     }
 }
 impl<W: DetachedWriter + ?Sized> DetachedTypedWriter for W {}

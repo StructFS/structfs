@@ -48,9 +48,14 @@ There is no server-side read position. Every reader tracks its own
 offset, so many readers can consume one stream independently, and a
 retry re-reads the same range idempotently.
 
-## Reference implementation
+## Implementing it
 
-`structfs_handles::ByteStream` implements the buffer: `push`/`close` on
-the producer side; `read_at` (parking), `read_at_cancellable`, and
-`snapshot_at` (non-blocking) on the consumer side. Serve it under a
-handle store and the paths above are a thin match statement.
+This page specifies a path convention, not a type. Through 0.4,
+`structfs_handles::ByteStream` was a reference buffer for it; it had no
+callers and was removed in 0.5. Build the buffer from
+`structfs_handles::Gate` (park a ranged read until bytes past its offset
+exist or the stream closes, with `wait_until_cancellable` for the
+release rule) and serve it under a `HandleStore`; the paths above are
+then a thin match statement. For a *consuming* connection buffer rather
+than a replayable history, use `DuplexStream` — see
+[duplex-stream.md](duplex-stream.md).

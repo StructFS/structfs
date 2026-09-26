@@ -18,11 +18,10 @@ async fn prepared_driver_reports_fuel_and_memory_on_success_and_trap() {
                 (drop (memory.grow (i32.const 1))) {tail} (i32.const 0)))"#
         );
         let code = Arc::new(engine.prepare(wat.into_bytes()).await.unwrap());
-        let mut runtime = Runtime::new().with_metering(Metering {
-            fuel: Some(1000000),
-            ..Metering::default()
-        });
-        runtime.register_core_artifact("metered", code);
+        let mut config = RuntimeConfig::new(tokio::runtime::Handle::current())
+            .with_metering(Metering::with_fuel(1000000));
+        config.register_core_artifact("metered", code);
+        let runtime = Runtime::new(config);
         let def = AssemblyDef::from_str(
             r#"{"assembly":"metered","blocks":{"a":"metered"},"public":"a"}"#,
         )
@@ -33,7 +32,7 @@ async fn prepared_driver_reports_fuel_and_memory_on_success_and_trap() {
         tokio::time::timeout(Duration::from_secs(2), assembly.wait_public_terminal())
             .await
             .unwrap();
-        let usage = assembly.public_cell().usage.snapshot();
+        let usage = assembly.public_cell().usage();
         assert_eq!(
             usage.linear_memory_bytes,
             Some(0),
@@ -54,7 +53,7 @@ async fn prepared_driver_reports_fuel_and_memory_on_success_and_trap() {
                 BlockState::Stopped
             }
         );
-        assembly.shutdown(Duration::ZERO).await;
+        assert!(assembly.shutdown(Duration::from_secs(2)).await.complete());
         assert_eq!(runtime.registered_blocks(), 0);
     }
 }
@@ -73,8 +72,9 @@ impl WasmBlockDriver for PanicDriver {
 }
 #[tokio::test]
 async fn adapter_panic_is_terminal_and_reclaimable() {
-    let mut runtime = Runtime::new();
-    runtime.register_artifact("panic", Arc::new(PanicDriver));
+    let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+    config.register_artifact("panic", Arc::new(PanicDriver));
+    let runtime = Runtime::new(config);
     let def = AssemblyDef::from_str(r#"{"assembly":"panic","blocks":{"a":"panic"},"public":"a"}"#)
         .unwrap();
     let assembly = runtime
@@ -84,6 +84,6 @@ async fn adapter_panic_is_terminal_and_reclaimable() {
         .await
         .unwrap();
     assert_eq!(assembly.public_cell().state(), BlockState::Failed);
-    assembly.shutdown(Duration::ZERO).await;
+    assert!(assembly.shutdown(Duration::from_secs(2)).await.complete());
     assert_eq!(runtime.registered_blocks(), 0);
 }

@@ -53,10 +53,15 @@ test("recording links session entries into the transcript", async () => {
   const guest = await instantiate(wasm, tapped);
   assert.equal(guest.run(), 0);
 
-  // Five operations, each linked to its transcript index in order.
+  // Seven operations (the invalid path never reaches the store), each
+  // linked to its transcript index in order, refusals labelled by kind.
   assert.deepEqual(
     session.entries.map((e) => e.entry),
-    [0, 1, 2, 3, 4],
+    [0, 1, 2, 3, 4, 5, 6],
+  );
+  assert.deepEqual(
+    session.entries.map((e) => e.outcome).filter((o) => o.startsWith("failed:")),
+    ["failed:permission_denied", "failed:resource_limit", "failed:invalid_argument"],
   );
   // The join holds: the linked transcript entry is the same operation.
   for (const witnessed of session.entries) {

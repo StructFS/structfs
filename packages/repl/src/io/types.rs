@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// A line of input from the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InputLine {
     pub line: String,
 }
@@ -13,6 +14,7 @@ pub struct InputLine {
 /// A signal from the host (Ctrl+C, Ctrl+D, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "signal", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Signal {
     /// User pressed Ctrl+C (interrupt).
     Interrupt,
@@ -22,6 +24,7 @@ pub enum Signal {
 
 /// Output to be written by the REPL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Output {
     pub text: String,
     #[serde(default)]
@@ -61,6 +64,7 @@ impl Output {
 /// Style hint for output rendering.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum OutputStyle {
     /// Normal output (already contains ANSI codes if applicable).
     #[default]
@@ -75,6 +79,7 @@ pub enum OutputStyle {
 
 /// Prompt configuration sent from core to host.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PromptConfig {
     /// Number of active mounts.
     pub mount_count: usize,
@@ -84,6 +89,7 @@ pub struct PromptConfig {
 
 /// Reason the REPL exited.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExitReason {
     /// User typed 'exit' or 'quit'.
     UserExit,

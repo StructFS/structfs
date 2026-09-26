@@ -6,7 +6,25 @@ use crate::DecodeError;
 
 /// Decode a Namecode string back to Unicode.
 ///
-/// Returns `Err(NotEncoded)` if input doesn't have the `_N_` prefix.
+/// Accepts exactly the *canonical* encodings — the strings [`encode_forced`]
+/// can produce — and nothing else. Any other input is rejected:
+///
+/// - `Err(NotEncoded)` if the input does not have the `_N_` prefix, or has
+///   the prefix but is structurally not an encoding at all.
+/// - `Err(InvalidDigit)` for a character outside the base-32 alphabet. The
+///   alphabet is lowercase-only, so `_N_helloworld__FA0B` is rejected even
+///   though `_N_helloworld__fa0b` decodes fine: a value must not have two
+///   spellings.
+/// - `Err(NonCanonical)` if the input parses but re-encoding the result does
+///   not reproduce it byte for byte (a redundant delimiter, say).
+///
+/// Rejecting non-canonical spellings is what makes the forced encoding a
+/// bijection: every value has exactly one encoding, so
+/// `encode_forced(decode(t)) == t` for every `t` this function accepts.
+/// (`encode(decode(t))` may differ from `t`: `decode("_N_foo")` is `"foo"`,
+/// which `encode` passes through unchanged.)
+///
+/// [`encode_forced`]: crate::encode_forced
 ///
 /// # Examples
 ///
@@ -15,11 +33,29 @@ use crate::DecodeError;
 ///
 /// assert_eq!(decode("_N_helloworld__fa0b").unwrap(), "hello world");
 /// assert_eq!(decode("_N_foobar__da1d").unwrap(), "foo-bar");
+/// assert_eq!(decode("_N_").unwrap(), "");
 ///
 /// // Strings without the _N_ prefix are not valid encodings
 /// assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
+/// // Neither are non-canonical spellings of a valid one
+/// assert_eq!(decode("_N_helloworld__FA0B"), Err(DecodeError::InvalidDigit('F')));
+/// assert_eq!(decode("_N___"), Err(DecodeError::NonCanonical));
 /// ```
 pub fn decode(input: &str) -> Result<String, DecodeError> {
+    let decoded = decode_raw(input)?;
+
+    // Canonicality: an encoding is only valid if it is *the* encoding of the
+    // value it decodes to. Without this check the decoder would accept
+    // several spellings per value and `encode` would not be injective.
+    if crate::encode::encode_forced(&decoded) != input {
+        return Err(DecodeError::NonCanonical);
+    }
+
+    Ok(decoded)
+}
+
+/// Parse an encoding without checking that it is the canonical one.
+fn decode_raw(input: &str) -> Result<String, DecodeError> {
     // Check for prefix
     if !input.starts_with(PREFIX) {
         return Err(DecodeError::NotEncoded);
@@ -38,11 +74,11 @@ pub fn decode(input: &str) -> Result<String, DecodeError> {
         // Reconstruct the original string
         reconstruct(basic, &insertions)
     } else {
-        // No delimiter - just basic chars (encoded because of prefix collision or digit start).
-        // All characters must be XID_Continue since encode_impl only puts XID_Continue
-        // characters in the basic portion.
-        if without_prefix.is_empty() || !without_prefix.chars().all(unicode_ident::is_xid_continue)
-        {
+        // No delimiter - just basic chars (encoded because of prefix collision,
+        // a digit start, or the empty string). All characters must be
+        // XID_Continue since encode_impl only puts XID_Continue characters in
+        // the basic portion.
+        if !without_prefix.chars().all(unicode_ident::is_xid_continue) {
             return Err(DecodeError::NotEncoded);
         }
         Ok(without_prefix.to_string())
@@ -151,70 +187,43 @@ fn reconstruct(basic: &str, insertions: &[(usize, char)]) -> Result<String, Deco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::encode;
+
+    // Round-trip and contract behaviour live in the crate-root test module;
+    // these cover decoder internals and rejection of malformed input.
 
     #[test]
-    fn test_decode_not_encoded() {
+    fn test_decode_structural_forms() {
+        // No prefix at all
         assert_eq!(decode("foo"), Err(DecodeError::NotEncoded));
-        assert_eq!(decode("hello world"), Err(DecodeError::NotEncoded));
-    }
-
-    #[test]
-    fn test_decode_simple_prefix() {
-        // Just prefix, no delimiter
+        // Prefix, no delimiter: the whole tail is basic
         assert_eq!(decode("_N_foo"), Ok("foo".to_string()));
+        // Bare prefix is the encoding of the empty string
+        assert_eq!(decode("_N_"), Ok(String::new()));
     }
 
     #[test]
-    fn test_decode_empty_basic_with_delimiter() {
-        // Prefix with delimiter but empty basic portion
-        let result = decode("_N___");
-        // Should decode to whatever the encoded portion represents
-        assert!(result.is_ok() || matches!(result, Err(DecodeError::UnexpectedEnd)));
+    fn test_decode_rejects_non_xid_basic() {
+        // A '-' can never appear in a basic portion the encoder produced.
+        assert_eq!(decode("_N_a-b"), Err(DecodeError::NotEncoded));
     }
 
     #[test]
-    fn test_roundtrip_simple() {
-        let original = "hello world";
-        let encoded = encode(original);
-        let decoded = decode(&encoded);
-        assert_eq!(decoded, Ok(original.to_string()));
+    fn test_decode_rejects_non_canonical() {
+        // Parses to "" (empty basic, empty insertion list) but the canonical
+        // encoding of "" is "_N_", not "_N___".
+        assert_eq!(decode_raw("_N___"), Ok(String::new()));
+        assert_eq!(decode("_N___"), Err(DecodeError::NonCanonical));
     }
 
     #[test]
-    fn test_roundtrip_hyphen() {
-        let original = "foo-bar";
-        let encoded = encode(original);
-        let decoded = decode(&encoded);
-        assert_eq!(decoded, Ok(original.to_string()));
-    }
-
-    #[test]
-    fn test_roundtrip_multiple_non_basic() {
-        let original = "a b-c";
-        let encoded = encode(original);
-        let decoded = decode(&encoded);
-        assert_eq!(decoded, Ok(original.to_string()));
-    }
-
-    #[test]
-    fn test_double_underscore_passthrough() {
-        // foo__bar is valid XID and doesn't start with _N_, so it passes through
-        let original = "foo__bar";
-        let encoded = encode(original);
-        assert_eq!(encoded, original); // passthrough
-                                       // decode fails since it's not encoded
-        assert_eq!(decode(&encoded), Err(crate::DecodeError::NotEncoded));
-    }
-
-    #[test]
-    fn test_roundtrip_prefix_collision() {
-        let original = "_N_test";
-        let encoded = encode(original);
-        assert!(encoded.starts_with(PREFIX));
-        assert_ne!(encoded, original);
-        let decoded = decode(&encoded);
-        assert_eq!(decoded, Ok(original.to_string()));
+    fn test_decode_rejects_uppercase_digits() {
+        // The encoder only ever emits lowercase digits, so the uppercase
+        // spelling of a real encoding is not itself an encoding.
+        assert_eq!(decode("_N_helloworld__fa0b"), Ok("hello world".to_string()));
+        assert_eq!(
+            decode("_N_helloworld__FA0B"),
+            Err(DecodeError::InvalidDigit('F'))
+        );
     }
 
     #[test]

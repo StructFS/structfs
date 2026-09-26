@@ -28,11 +28,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use structfs_core_store::{DetachedFuture, Error, Path, Record, Value};
+use structfs_core_store::{path, DetachedFuture, Error, Path, Record, Value};
 use structfs_handles::{CancelToken, HandleCx, HandleProtocol, HandleStore};
+use structfs_service::OwnerLimits;
 
 use crate::assembly::AssemblyDef;
-use crate::namespace::{GrantStore, HostStore, WiringTable};
+use crate::namespace::{GrantStore, HostInner, HostStore, WiringTable};
 use crate::runtime::{AssemblyInstance, RuntimeInner};
 
 /// A spawn/management store: `HandleStore` over [`SpawnProtocol`].
@@ -97,8 +98,7 @@ impl SpawnProtocol {
         };
         let mut imports = HashMap::new();
         for (name, raw_path) in grants {
-            let path = Path::parse(&raw_path)
-                .map_err(|e| Error::store("proc", "spawn", format!("bad grant path: {e}")))?;
+            let path = Path::parse(&raw_path)?;
             // A block can only delegate what it holds: the grant must
             // resolve inside its own wired namespace.
             let Some((target, rel, _prefix)) = wiring.resolve(&path) else {
@@ -108,11 +108,11 @@ impl SpawnProtocol {
             };
             imports.insert(
                 name,
-                HostStore::Grant(Arc::new(GrantStore::new(
+                HostStore(HostInner::Grant(Arc::new(GrantStore::new(
                     runtime.ctx(),
                     target.clone(),
                     rel,
-                ))),
+                )))),
             );
         }
         Ok(imports)
@@ -135,11 +135,15 @@ impl HandleProtocol for SpawnProtocol {
             .ok_or_else(|| Error::overloaded("runtime is shutting down"))?;
         let (definition, grants) = Self::parse_request(&request);
         let def = AssemblyDef::from_value(&definition)
-            .map_err(|e| Error::store("proc", "spawn", e.to_string()))?;
+            .map_err(|e| Error::invalid_argument(e.to_string()))?;
         let imports = self.resolve_grants(&runtime, grants)?;
         let instance = runtime
             .instantiate(&def, imports, &self.base_dir)
-            .map_err(|e| Error::store("proc", "spawn", e.to_string()))?;
+            .map_err(|e| match e {
+                crate::RuntimeError::Store(error) => error,
+                crate::RuntimeError::Assembly(message) => Error::invalid_argument(message),
+                other => Error::store("proc", "spawn", other.to_string()),
+            })?;
         Ok(SpawnedAssembly {
             instance,
             cancel: cx.cancel,
@@ -186,13 +190,11 @@ impl HandleProtocol for SpawnProtocol {
                 let value = data.into_value(&structfs_core_store::NoCodec)?;
                 let result = handle.instance.write(rel, value).await?;
                 // Result paths come back in the handle's namespace.
-                return Ok(Path::parse("store").unwrap().join(&result));
+                return Ok(path!("store").join(&result));
             }
-            Err(Error::store(
-                "proc",
-                "write",
-                format!("spawn handles accept writes only under 'store/': {}", sub),
-            ))
+            Err(Error::permission_denied(format!(
+                "spawn handles accept writes only under 'store/': {sub}"
+            )))
         })
     }
 
@@ -200,11 +202,52 @@ impl HandleProtocol for SpawnProtocol {
         // kill(2): release triggers shutdown. Request graceful shutdown
         // synchronously — parked blocks unblock even if the runtime is
         // torn down before the escalation task runs — then escalate
-        // off-thread (close itself is synchronous).
+        // off-thread (close itself is synchronous). The escalation is
+        // supervised by the runtime's cleanup supervisor, so it is joined
+        // and an unclean shutdown is counted as a failure there
+        // (`Runtime::cleanup_supervisor().reports()`), not dropped.
         handle.instance.request_shutdown();
         let instance = handle.instance.clone();
-        self.handle.spawn(async move {
-            instance.shutdown(Duration::from_secs(5)).await;
+        let escalate = move |_cancel| async move {
+            let report = instance.shutdown(SPAWNED_SHUTDOWN_TIMEOUT).await;
+            if report.complete() {
+                return Ok(());
+            }
+            tracing::warn!(
+                assembly = %instance.name,
+                remaining = report.remaining.len(),
+                "a released spawn handle's assembly did not stop cleanly"
+            );
+            Err(Error::deadline_exceeded(format!(
+                "spawned assembly '{}' left {} blocks unjoined",
+                instance.name,
+                report.remaining.len()
+            )))
+        };
+        let supervised = self.runtime.upgrade().and_then(|runtime| {
+            runtime
+                .ctx()
+                .cleanup()
+                .owner(OwnerLimits::default().with_resources(1))
+                .ok()
         });
+        match supervised {
+            // Dropping the owner closes its admissions; the supervisor keeps
+            // the escalation task and its outcome until it finishes.
+            Some(owner) => {
+                if let Err(error) = owner.handle().spawn(escalate) {
+                    tracing::warn!(%error, "could not supervise a spawned assembly's shutdown");
+                }
+            }
+            None => {
+                // The runtime is gone; nothing is left to report to.
+                self.handle.spawn(async move {
+                    let _ = escalate(CancelToken::new()).await;
+                });
+            }
+        }
     }
 }
+
+/// How long a released spawn handle's assembly gets to stop.
+const SPAWNED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);

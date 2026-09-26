@@ -200,7 +200,7 @@ foo-bar <span class="ex-result">→ _N_foobar__da1d</span> <span class="ex-resul
 :::
 
 ::: concept-prose
-The encoding is reversible, deterministic, and idempotent. Strings that are already valid identifiers pass through unchanged; most path components in practice never get encoded at all. But when a path component comes from user input, an external system, or any source that might contain spaces, punctuation, or emoji, namecode guarantees it survives the round trip through every language boundary in the system.
+The encoding is reversible and deterministic: decoding always recovers the exact original string. Strings that are already valid identifiers pass through unchanged, except those that begin with the `_N_` prefix, which are always encoded so they cannot be mistaken for an encoding; most path components in practice never get encoded at all. But when a path component comes from user input, an external system, or any source that might contain spaces, punctuation, or emoji, namecode guarantees it survives the round trip through every language boundary in the system.
 {.concept-detail}
 
 This is the same role URL encoding plays for REST. Without it, HTTP URLs would break the moment they crossed a context boundary. Namecode gives StructFS paths the same guarantee: any path, any language, any store.

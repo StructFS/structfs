@@ -1,8 +1,8 @@
 # Consumer contract validation — 2026-09-13
 
 The checkout targets **0.3.0, unreleased**. The Ox feedback work is tracked in
-[consumer contract completion](../plans/01-consumer-contracts.md), with API and
-compatibility decisions in [the migration guide](migration-0.3.md).
+[consumer contract completion](plans/01-consumer-contracts.md), with API and
+compatibility decisions in [the migration guide](../migration-0.3.md).
 
 Validated locally on macOS with Rust 1.96.0:
 
@@ -64,4 +64,4 @@ release gates passed. Nothing published or tagged.”
   unyanked Namecode 0.1.1 publication.
 
 The release is prepared for the deliberate publication step documented in
-[the release procedure](releasing.md). That step will check registry state again.
+[the release procedure](../releasing.md). That step will check registry state again.

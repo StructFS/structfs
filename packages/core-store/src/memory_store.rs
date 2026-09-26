@@ -49,14 +49,15 @@ impl MemoryStore {
 
     /// Construct a snapshot without replaying writes. Null and empty containers
     /// are preserved, including a present Null root. Duplicate paths and explicit
-    /// ancestor/descendant overlaps are rejected independent of input order.
-    /// Implicit parents are maps; numeric components do not infer arrays.
+    /// ancestor/descendant overlaps are rejected (`InvalidArgument`) independent
+    /// of input order. Implicit parents are maps; numeric components do not
+    /// infer arrays.
     pub fn from_entries(entries: impl IntoIterator<Item = (Path, Value)>) -> Result<Self, Error> {
         let mut entries: Vec<_> = entries.into_iter().collect();
         entries.sort_by(|(a, _), (b, _)| a.iter().cmp(b.iter()));
         for pair in entries.windows(2) {
             if pair[1].0.has_prefix(&pair[0].0) {
-                return Err(Error::conflict(format!(
+                return Err(Error::invalid_argument(format!(
                     "snapshot paths overlap: '{}' and '{}'",
                     pair[0].0, pair[1].0
                 )));
@@ -100,7 +101,7 @@ impl Reader for MemoryStore {
         limit: usize,
     ) -> Result<Option<crate::ChildPage>, Error> {
         if limit == 0 {
-            return Err(Error::conflict("child page limit must be positive"));
+            return Err(Error::invalid_argument("child page limit must be positive"));
         }
         let Some(value) = self.root.as_ref().and_then(|root| root.get(from)) else {
             return Ok(None);
@@ -111,7 +112,7 @@ impl Reader for MemoryStore {
             _ => 0,
         };
         if offset > len {
-            return Err(Error::conflict("child cursor past end"));
+            return Err(Error::invalid_argument("child cursor past end"));
         }
         let end = offset.saturating_add(limit).min(len);
         let names = match value {
@@ -119,10 +120,10 @@ impl Reader for MemoryStore {
             Value::Array(_) => (offset..end).map(|n| n.to_string()).collect(),
             _ => Vec::new(),
         };
-        Ok(Some(crate::ChildPage {
+        Ok(Some(crate::ChildPage::new(
             names,
-            next: (end < len).then_some(end),
-        }))
+            (end < len).then_some(end),
+        )))
     }
 
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
@@ -130,11 +131,7 @@ impl Reader for MemoryStore {
             .root
             .as_ref()
             .and_then(|root| root.get(from))
-            .map(|v| match v {
-                Value::Map(map) => map.keys().cloned().collect(),
-                Value::Array(arr) => (0..arr.len()).map(|i| i.to_string()).collect(),
-                _ => Vec::new(),
-            }))
+            .map(crate::children::names_of_value))
     }
 }
 
@@ -246,6 +243,26 @@ mod tests {
             .write(&path!(""), Record::parsed(Value::Null))
             .unwrap();
         assert!(store.read(&path!("")).unwrap().is_none());
+    }
+
+    #[test]
+    fn paging_argument_errors_are_invalid_argument() {
+        let mut store = MemoryStore::new();
+        store
+            .write(&path!("m/a"), Record::parsed(Value::from(1i64)))
+            .unwrap();
+        assert!(matches!(
+            store.read_children_page(&path!("m"), 0, 0),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            store.read_children_page(&path!("m"), 2, 1),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            MemoryStore::from_entries([(path!("a"), Value::Null), (path!("a/b"), Value::Null)]),
+            Err(Error::InvalidArgument { .. })
+        ));
     }
 
     #[test]

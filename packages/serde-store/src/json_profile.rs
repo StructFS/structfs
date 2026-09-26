@@ -1,4 +1,4 @@
-use crate::limits::{ensure, Budget, Failure, Limits, Result};
+use crate::limits::{ensure, Budget, Failure, Limits, Result, DEPTH_CEILING};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::collections::BTreeMap;
 use structfs_core_store::{CodecErrorKind as K, Value};
@@ -68,7 +68,12 @@ impl<'a> Parser<'a, '_> {
             .map_err(|_| Failure::new(K::InvalidUnicode))
     }
     fn value(&mut self, depth: usize) -> Result<Json<'a>> {
-        // A hard stack ceiling is independent of caller-configured semantic depth.
+        // Syntax depth, bounded by the caller's semantic `max_depth` (scaled:
+        // tagged JSON spends up to three array levels per semantic level) and
+        // by the hard `DEPTH_CEILING` on parser recursion, which is what keeps
+        // this off the end of the stack. The tagged encoder refuses anything
+        // deeper than `TAGGED_DEPTH_CEILING`, so it never writes a document
+        // this ceiling would reject.
         let max = if self.tagged {
             self.budget
                 .limits
@@ -78,7 +83,7 @@ impl<'a> Parser<'a, '_> {
         } else {
             self.budget.limits.max_depth
         };
-        ensure(depth <= max.min(256), K::ResourceLimit)?;
+        ensure(depth <= max.min(DEPTH_CEILING), K::ResourceLimit)?;
         self.budget.allocate(128)?;
         self.budget.work(1)?;
         self.ws();
@@ -266,15 +271,21 @@ fn string(j: Json<'_>) -> Result<String> {
 }
 fn tagged(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
     b.node(depth)?;
-    let a = array(j)?;
-    let mut iter = a.into_iter();
-    let tag = string(iter.next().ok_or(Failure::new(K::InvalidNode))?)?;
+    // A tagged node is exactly `["null"]` or `["<tag>", <payload>]`. Matching
+    // the arity up front means no later step has to assume an element is
+    // there.
+    let (tag, payload) = match <[Json; 2]>::try_from(array(j)?) {
+        Ok([tag, payload]) => (string(tag)?, Some(payload)),
+        Err(rest) => match <[Json; 1]>::try_from(rest) {
+            Ok([tag]) => (string(tag)?, None),
+            Err(_) => return Err(Failure::new(K::InvalidNode)),
+        },
+    };
     if tag == "null" {
-        ensure(iter.next().is_none(), K::InvalidNode)?;
+        ensure(payload.is_none(), K::InvalidNode)?;
         return Ok(Value::Null);
     }
-    let x = iter.next().ok_or(Failure::new(K::InvalidNode))?;
-    ensure(iter.next().is_none(), K::InvalidNode)?;
+    let x = payload.ok_or(Failure::new(K::InvalidNode))?;
     Ok(match tag.as_str() {
         "bool" => {
             if let Json::Bool(v) = x {
@@ -340,14 +351,13 @@ fn tagged(j: Json<'_>, b: &mut Budget<'_>, depth: usize) -> Result<Value> {
             b.entries(a.len())?;
             let mut m = BTreeMap::new();
             for p in a {
-                let pair = array(p)?;
-                ensure(pair.len() == 2, K::InvalidNode)?;
-                let mut pair = pair.into_iter();
-                let k = string(pair.next().unwrap())?;
+                let [key, value] =
+                    <[Json; 2]>::try_from(array(p)?).map_err(|_| Failure::new(K::InvalidNode))?;
+                let k = string(key)?;
                 b.payload(k.len(), false)?;
                 b.key_work(k.len(), m.len() + 1)?;
                 ensure(!m.contains_key(&k), K::DuplicateKey)?;
-                m.insert(k, tagged(pair.next().unwrap(), b, depth + 1)?);
+                m.insert(k, tagged(value, b, depth + 1)?);
             }
             Value::Map(m)
         }
@@ -370,19 +380,16 @@ pub(crate) fn decode(input: &[u8], limits: &Limits, is_tagged: bool) -> Result<V
     if !is_tagged {
         return plain(j, &mut p.budget, 0);
     }
-    let envelope = array(j)?;
-    ensure(envelope.len() == 3, K::InvalidNode)?;
-    let mut e = envelope.into_iter();
-    ensure(
-        string(e.next().unwrap())? == "structfs-value",
-        K::InvalidNode,
-    )?;
-    let Json::Number(version) = e.next().unwrap() else {
+    // The envelope is exactly `["structfs-value", <version>, <body>]`.
+    let [tag, version, body] =
+        <[Json; 3]>::try_from(array(j)?).map_err(|_| Failure::new(K::InvalidNode))?;
+    ensure(string(tag)? == "structfs-value", K::InvalidNode)?;
+    let Json::Number(version) = version else {
         return Err(Failure::new(K::InvalidNode));
     };
     ensure(!version.contains(['.', 'e', 'E']), K::InvalidNode)?;
     ensure(version == "1", K::UnsupportedVersion)?;
-    tagged(e.next().unwrap(), &mut p.budget, 0)
+    tagged(body, &mut p.budget, 0)
 }
 
 pub(crate) struct Output<'a> {
@@ -398,6 +405,13 @@ impl<'a> Output<'a> {
             budget: Budget::new(limits),
         }
     }
+    /// Append encoded bytes, charging them to every applicable bound.
+    ///
+    /// The document length is checked against `max_output_bytes` (the thing it
+    /// actually is) and against `max_allocation_bytes` (the buffer holding it
+    /// is a single allocation of that size). It is deliberately *not* checked
+    /// against `max_work`: work is an abstract effort counter in different
+    /// units, and `budget.work` below already charges these bytes to it.
     pub fn put(&mut self, s: &[u8]) -> Result<()> {
         let n = self
             .bytes
@@ -405,9 +419,7 @@ impl<'a> Output<'a> {
             .checked_add(s.len())
             .ok_or(Failure::new(K::ResourceLimit))?;
         ensure(
-            n <= self.limits.max_output_bytes
-                && n <= self.limits.max_allocation_bytes
-                && n <= self.limits.max_work,
+            n <= self.limits.max_output_bytes && n <= self.limits.max_allocation_bytes,
             K::ResourceLimit,
         )?;
         self.budget.work(s.len())?;
@@ -535,8 +547,18 @@ impl<'a> Output<'a> {
         Ok(())
     }
 }
+/// The deepest value tagged JSON can carry. A leaf at semantic depth `d`
+/// sits at syntax depth `3d + 2` (node, entry list and pair array per map
+/// level, inside the envelope), and the decoder refuses syntax deeper than
+/// `DEPTH_CEILING`.
+pub(crate) const TAGGED_DEPTH_CEILING: usize = (DEPTH_CEILING - 2) / 3;
+
 pub(crate) fn encode(v: &Value, limits: &Limits, tagged: bool) -> Result<Vec<u8>> {
     let mut out = Output::new(limits);
+    if tagged {
+        // Refuse here what the decoder would refuse on the way back in.
+        ensure(depth_within(v, TAGGED_DEPTH_CEILING), K::ResourceLimit)?;
+    }
     out.budget.tree(v, 0)?;
     if tagged {
         out.put(b"[\"structfs-value\",1,")?;
@@ -546,4 +568,14 @@ pub(crate) fn encode(v: &Value, limits: &Limits, tagged: bool) -> Result<Vec<u8>
         out.put(b"]")?;
     }
     Ok(out.bytes)
+}
+
+/// Whether `v` nests no deeper than `max` container levels. Stops descending
+/// as soon as the answer is known, so it recurses at most `max + 1` deep.
+fn depth_within(v: &Value, max: usize) -> bool {
+    match v {
+        Value::Array(items) => max > 0 && items.iter().all(|v| depth_within(v, max - 1)),
+        Value::Map(entries) => max > 0 && entries.values().all(|v| depth_within(v, max - 1)),
+        _ => true,
+    }
 }

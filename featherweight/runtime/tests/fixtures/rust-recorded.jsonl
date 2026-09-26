@@ -1,5 +1,7 @@
-{"answer":{"found":{"parsed":"c3ae340f-c251-4207-af05-f999b49ef4eb"}},"op":"read","path":"iso/random/uuid"}
-{"answer":{"found":{"parsed":1788924327954169000}},"op":"read","path":"iso/time/now_unix_ns"}
+{"answer":{"found":{"parsed":"ed9d206e-beec-4cf4-b72c-07a5021cecb7"}},"op":"read","path":"iso/random/uuid"}
+{"answer":{"found":{"parsed":1790302661593005000}},"op":"read","path":"iso/time/now_unix_ns"}
 {"answer":{"failed":{"kind":"permission_denied","message":"path is not wired into this namespace: secrets"}},"op":"read","path":"secrets"}
+{"answer":{"failed":{"kind":"resource_limit","message":"random/bytes limited to 1MiB"}},"op":"read","path":"iso/random/bytes/2000000"}
+{"answer":{"failed":{"kind":"invalid_argument","message":"time/after: bad duration"}},"op":"read","path":"iso/time/after/soon"}
 {"answer":{"wrote":"iso/stdio/stdout"},"op":"write","path":"iso/stdio/stdout","wrote":"a528605174a7fbcb"}
 {"answer":{"wrote":"iso/log/info"},"op":"write","path":"iso/log/info","wrote":"b91af0fe0713a16f"}

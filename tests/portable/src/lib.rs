@@ -1,9 +1,10 @@
 //! Browser-shared application schema and cancellation, built independently of
-//! native workspace dependencies. Native hosts opt into their executor features.
+//! native workspace dependencies through the facade's portable features.
+//! Native hosts opt into their executor features.
 use store_core::{path, DetachedFuture, MemoryStore, Path, Shared};
-use structfs::{DetachedTypedReader, DetachedTypedWriter};
-use structfs_handles::CancelToken;
-use structfs_http::{HttpRequest, HttpResponse};
+use structfs::handles::CancelToken;
+use structfs::net::{HttpRequest, HttpResponse};
+use structfs::typed::{DetachedTypedReader, DetachedTypedWriter};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -15,7 +16,7 @@ pub struct Settings {
 
 pub fn independent_operations() -> (DetachedFuture<Path>, DetachedFuture<Option<i64>>) {
     let mut store = Shared::new(MemoryStore::new());
-    let write = store.write_as_detached(&path!("setting"), &1i64);
+    let write = store.write_typed_detached(&path!("setting"), &1i64);
     let read = store.read_typed_detached(&path!("setting"));
     (write, read)
 }
@@ -25,8 +26,8 @@ pub async fn cancellation(cancel: CancelToken) {
 }
 
 #[cfg(feature = "native")]
-pub fn native_client() -> Result<structfs_http::HttpClientStore, structfs_http::Error> {
-    structfs_http::HttpClientStore::new("https://example.com")
+pub fn native_client() -> Result<structfs::net::HttpClientStore, structfs::net::Error> {
+    structfs::net::HttpClientStore::new("https://example.com")
 }
 
 // Macro expansion follows its defining crate even through a renamed dependency

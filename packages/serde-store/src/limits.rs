@@ -2,19 +2,53 @@
 use std::fmt;
 use structfs_core_store::{CodecErrorKind as Kind, CodecOperation, Error, Format, Value};
 
+/// The absolute nesting ceiling, independent of any caller-configured
+/// [`Limits::max_depth`]. It bounds recursion in the decoders, which use the
+/// native stack, so no configuration can make a deep document overflow it.
+pub(crate) const DEPTH_CEILING: usize = 256;
+
 /// Inclusive bounds. Work counts traversed nodes and bytes, plus collection sorting
 /// estimates. Allocation counts conservative reservations, not allocator metadata.
+///
+/// Build one by adjusting the default rather than by struct literal — the type
+/// is `#[non_exhaustive]`, so new bounds can be added without a breaking
+/// change:
+///
+/// ```
+/// use structfs_serde_store::Limits;
+///
+/// let limits = Limits::default().with_max_depth(8).with_max_input_bytes(4096);
+/// assert_eq!(limits.max_depth, 8);
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Limits {
+    /// Largest document accepted by a decoder.
     pub max_input_bytes: usize,
+    /// Largest document produced by an encoder.
     pub max_output_bytes: usize,
+    /// Deepest nesting accepted, counted in container levels. Values above a
+    /// hard ceiling have no effect: the decoders recurse on the native stack
+    /// and refuse anything deeper regardless of configuration. The ceiling
+    /// is 256 for plain JSON, CBOR and FlexBuffers, and 84 for tagged Value
+    /// JSON, which spends up to three syntax levels per value level; the
+    /// tagged encoder refuses anything deeper, so it never writes a document
+    /// its decoder cannot read.
     pub max_depth: usize,
+    /// Most values traversed in one operation.
     pub max_nodes: usize,
+    /// Most entries in any single array or map.
     pub max_collection_entries: usize,
+    /// Longest single string, in bytes.
     pub max_string_bytes: usize,
+    /// Longest single byte string.
     pub max_blob_bytes: usize,
+    /// Total string and byte-string payload across one operation.
     pub max_payload_bytes: usize,
+    /// Conservative reservation ceiling; not allocator metadata.
     pub max_allocation_bytes: usize,
+    /// Abstract work ceiling: nodes and bytes traversed, plus collection
+    /// sorting and key-comparison estimates.
     pub max_work: usize,
     /// Output diagnostic byte cap. Custom Serde messages are captured with a
     /// hard 1024-byte ceiling and locations with a 256-byte ceiling. Truncation
@@ -39,6 +73,36 @@ impl Default for Limits {
     }
 }
 
+/// One setter per bound, so `Limits::default().with_…(n)` replaces the struct
+/// literal that `#[non_exhaustive]` no longer allows from outside the crate.
+macro_rules! limit_setters {
+    ($($setter:ident => $field:ident),* $(,)?) => {
+        impl Limits {
+            $(
+                #[doc = concat!("Set [`Limits::", stringify!($field), "`].")]
+                #[must_use]
+                pub fn $setter(mut self, value: usize) -> Self {
+                    self.$field = value;
+                    self
+                }
+            )*
+        }
+    };
+}
+limit_setters! {
+    with_max_input_bytes => max_input_bytes,
+    with_max_output_bytes => max_output_bytes,
+    with_max_depth => max_depth,
+    with_max_nodes => max_nodes,
+    with_max_collection_entries => max_collection_entries,
+    with_max_string_bytes => max_string_bytes,
+    with_max_blob_bytes => max_blob_bytes,
+    with_max_payload_bytes => max_payload_bytes,
+    with_max_allocation_bytes => max_allocation_bytes,
+    with_max_work => max_work,
+    with_max_diagnostic_bytes => max_diagnostic_bytes,
+}
+
 // Serde's Error::custom has no access to caller limits. Capture at most this
 // hard ceiling during formatting, then apply the caller's smaller output cap.
 const DIAGNOSTIC_CAPTURE_BYTES: usize = 1024;
@@ -47,7 +111,10 @@ const DIAGNOSTIC_CAPTURE_BYTES: usize = 1024;
 pub(crate) struct Failure {
     kind: Kind,
     message: String,
-    location: String,
+    /// Path components from outermost to innermost, kept unjoined. Joining on
+    /// every [`Failure::at`] would rebuild the whole prefix once per level,
+    /// which is quadratic in the nesting depth of the failing document.
+    location: std::collections::VecDeque<String>,
 }
 pub(crate) type Result<T> = std::result::Result<T, Failure>;
 
@@ -78,10 +145,14 @@ fn bounded(value: impl fmt::Display, max: usize) -> String {
     let _ = write!(output, "{value}");
     output.text
 }
+/// Maximum location bytes rendered when no caller budget applies.
+const LOCATION_BYTES: usize = 256;
+
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.location.is_empty() {
-            write!(f, "{}: ", self.location)?;
+        let location = self.location_string(LOCATION_BYTES);
+        if !location.is_empty() {
+            write!(f, "{location}: ")?;
         }
         if self.message.is_empty() {
             write!(f, "{:?}", self.kind)
@@ -106,19 +177,40 @@ impl Failure {
         Self {
             kind,
             message: String::new(),
-            location: String::new(),
+            location: std::collections::VecDeque::new(),
         }
     }
     fn diagnostic(message: impl fmt::Display) -> Self {
         Self {
             kind: Kind::TypeMismatch,
             message: bounded(message, DIAGNOSTIC_CAPTURE_BYTES),
-            location: String::new(),
+            location: std::collections::VecDeque::new(),
         }
     }
+    /// Prepend one path component. `at` is called as the error unwinds, so the
+    /// innermost component arrives first and the outermost last; the deque
+    /// keeps them in rendering order at O(1) per level.
     pub(crate) fn at(mut self, component: impl fmt::Display) -> Self {
-        self.location = bounded(format_args!("{component}{}", self.location), 256);
+        if self.location.len() < DEPTH_CEILING {
+            self.location.push_front(bounded(component, LOCATION_BYTES));
+        }
         self
+    }
+    /// Join the location, spending at most `max` bytes. Outermost components
+    /// win: they are the ones that locate the failure for a reader.
+    fn location_string(&self, max: usize) -> String {
+        let mut out = String::new();
+        for part in &self.location {
+            if out.len() >= max {
+                break;
+            }
+            let mut n = part.len().min(max - out.len());
+            while !part.is_char_boundary(n) {
+                n -= 1;
+            }
+            out.push_str(&part[..n]);
+        }
+        out
     }
     pub(crate) fn core(
         mut self,
@@ -127,7 +219,7 @@ impl Failure {
         limits: &Limits,
     ) -> Error {
         // Reserve room for the actual diagnostic even with a very long location.
-        let location = bounded(&self.location, limits.max_diagnostic_bytes / 4);
+        let location = self.location_string(limits.max_diagnostic_bytes / 4);
         self.location.clear();
         let message = if location.is_empty() {
             bounded(format_args!("{}", self), limits.max_diagnostic_bytes)
@@ -182,7 +274,10 @@ impl<'a> Budget<'a> {
         add(&mut self.allocation, n, self.limits.max_allocation_bytes)
     }
     pub fn node(&mut self, depth: usize) -> Result<()> {
-        ensure(depth <= self.limits.max_depth.min(256), Kind::ResourceLimit)?;
+        ensure(
+            depth <= self.limits.max_depth.min(DEPTH_CEILING),
+            Kind::ResourceLimit,
+        )?;
         add(&mut self.nodes, 1, self.limits.max_nodes)?;
         self.allocate(128)?;
         self.work(1)
@@ -233,11 +328,4 @@ impl<'a> Budget<'a> {
         }
         Ok(())
     }
-}
-
-/// Validate an existing value before traversing or cloning it at a trust boundary.
-pub fn validate_value(value: &Value, limits: &Limits) -> std::result::Result<(), Error> {
-    Budget::new(limits)
-        .tree(value, 0)
-        .map_err(|e| e.core(&Format::VALUE, CodecOperation::Encode, limits))
 }

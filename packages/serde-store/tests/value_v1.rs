@@ -35,9 +35,9 @@ fn corpus() -> serde_json::Value {
 fn normative_vectors() {
     let fixture = corpus();
     for (group, profile) in [
-        ("tagged_json", Profile::ValueJson),
-        ("plain_json", Profile::Json),
-        ("cbor", Profile::Cbor),
+        ("tagged_json", CodecProfile::ValueJson),
+        ("plain_json", CodecProfile::Json),
+        ("cbor", CodecProfile::Cbor),
     ] {
         let c = ValueCodec::new(profile);
         let format = profile.format();
@@ -70,7 +70,11 @@ fn normative_vectors() {
                 );
             }
             if group == "tagged_json" {
-                let result = c.clone().canonical().decode(&bytes.clone().into(), &format);
+                let result = c
+                    .clone()
+                    .canonical()
+                    .expect("tagged JSON has a canonical form")
+                    .decode(&bytes.clone().into(), &format);
                 if bytes == canonical {
                     assert!(result.is_ok());
                 } else {
@@ -142,7 +146,11 @@ fn serde_types_and_application_shapes() {
         },
     ] {
         let value = to_value(&view).unwrap();
-        for profile in [Profile::ValueJson, Profile::Cbor, Profile::Flexbuffers] {
+        for profile in [
+            CodecProfile::ValueJson,
+            CodecProfile::Cbor,
+            CodecProfile::Flexbuffers,
+        ] {
             let codec = ValueCodec::new(profile);
             let bytes = codec.encode(&value, &profile.format()).unwrap();
             let decoded = codec.decode(&bytes, &profile.format()).unwrap();
@@ -224,7 +232,11 @@ fn generated_cross_codec_roundtrips() {
         let v = random(&mut seed, 4);
         assert!(to_value(&v).unwrap().semantic_eq(&v));
         assert!(from_value::<Value>(v.clone()).unwrap().semantic_eq(&v));
-        for profile in [Profile::ValueJson, Profile::Cbor, Profile::Flexbuffers] {
+        for profile in [
+            CodecProfile::ValueJson,
+            CodecProfile::Cbor,
+            CodecProfile::Flexbuffers,
+        ] {
             let c = ValueCodec::new(profile);
             let b = c.encode(&v, &profile.format()).unwrap();
             let out = c
@@ -274,24 +286,22 @@ fn native_profile_rejections() {
 fn limits_are_inclusive_and_apply_to_both_directions() {
     let v = Value::Array(vec![Value::String("abc".into())]);
     for profile in [
-        Profile::ValueJson,
-        Profile::Json,
-        Profile::Cbor,
-        Profile::Flexbuffers,
+        CodecProfile::ValueJson,
+        CodecProfile::Json,
+        CodecProfile::Cbor,
+        CodecProfile::Flexbuffers,
     ] {
         let base = ValueCodec::new(profile);
         let f = profile.format();
         let bytes = base.encode(&v, &f).unwrap();
-        let limits = Limits {
-            max_depth: 1,
-            max_nodes: 2,
-            max_collection_entries: 1,
-            max_string_bytes: 3,
-            max_payload_bytes: 3,
-            max_input_bytes: bytes.len(),
-            max_output_bytes: bytes.len(),
-            ..Limits::default()
-        };
+        let limits = Limits::default()
+            .with_max_depth(1)
+            .with_max_nodes(2)
+            .with_max_collection_entries(1)
+            .with_max_string_bytes(3)
+            .with_max_payload_bytes(3)
+            .with_max_input_bytes(bytes.len())
+            .with_max_output_bytes(bytes.len());
         let c = base.with_limits(limits.clone());
         assert!(c.encode(&v, &f).is_ok());
         assert!(c.decode(&bytes, &f).is_ok(), "{profile:?}");
@@ -315,29 +325,18 @@ fn limits_are_inclusive_and_apply_to_both_directions() {
         }
     }
     assert_eq!(
-        kind(
-            to_value_with_limits(
-                &vec![1, 2],
-                &Limits {
-                    max_nodes: 2,
-                    ..Limits::default()
-                }
-            )
-            .unwrap_err()
-        ),
+        kind(to_value_with_limits(&vec![1, 2], &Limits::default().with_max_nodes(2)).unwrap_err()),
         K::ResourceLimit
     );
 }
 #[test]
 fn malformed_binary_inputs_are_bounded() {
-    let limits = Limits {
-        max_depth: 8,
-        max_nodes: 64,
-        max_input_bytes: 1024,
-        max_work: 4096,
-        ..Limits::default()
-    };
-    for profile in [Profile::Cbor, Profile::Flexbuffers] {
+    let limits = Limits::default()
+        .with_max_depth(8)
+        .with_max_nodes(64)
+        .with_max_input_bytes(1024)
+        .with_max_work(4096);
+    for profile in [CodecProfile::Cbor, CodecProfile::Flexbuffers] {
         let c = ValueCodec::new(profile).with_limits(limits.clone());
         let f = profile.format();
         let original = c
@@ -460,14 +459,7 @@ fn serde_support_matrix() {
     assert_eq!(to_value(&Human).unwrap(), Value::String("displayed".into()));
     assert_eq!(
         kind(
-            to_value_with_limits(
-                &Human,
-                &Limits {
-                    max_string_bytes: 1,
-                    ..Limits::default()
-                }
-            )
-            .unwrap_err()
+            to_value_with_limits(&Human, &Limits::default().with_max_string_bytes(1)).unwrap_err()
         ),
         K::ResourceLimit
     );
@@ -510,7 +502,7 @@ fn malformed_custom_serializers_return_errors() {
 
 #[test]
 fn transcode_validates_and_rejects_subset_loss() {
-    let tagged = ValueCodec::new(Profile::ValueJson);
+    let tagged = ValueCodec::new(CodecProfile::ValueJson);
     let pretty = Bytes::from_static(b" [\"structfs-value\", 1, [\"null\"]] ");
     assert_eq!(
         transcode(&pretty, &tagged, &tagged).unwrap().as_ref(),
@@ -521,13 +513,10 @@ fn transcode_validates_and_rejects_subset_loss() {
         .encode(&Value::Bytes(vec![0]), &Format::VALUE_JSON)
         .unwrap();
     assert_eq!(
-        kind(transcode(&encoded, &tagged, &ValueCodec::new(Profile::Json)).unwrap_err()),
+        kind(transcode(&encoded, &tagged, &ValueCodec::new(CodecProfile::Json)).unwrap_err()),
         K::UnsupportedValue
     );
-    let c = tagged.with_limits(Limits {
-        max_diagnostic_bytes: 0,
-        ..Limits::default()
-    });
+    let c = tagged.with_limits(Limits::default().with_max_diagnostic_bytes(0));
     let Error::Codec { message, .. } = c.decode(&Bytes::new(), &Format::VALUE_JSON).unwrap_err()
     else {
         panic!()
@@ -537,14 +526,12 @@ fn transcode_validates_and_rejects_subset_loss() {
 
 #[test]
 fn deterministic_fuzz_decoding_and_canonicalization() {
-    let limits = Limits {
-        max_depth: 8,
-        max_nodes: 128,
-        max_input_bytes: 512,
-        max_output_bytes: 4096,
-        max_work: 8192,
-        ..Limits::default()
-    };
+    let limits = Limits::default()
+        .with_max_depth(8)
+        .with_max_nodes(128)
+        .with_max_input_bytes(512)
+        .with_max_output_bytes(4096)
+        .with_max_work(8192);
     let mut seed = 17u64;
     for _ in 0..4096 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -554,17 +541,18 @@ fn deterministic_fuzz_decoding_and_canonicalization() {
             bytes.push((seed >> 32) as u8);
         }
         for profile in [
-            Profile::ValueJson,
-            Profile::Json,
-            Profile::Cbor,
-            Profile::Flexbuffers,
+            CodecProfile::ValueJson,
+            CodecProfile::Json,
+            CodecProfile::Cbor,
+            CodecProfile::Flexbuffers,
         ] {
             let c = ValueCodec::new(profile).with_limits(limits.clone());
             if let Ok(value) = c.decode(&bytes.clone().into(), &profile.format()) {
                 let canonical = ValueJsonCodec.encode(&value, &Format::VALUE_JSON).unwrap();
                 assert!(value.semantic_eq(
-                    &ValueCodec::new(Profile::ValueJson)
+                    &ValueCodec::new(CodecProfile::ValueJson)
                         .canonical()
+                        .unwrap()
                         .decode(&canonical, &Format::VALUE_JSON)
                         .unwrap()
                 ));

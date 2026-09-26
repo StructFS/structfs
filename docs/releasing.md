@@ -1,14 +1,16 @@
 # Coordinated release procedure
 
-StructFS and Featherweight currently target **0.4.0**, paired with the Isotope
-2026-09-14 specification candidate. Namecode is independently versioned. Never
+StructFS and Featherweight **0.4.0** are published, paired with the Isotope
+2026-09-14 specification snapshot; this checkout targets **0.5.0** development.
+Namecode is independently versioned. Never
 overwrite an existing publication. [Registry status](release-status.md) records
 exact-version availability; repeat verification immediately before publication.
 
-The 0.3 packages were verified as published on 2026-09-14. Historical validation
-records describe their dated workloads and do not certify this revision. See
-[0.4 implementation decisions](design/2026-09-14-coherent-contracts.md) and
-[migration](migration-0.4.md) for the new contracts.
+The 0.4 packages were verified as published on 2026-09-16. Historical validation
+records in [history/](history/) describe their dated workloads and do not certify
+this revision. See [0.4 implementation decisions](design/2026-09-14-coherent-contracts.md)
+and [migration](migration-0.4.md) for the 0.4 contracts; 0.5 work is guided by
+the [2026-09-17 code audit](code-audit-2026-09-17.md).
 
 ## Candidate verification
 

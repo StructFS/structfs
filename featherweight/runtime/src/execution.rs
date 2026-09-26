@@ -16,6 +16,9 @@ impl ExecutionScope {
             cancel: CancelToken::new(),
         }
     }
+    /// Cancel in-flight work under this scope. Not a stop verb: a scope owns
+    /// no resources, so there is no cleanup to request (`close`) or wait
+    /// for (`join`); every operation run under it fails `Cancelled`.
     pub fn cancel(&self) {
         self.cancel.cancel();
     }

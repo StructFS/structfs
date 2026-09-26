@@ -73,7 +73,7 @@ binding natively:
 
 | status | meaning | errno analogue |
 |---|---|---|
-| `-1` | not found (operations requiring existence) | `ENOENT` |
+| `-1` | not found (operations requiring existence), or no route | `ENOENT` |
 | `-2` | permission denied / not wired | `ENOTCAPABLE` |
 | `-3` | conflict | `EEXIST` |
 | `-4` | overloaded / unavailable | `EAGAIN` |
@@ -82,6 +82,11 @@ binding natively:
 | `-7` | invalid path | `EINVAL` |
 | `-8` | resource limit | — |
 | `-9` | other store/codec error | `EIO` |
+| `-10` | invalid argument (the request is malformed independent of store state) | `EINVAL` |
+
+Guests must treat any negative status they do not recognize as an error;
+`-10` was added after `-1`…`-9`, and a guest written against the shorter
+table sees it as an unknown error with a readable diagnostic.
 
 ## Path encoding
 

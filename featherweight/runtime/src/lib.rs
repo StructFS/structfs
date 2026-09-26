@@ -7,9 +7,13 @@
 //!
 //! - **Blocks** run native Rust ([`NativeBlock`]) or core-binding wasm
 //!   ([`CoreWasmBlock`]) against a per-block [`Namespace`]. Core Wasm
-//!   runs on async tasks; native blocks use blocking threads. Other artifact kinds (e.g. WIT components via the
-//!   `featherweight-component` adapter) register through
-//!   [`Runtime::register_loader`].
+//!   runs on async tasks; native blocks use blocking threads. Other
+//!   artifact kinds (e.g. WIT components via the `featherweight-component`
+//!   adapter) register through [`RuntimeConfig::register_loader`].
+//! - **Two supported ways to start guest code**: [`Runtime::instantiate`]
+//!   runs an assembly (blocks wired into namespaces), and
+//!   [`CoreWasmBlock::start_sync`] / [`CoreWasmBlock::start_async`] run one
+//!   prepared core-wasm artifact over a host store you own and get back.
 //! - **`/iso/`** ([`IsoSurface`]) is the syscall surface: identity,
 //!   lifecycle, time, randomness, logging, and the server protocol.
 //! - **The server protocol** ([`protocol`]) makes every block a store:
@@ -24,13 +28,14 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use featherweight_runtime::{AssemblyDef, Runtime, register_builtins};
+//! use featherweight_runtime::{AssemblyDef, Runtime, RuntimeConfig, register_builtins};
 //! use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let rt = tokio::runtime::Runtime::new()?;
-//! let mut runtime = Runtime::with_handle(rt.handle().clone());
-//! register_builtins(&mut runtime);
+//! let mut config = RuntimeConfig::new(rt.handle().clone());
+//! register_builtins(&mut config);
+//! let runtime = Runtime::new(config);
 //!
 //! let def = AssemblyDef::from_str(r#"
 //! assembly: demo
@@ -51,22 +56,20 @@
 //! # }
 //! ```
 
+#[doc(hidden)]
+pub mod adapter;
 pub mod driver;
-pub use driver::{
-    DriverCapabilities, DriverContext, DriverControl, DriverCounter, ExecutionMeter, ExecutionUsage,
-};
+pub use driver::{DriverContext, DriverCounter, ExecutionMeter, ExecutionUsage};
 pub mod execution;
 pub use execution::ExecutionScope;
 pub mod admission;
-pub use admission::{
-    CallBudget, CallBudgetSnapshot, CallLimits, CallMetrics, CallUsage, SessionBudget,
-    SessionBudgetSnapshot, SessionLimits, SessionPermit, SessionUsage,
-};
+pub use admission::{CallBudget, CallBudgetSnapshot, CallLimits, CallMetrics, CallUsage};
 pub mod assembly;
 pub mod block;
 pub mod core_wasm;
 pub mod determinism;
 mod error;
+pub(crate) mod hash;
 pub mod iso;
 pub mod metering;
 pub mod namespace;
@@ -80,24 +83,20 @@ pub mod transcript;
 pub(crate) mod turnstile;
 
 pub use assembly::{AssemblyDef, BlockDef, WireDef, WireTarget};
-pub use block::{
-    BlockCell, BlockEvent, BlockId, BlockState, FailurePolicy, ServerRequest, ShutdownMode,
-};
+pub use block::{BlockId, BlockState, BlockView, FailurePolicy, ShutdownMode};
 pub use core_wasm::{CoreWasmBlock, CoreWasmEngine, CoreWasmSession, NoOpStore};
 pub use determinism::Determinism;
 pub use error::{Result, RuntimeError};
 pub use iso::{IsoSurface, LogSink, StderrLog};
 pub use metering::Metering;
-pub use namespace::{
-    async_host_store, host_store, service_host_store, GrantStore, HostStore, Namespace, Target,
-    WiringTable,
-};
+pub use namespace::{async_host_store, host_store, service_host_store, HostStore, Namespace};
 pub use native::{register_builtins, NativeBlock, NativeBlockFactory, ShellBlock};
+pub use protocol::ErrorKind;
 pub use runtime::{
-    ArtifactLoader, AssemblyInstance, AssemblyRequest, Runtime, ShutdownReport, StdioProvider,
-    WasmBlockDriver,
+    ArtifactLoader, AssemblyInstance, AssemblyRequest, Runtime, RuntimeConfig, ShutdownReport,
+    StdioProvider, WasmBlockDriver,
 };
-pub use session::{SessionEntry, SessionLog};
+pub use session::SessionEntry;
 pub use spawn::{ProcStore, SpawnProtocol};
 pub use stdio::{HostStdio, NullStdio, ScriptedStdio, Stdio};
 pub use transcript::{

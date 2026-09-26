@@ -14,9 +14,10 @@ and joins teardown. It uses only public APIs.
 ## Implemented release requirements
 
 - Prepared artifact registration and a common `DriverContext` execution entry
-  point for built-in and external drivers. Existing loader adapters retain the
-  synchronous bridge. Optional host-only resumable/checkpoint control extensions
-  do not promise universal snapshot support.
+  point for built-in and external drivers. The runtime never bridges a
+  synchronous adapter: a blocking driver does its own blocking inside `execute`.
+  Guest code starts in exactly two supported ways: `Runtime::instantiate` for
+  assemblies, and `CoreWasmBlock::start_sync`/`start_async` for owned embedding.
 - Separate reusable artifacts, persistent instances and request owners.
   Cooperative request cancellation, instance shutdown reports and panic cleanup
   are covered by tests. Unjoined native work retains its registration.
@@ -30,7 +31,8 @@ and joins teardown. It uses only public APIs.
   queries, and spec 13's separation of runtime-owned services from explicit
   grants. Existing mailbox paths are preserved.
 - Actual Cargo archive verification, independent-consumer tests, packaged replay
-  fixtures, both Wasm guest SDK feature modes, and strict documentation checks.
+  fixtures, the Wasm guest SDK feature modes (the SDK alone, and the reference
+  kv block behind `reference-guest`), and strict documentation checks.
   The gate runs in CI and in release preflight. Workspace packaging is batched
   so unpublished local versions resolve together before any publication.
 
@@ -64,15 +66,30 @@ lightweight Wasm/provider harness, not HTTP throughput or container capacity.
 
 ## API migration notes
 
-- `AssemblyInstance::shutdown` returns a report. Hosts must not release instance
+- `AssemblyInstance::shutdown(timeout)` returns a report and works to one
+  deadline for the whole tree (graceful until the halfway point, then
+  immediate, then joining until the deadline). Hosts must not release instance
   reservations while `remaining` is nonempty.
-- `deliver_signal` and `deliver_timer` return `Result` on admission failure;
-  `AssemblyInstance::signal` returns false when delivery is rejected.
-- Raw unowned `BlockCell::enqueue` is no longer public. Assembly calls own their
-  correlation and resource cleanup, including on timeout or dropped futures.
+- A runtime is configured once: build a `RuntimeConfig`, register builtins,
+  loaders and prepared artifacts on it, then `Runtime::new(config)`. The
+  `Runtime::with_*` builders, `Runtime::register_*`, `Runtime::with_handle` and
+  `with_provider_limits` are gone.
+- Blocks are observed through the read-only `BlockView` (`public_cell()`,
+  `cell(name)`, `Namespace::cell()`); `BlockCell` and its mutators are
+  runtime-internal. `AssemblyInstance::signal` returns false when delivery is
+  rejected. Assembly calls own their correlation and resource cleanup,
+  including on timeout or dropped futures.
+- `Metering` has only the per-run fuel cap; epoch interruption is an engine
+  setting (`CoreWasmEngine::with_epoch_interval`) honoured identically by the
+  core binding and the component adapter.
+- `HostStore` is asynchronous only; transcripts and the session log are
+  written without blocking a runtime worker.
+- Typed errors survive every boundary: the server protocol carries
+  `no_route` and `invalid_argument`, spec 11 adds status -10 (invalid
+  argument), and `protocol::ErrorKind` is the one table behind all of them.
 - Malformed non-array assembly `wiring` now fails instead of being ignored.
-- Binary streams consume data. Existing append-only `ByteStream` keeps its prior
-  semantics and is not a substitute for a bounded connection buffer.
+- Binary streams consume data. The append-only `ByteStream` was never a
+  substitute for a bounded connection buffer, and was removed in 0.5.
 
 These API changes need the appropriate release version under the project's
 versioning policy. This work does not publish crates or choose that version.

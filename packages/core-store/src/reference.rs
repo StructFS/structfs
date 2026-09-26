@@ -7,15 +7,22 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::Value;
 
 /// Type information for a referenced value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The serde representation is the same map [`TypeInfo::to_value`] builds:
+/// `{"name": "handle"}`, with `schema` present only when set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TypeInfo {
     /// Type name (e.g., "integer", "string", "handle", "action", "collection").
     pub name: String,
 
     /// Optional schema describing the structure of the type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<BTreeMap<String, TypeDescriptor>>,
 }
 
@@ -26,6 +33,13 @@ impl TypeInfo {
             name: name.into(),
             schema: None,
         }
+    }
+
+    /// Attach a schema describing the structure of the type.
+    #[must_use]
+    pub fn with_schema(mut self, schema: BTreeMap<String, TypeDescriptor>) -> Self {
+        self.schema = Some(schema);
+        self
     }
 
     /// Convert to a Value::Map representation.
@@ -75,9 +89,14 @@ impl TypeInfo {
 }
 
 /// Describes a field's type within a schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The serde representation is the same map [`TypeDescriptor::to_value`]
+/// builds: `{"type": {"name": "integer"}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TypeDescriptor {
     /// The type of this field.
+    #[serde(rename = "type")]
     pub type_info: TypeInfo,
 }
 
@@ -129,12 +148,20 @@ impl TypeDescriptor {
 /// // Reference to an action
 /// let r = Reference::with_type("meta/open", "action");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The serde representation is the same map [`Reference::to_value`] builds:
+/// `{"path": "handles/0", "type": {"name": "handle"}}`, with `type` present
+/// only when type information is set. Stores that serialize references
+/// through serde and stores that build them with `to_value` therefore emit
+/// the same wire form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Reference {
     /// The path to the referenced value.
     pub path: String,
 
     /// Optional type information.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_info: Option<TypeInfo>,
 }
 
@@ -355,10 +382,7 @@ mod tests {
         let mut schema = BTreeMap::new();
         schema.insert("position".to_string(), TypeDescriptor::new("integer"));
 
-        let ti = TypeInfo {
-            name: "handle".to_string(),
-            schema: Some(schema),
-        };
+        let ti = TypeInfo::new("handle").with_schema(schema);
 
         let v = ti.to_value();
         if let Value::Map(map) = v {
@@ -428,5 +452,33 @@ mod tests {
     fn type_descriptor_from_value_no_type() {
         let map = BTreeMap::new();
         assert!(TypeDescriptor::from_value(&Value::Map(map)).is_none());
+    }
+
+    #[test]
+    fn reference_serde_matches_to_value_shape() {
+        let r = Reference::with_type("outstanding/0/response", "http-response");
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            json,
+            r#"{"path":"outstanding/0/response","type":{"name":"http-response"}}"#
+        );
+
+        let minimal = Reference::new("outstanding/0");
+        assert_eq!(
+            serde_json::to_string(&minimal).unwrap(),
+            r#"{"path":"outstanding/0"}"#
+        );
+
+        let parsed: Reference = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, r);
+    }
+
+    #[test]
+    fn type_descriptor_serde_matches_to_value_shape() {
+        let td = TypeDescriptor::new("integer");
+        let json = serde_json::to_string(&td).unwrap();
+        assert_eq!(json, r#"{"type":{"name":"integer"}}"#);
+        let parsed: TypeDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, td);
     }
 }

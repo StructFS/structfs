@@ -3,7 +3,7 @@
 //! `PathTrie<T>` provides O(k) operations where k is the path depth.
 //! Each node can optionally hold a value, and has children indexed by path component.
 
-use crate::{path, Path};
+use crate::{path, Path, PathComponent};
 use std::collections::BTreeMap;
 
 /// A prefix trie keyed by path components.
@@ -227,14 +227,9 @@ impl<'a, T> Iterator for PathTrieIter<'a, T> {
             // Push children onto stack (in reverse order for correct iteration)
             for (name, child) in node.children.iter().rev() {
                 // `name` is a trie key: a component of an already-validated
-                // path, so re-validation is unnecessary (debug-checked only).
-                let child_path = if path.is_empty() {
-                    Path::from_validated_components(vec![name.clone()])
-                } else {
-                    let mut c: Vec<String> = path.iter().map(str::to_string).collect();
-                    c.push(name.clone());
-                    Path::from_validated_components(c)
-                };
+                // path, so appending it reuses the parent's components
+                // (reference-count bumps) instead of re-collecting them.
+                let child_path = path.child(PathComponent::trusted(name.clone()));
                 self.stack.push((child_path, child));
             }
 

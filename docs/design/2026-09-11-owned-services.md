@@ -21,6 +21,13 @@ Drop signals cancellation without waiting or executing user cleanup inline.
 waits at most the supplied duration, and returns a `CloseReport`. Dropping a close
 future does not stop cleanup. Repeated close observes the same retained resources.
 
+> Superseded in 0.5: the stop verbs were renamed. `Owner::cancel` is now
+> `close()` (non-blocking), `close(timeout)` is `join(timeout)`, and the
+> untimed `join()` is `join_indefinitely()`; the same `close`/`join` split
+> applies to `OwnerHandle`, `Registration`, `OwnedResource` and
+> `CleanupSupervisor`. The semantics described here are otherwise unchanged.
+> See [migration-0.5](../migration-0.5.md).
+
 Each owner limits resource count and retained byte reservations. Every resource
 has a unique opaque `ResourceId`, kind, and byte charge. Names and mount prefixes
 are not identities. Limits are immutable for this lifetime; existing live call
@@ -105,6 +112,11 @@ application-lifetime configuration.
 
 ## Retained results and tails
 
+> **Superseded in 0.5:** `RetainedBytes` and `structfs-handles::TailLog` were
+> removed (neither had callers); `OwnedTail` remains, now with `close()` /
+> `join(timeout)` and argument errors reported as `InvalidArgument`. This
+> section records the 0.4 design as written.
+
 `RetainedBytes` registers its storage before delivery and charges the vector's
 capacity. Losing result delivery drops the registration and starts cleanup.
 Owner close clears storage even if the receiver retains the public handle.
@@ -131,7 +143,8 @@ Every assembly receives a provider owner from the runtime's retained supervisor.
 Its wired namespace dispatch passes through owned services, covering both host
 providers and mailbox routing. Providers can use `CallContext::owner()` for
 handle cleanup and background work. `AssemblyInstance::provider_owner()` exposes
-the same host-side authority.
+the same host-side authority. (Removed in 0.5: it had no callers; providers reach
+their owner through `CallContext::owner()`.)
 
 Graceful shutdown allows guest cleanup during the grace period. Before joining
 remaining execution tasks, the runtime closes provider owners across the instance
@@ -143,7 +156,8 @@ operation remains reported and charged. Hosts can retain
 
 The runtime bounds retained owner records at 65,536. Default per-instance provider
 limits are 65,536 resource entries and 16 MiB retained bytes;
-`with_provider_limits` configures subsequent instances. Routed call budgets remain
+`with_provider_limits` configures subsequent instances (removed in 0.5 with the
+other live-mutating runtime builders; the per-instance default is now fixed). Routed call budgets remain
 independent. Native `OwnerLimits::default()` uses 1,024 entries and 16 MiB.
 
 A persistent guest's internal provider operations belong to its instance. Existing

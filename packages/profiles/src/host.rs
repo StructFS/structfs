@@ -3,10 +3,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
 };
-use structfs_handles::Gate;
-use structfs_serde_store::{from_value, to_value, Error, Record};
+use structfs_core_store::{DetachedFuture, Error, NoCodec, Record, Value};
+use structfs_handles::{CancelToken, Gate};
+use structfs_serde_store::{from_value, to_value};
 use structfs_service::{
-    CallContext, CancelToken, Operation, OwnerHandle, Registration, ResourceKind, Response, Service,
+    CallContext, Operation, OwnerHandle, Registration, ResourceKind, Response, Service,
 };
 
 /// Decorate a provider with read-only discovery at `meta/profiles`.
@@ -15,26 +16,24 @@ pub struct Profiled {
     declarations: Vec<Declaration>,
 }
 impl Profiled {
-    pub fn new(
-        provider: Arc<dyn Service>,
-        declarations: Vec<Declaration>,
-    ) -> Result<Arc<Self>, Error> {
+    /// Wrap the result in `Arc` to mount it.
+    pub fn new(provider: Arc<dyn Service>, declarations: Vec<Declaration>) -> Result<Self, Error> {
         let mut seen = BTreeSet::new();
         if declarations.len() > 16
             || declarations
                 .iter()
                 .any(|d| d.version != 1 || !seen.insert(d.profile))
         {
-            return Err(Error::conflict("invalid profile declarations"));
+            return Err(Error::invalid_argument("invalid profile declarations"));
         }
-        Ok(Arc::new(Self {
+        Ok(Self {
             provider,
             declarations,
-        }))
+        })
     }
 }
 impl Service for Profiled {
-    fn call(&self, c: CallContext, op: Operation) -> structfs_handles::DetachedFuture<Response> {
+    fn call(&self, c: CallContext, op: Operation) -> DetachedFuture<Response> {
         if op.path().to_string() == "meta/profiles" {
             let result = c.ensure_active().and_then(|()| match op {
                 Operation::Read(_) => {
@@ -61,6 +60,25 @@ struct Queue {
     status: SessionStatus,
     input_closed: bool,
 }
+impl Queue {
+    /// The single definition of "is there an event this reducer may take".
+    ///
+    /// Both the direct API and the mounted service go through this, so a
+    /// closed session cannot hand out an event through one path while the
+    /// other reports it closed.
+    fn take_next(&mut self) -> Option<Result<InputEnvelope, Error>> {
+        if self.status.closed {
+            return Some(Err(Error::cancelled("session closed")));
+        }
+        if self.in_flight.is_some() {
+            return Some(Err(Error::conflict("input awaits processing")));
+        }
+        self.events.pop_front().map(|input| {
+            self.in_flight = Some(input.clone());
+            Ok(input)
+        })
+    }
+}
 struct Inner {
     queue: Mutex<Queue>,
     gate: Gate,
@@ -73,15 +91,17 @@ pub struct Session {
 }
 impl HeadlessHost {
     /// Surface keys are host capabilities, not diagnostic installation labels.
+    ///
+    /// Wrap the result in `Arc` to mount it as a service.
     pub fn open(
         self: &Arc<Self>,
         owner: &OwnerHandle,
         surface: &str,
         max_events: usize,
         max_bytes: usize,
-    ) -> Result<Arc<Session>, Error> {
+    ) -> Result<Session, Error> {
         if max_events == 0 || max_bytes < 64 || surface.len() > 256 {
-            return Err(Error::resource_limit("session bounds"));
+            return Err(Error::invalid_argument("session bounds"));
         }
         let mut surfaces = self.surfaces.lock().unwrap_or_else(|e| e.into_inner());
         if surfaces.contains_key(surface) {
@@ -127,12 +147,12 @@ impl HeadlessHost {
                 Ok(())
             })?;
         surfaces.insert(surface.into(), id);
-        Ok(Arc::new(Session {
+        Ok(Session {
             inner,
             registration,
             max_events,
             max_bytes,
-        }))
+        })
     }
 }
 impl Session {
@@ -154,7 +174,8 @@ impl Session {
         }
         input
             .validate(&q.status.session, q.status.accepted)
-            .map_err(Error::conflict)?;
+            .map_err(Error::invalid_argument)?;
+        // Reject anything the wire form cannot carry, before it is queued.
         to_value(&input)?;
         let bytes = input
             .weight()
@@ -176,25 +197,22 @@ impl Session {
     pub async fn next(&self, cancel: &CancelToken) -> Result<InputEnvelope, Error> {
         let released = self.registration.cancellation();
         let read = self.inner.gate.wait_until_cancellable(cancel, || {
-            let mut q = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
-            if q.status.closed {
-                return Some(Err(Error::cancelled("session closed")));
-            }
-            if q.in_flight.is_some() {
-                return Some(Err(Error::conflict("input awaits processing")));
-            }
-            q.events.pop_front().map(|input| {
-                q.in_flight = Some(input.clone());
-                Ok(input)
-            })
+            self.inner
+                .queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take_next()
         });
-        tokio::select! {biased;_ = released.cancelled()=>Err(Error::cancelled("session closed")),r=read=>r.map_err(|e|e.into_error("input cancelled"))?}
+        tokio::select! { biased;
+            _ = released.cancelled() => Err(Error::cancelled("session closed")),
+            result = read => result.map_err(|e| e.into_error("input cancelled"))?,
+        }
     }
     /// Acknowledge only after the reducer has committed its state/effect intent.
     pub fn processed(&self, sequence: u64) -> Result<(), Error> {
         let mut q = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
         if q.in_flight.as_ref().map(|e| e.sequence) != Some(sequence) {
-            return Err(Error::conflict("wrong processed sequence"));
+            return Err(Error::invalid_argument("wrong processed sequence"));
         }
         let input = q.in_flight.take().unwrap();
         q.bytes -= input.weight().unwrap();
@@ -205,7 +223,7 @@ impl Session {
     }
     pub fn presented(&self, token: Token) -> Result<(), Error> {
         if token.epoch.len() > 128 {
-            return Err(Error::resource_limit("epoch size"));
+            return Err(Error::invalid_argument("epoch size"));
         }
         if self.registration.cancellation().is_cancelled() {
             return Err(Error::cancelled("session closed"));
@@ -221,12 +239,19 @@ impl Session {
         q.status.rendered = Some(token);
         Ok(())
     }
-    pub fn release(&self) {
-        self.registration.release();
+    /// Request teardown of the session. Non-blocking; queued input is dropped
+    /// and parked reads wake.
+    pub fn close(&self) {
+        self.registration.close();
+    }
+    /// [`Session::close`], then wait at most `timeout` for the teardown, and
+    /// report the owner's remaining resources.
+    pub async fn join(&self, timeout: std::time::Duration) -> structfs_service::CloseReport {
+        self.registration.join(timeout).await
     }
 }
 impl Service for Session {
-    fn call(&self, c: CallContext, op: Operation) -> structfs_handles::DetachedFuture<Response> {
+    fn call(&self, c: CallContext, op: Operation) -> DetachedFuture<Response> {
         // State-changing work here is short and synchronous; parked input reads
         // retain their call context and never hold the queue mutex while waiting.
         let inner = self.inner.clone();
@@ -236,16 +261,17 @@ impl Service for Session {
                 c.ensure_active()?;
                 let _lease = c.lease();
                 let read = inner.gate.wait_until_cancellable(&c.cancellation, || {
-                    let mut q = inner.queue.lock().unwrap_or_else(|e| e.into_inner());
-                    if q.in_flight.is_some() {
-                        return Some(Err(Error::conflict("input awaits processing")));
-                    }
-                    q.events.pop_front().map(|input| {
-                        q.in_flight = Some(input.clone());
-                        to_value(&input).map(|v| Response::Read(Some(Record::parsed(v))))
-                    })
+                    inner
+                        .queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take_next()
                 });
-                tokio::select! {biased;_=released.cancelled()=>Err(Error::cancelled("session closed")),r=read=>r.map_err(|e|e.into_error("input cancelled"))?}
+                let input = tokio::select! { biased;
+                    _ = released.cancelled() => Err(Error::cancelled("session closed")),
+                    result = read => result.map_err(|e| e.into_error("input cancelled"))?,
+                }?;
+                Ok(Response::Read(Some(Record::parsed(to_value(&input)?))))
             }),
             op => {
                 let result = c.ensure_active().and_then(|()| match op {
@@ -253,14 +279,12 @@ impl Service for Session {
                         to_value(&self.status()).map(|v| Response::Read(Some(Record::parsed(v))))
                     }
                     Operation::Write(p, r) => {
-                        let value = r.into_value(&structfs_core_store::NoCodec)?;
+                        let value = r.into_value(&NoCodec)?;
                         match p.to_string().as_str() {
                             "input" => self.submit(from_value(value)?)?,
                             "processed" => self.processed(from_value(value)?)?,
                             "presented" => self.presented(from_value(value)?)?,
-                            "release" if value == structfs_core_store::Value::Null => {
-                                self.release()
-                            }
+                            "release" if value == Value::Null => self.close(),
                             _ => return Err(Error::permission_denied("interactive path")),
                         }
                         Ok(Response::Written(p))

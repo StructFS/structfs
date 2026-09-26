@@ -82,6 +82,17 @@ export class IsoStore implements HostStore {
   }
 
   read(path: string): StoreValue | undefined {
+    // Numeric arguments are arguments: a non-numeric one is malformed
+    // regardless of state (the native surface's invalid_argument).
+    const argument = path.match(/^iso\/(random\/bytes|time\/after)\/([^/]+)$/);
+    if (argument !== null && !/^\d+$/.test(argument[2] ?? "")) {
+      throw new StoreError(
+        status.INVALID_ARGUMENT,
+        argument[1] === "time/after"
+          ? "time/after: bad duration"
+          : "random/bytes: bad byte count",
+      );
+    }
     const randomBytes = path.match(/^iso\/random\/bytes\/(\d+)$/);
     if (randomBytes !== null) {
       const n = Number(randomBytes[1]);

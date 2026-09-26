@@ -110,10 +110,11 @@ stock binaries.
 
 ### errno
 
-The protocol error taxonomy maps per spec 09: `not_found`→`ENOENT`,
+The protocol error taxonomy maps per spec 09: `not_found`/`no_route`→`ENOENT`,
 `forbidden`→`EACCES`/`ENOTCAPABLE`, `unavailable`→`EAGAIN`,
 `timeout`→`ETIMEDOUT`, `conflict`→`EEXIST`, cancellation→`EINTR`,
-`invalid_path`→`EINVAL`, unmapped store errors→`EIO`.
+`invalid_path`/`invalid_argument`→`EINVAL`, resource limits and unmapped
+store errors→`EIO`.
 
 ### Blocking
 

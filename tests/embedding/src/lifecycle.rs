@@ -2,7 +2,7 @@
 //! external allocation. The tiny HTTP exchange is a deterministic fixture, not
 //! an HTTP server implementation. Run the `cancelled_http` example.
 use featherweight_runtime::{
-    async_host_store, AssemblyDef, CoreWasmEngine, ExecutionScope, Runtime,
+    async_host_store, AssemblyDef, CoreWasmEngine, ExecutionScope, Runtime, RuntimeConfig,
 };
 use std::{
     collections::HashMap,
@@ -153,15 +153,18 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
     {
         let fail_cleanup = round == 1;
         let allocation = Allocation::new();
-        let owner = supervisor.owner(OwnerLimits {
-            resources: 4,
-            retained_bytes: 256,
-        })?;
+        let owner = supervisor.owner(
+            OwnerLimits::default()
+                .with_resources(4)
+                .with_retained_bytes(256),
+        )?;
         let owner_handle = owner.handle();
         let scope = ExecutionScope::new(Duration::from_secs(10));
         let reservation = engine.reserve_session(1)?;
-        let mut runtime = Runtime::new().with_execution_scope(scope.clone());
-        runtime.register_core_artifact("prepared:http", prepared.in_session(reservation.clone())?);
+        let mut config = RuntimeConfig::new(tokio::runtime::Handle::current())
+            .with_execution_scope(scope.clone());
+        config.register_core_artifact("prepared:http", prepared.in_session(reservation.clone())?);
+        let runtime = Runtime::new(config);
         let imports = HashMap::from([(
             "broker".into(),
             async_host_store(Broker {
@@ -189,18 +192,18 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
             // HTTP handling ends here. The host retains this teardown task
             // separately; dropping an HTTP response cannot drop its ownership.
             scope.cancel();
-            owner.cancel();
+            owner.close();
             RetainedCleanup(tokio::spawn(async move {
                 let shutdown = assembly.shutdown(Duration::from_secs(1)).await;
                 assert!(shutdown.complete(), "{shutdown:?}");
                 assert_eq!(runtime.registered_blocks(), 0);
-                let report = owner.close(Duration::ZERO).await;
+                let report = owner.join(Duration::ZERO).await;
                 assert!(!report.is_quiescent());
                 incomplete_tx.send(report).unwrap();
                 // A grace timeout is a report, not permission to release the
                 // reservation. Retain everything until cleanup really joins.
                 loop {
-                    let report = owner.close(Duration::from_secs(1)).await;
+                    let report = owner.join(Duration::from_secs(1)).await;
                     if report.is_quiescent() {
                         break;
                     }
@@ -234,7 +237,7 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
         allocation.join.add_permits(1);
         if fail_cleanup {
             let failed = loop {
-                let report = owner_handle.close(Duration::from_millis(10)).await;
+                let report = owner_handle.join(Duration::from_millis(10)).await;
                 if report.failures > 0 {
                     break report;
                 }
@@ -259,7 +262,7 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
         drop(engine.reserve_session(1)?);
     }
     assert!(supervisor
-        .close(Duration::from_secs(1))
+        .join(Duration::from_secs(1))
         .await
         .iter()
         .all(|r| r.is_quiescent()));
@@ -271,8 +274,9 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
     allocation.reply.add_permits(1);
     allocation.join.add_permits(1);
     let reservation = engine.reserve_session(1)?;
-    let mut runtime = Runtime::new();
-    runtime.register_core_artifact("prepared:http", prepared.in_session(reservation.clone())?);
+    let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+    config.register_core_artifact("prepared:http", prepared.in_session(reservation.clone())?);
+    let runtime = Runtime::new(config);
     let assembly = runtime.instantiate(
         &definition,
         HashMap::from([(
@@ -293,7 +297,7 @@ pub async fn cancelled_http_demo() -> DemoResult<()> {
     // A declared nonzero exit need not carry a trap diagnostic. Inspect both
     // exit_code and last_error; terminal state alone is not success.
     assert!(assembly.shutdown(Duration::from_secs(1)).await.complete());
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     drop(assembly);
     drop(runtime);
     drop(reservation);

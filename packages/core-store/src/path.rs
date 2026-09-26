@@ -15,8 +15,6 @@ pub enum PathError {
         position: usize,
         message: String,
     },
-    /// The path string is invalid.
-    InvalidPath { message: String },
 }
 
 impl fmt::Display for PathError {
@@ -32,9 +30,6 @@ impl fmt::Display for PathError {
                     "invalid path component '{}' at position {}: {}",
                     component, position, message
                 )
-            }
-            PathError::InvalidPath { message } => {
-                write!(f, "invalid path: {}", message)
             }
         }
     }
@@ -122,7 +117,10 @@ impl Path {
         Ok(Path(ll_from_strings(components)))
     }
 
-    /// Create a path from pre-validated components.
+    /// Create a path from components known to be valid.
+    ///
+    /// Validates in every build profile; this is what the `path!` macro
+    /// expands to once literals have been checked at compile time.
     ///
     /// # Panics
     ///
@@ -133,15 +131,6 @@ impl Path {
             Self::validate_component(component, i).expect("invalid component");
         }
         Path(ll_from_strings(components))
-    }
-
-    /// Compatibility entry point used by the path macro.
-    ///
-    /// Validates in every build profile; panics on invalid components.
-    /// Prefer `try_from_components` for fallible construction.
-    #[doc(hidden)]
-    pub fn from_validated_components(components: Vec<String>) -> Self {
-        Self::from_components(components)
     }
 
     /// Try to create a path from components, validating each.
@@ -229,6 +218,10 @@ impl Path {
     }
 
     /// Get a slice of components as a new path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `start > end` or `end > self.len()`, like slicing a `Vec`.
     pub fn slice(&self, start: usize, end: usize) -> Path {
         Path(LLPath::from_components(
             self.0.components()[start..end].to_vec(),
@@ -250,7 +243,8 @@ impl Path {
     /// Validate an [`LLPath`] into a `Path` — the single narrowing point where
     /// opaque bytes become a validated identifier path. Reuses the `Bytes`
     /// components (no copy); fails if any component is not valid UTF-8 or not a
-    /// valid component grammar.
+    /// valid component grammar. For borrowed byte slices, collect them into an
+    /// `LLPath` with `Bytes::copy_from_slice` first.
     pub fn validate(ll: LLPath) -> Result<Self, PathError> {
         for (i, component) in ll.iter().enumerate() {
             let s = std::str::from_utf8(component.as_ref()).map_err(|_| {
@@ -263,43 +257,6 @@ impl Path {
             Self::validate_component(s, i)?;
         }
         Ok(Path(ll))
-    }
-
-    /// Wrap an [`LLPath`] known to already satisfy the `Path` invariant, without
-    /// re-validating. This is the byte-path analogue of
-    /// [`from_validated_components`](Self::from_validated_components): use it for
-    /// paths that originated host-side from a `Path` (e.g. a write result path
-    /// echoed back), so internal LL->HL hops don't re-pay validation. Debug
-    /// builds re-check as a safety net.
-    pub fn from_ll_unchecked(ll: LLPath) -> Self {
-        #[cfg(debug_assertions)]
-        for (i, component) in ll.iter().enumerate() {
-            let s = std::str::from_utf8(component.as_ref())
-                .expect("pre-validated LL component is not UTF-8");
-            Self::validate_component(s, i).expect("invalid pre-validated LL component");
-        }
-        Path(ll)
-    }
-
-    /// Convert to an owned LL path (byte components).
-    ///
-    /// Now a cheap clone (each component is a reference-counted `Bytes`); prefer
-    /// [`as_ll`](Self::as_ll)/[`into_ll`](Self::into_ll) to avoid even that.
-    pub fn to_ll_path(&self) -> LLPath {
-        self.0.clone()
-    }
-
-    /// Try to create from borrowed LL path components (byte slices).
-    ///
-    /// Copies the components into owned `Bytes` and validates. Fails if any
-    /// component is not valid UTF-8 or not a valid identifier. For an owned
-    /// [`LLPath`], prefer [`validate`](Self::validate) to reuse its `Bytes`.
-    pub fn try_from_ll_path(ll_path: &[impl AsRef<[u8]>]) -> Result<Self, PathError> {
-        let ll: LLPath = ll_path
-            .iter()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()))
-            .collect();
-        Self::validate(ll)
     }
 }
 
@@ -341,6 +298,9 @@ impl std::ops::Index<usize> for Path {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PathComponent(String);
 
+/// The marker Namecode puts in front of every encoding.
+const NAMECODE_PREFIX: &str = "_N_";
+
 impl PathComponent {
     /// Validate and wrap a string as a path component.
     pub fn try_new(s: impl Into<String>) -> Result<Self, PathError> {
@@ -351,22 +311,66 @@ impl PathComponent {
 
     /// Encode an arbitrary string as a valid path component.
     ///
-    /// Valid UAX#31 identifiers pass through unchanged; everything else
-    /// (punctuation, spaces, leading digits) is Namecode-encoded into a
-    /// `_N_`-prefixed identifier. Always succeeds and is deterministic.
-    /// Reverse with [`PathComponent::decode`].
+    /// Total and deterministic: *every* `&str`, the empty one included, maps
+    /// to a component that passes [`Path::validate_component`]. A string that
+    /// is already a valid component and does not start with `_N_` passes
+    /// through unchanged — that includes numeric components such as `42`.
+    /// Everything else (punctuation, spaces, leading digits, a bare `_`,
+    /// `_N_`-prefixed literals, `""`) is Namecode-encoded into a
+    /// `_N_`-prefixed identifier.
+    ///
+    /// The mapping is injective, so [`PathComponent::decode`] recovers the
+    /// original string exactly. It is deliberately *not* idempotent:
+    /// `encode(encode(s).as_str())` encodes twice, because a string that
+    /// already looks like an encoding has to be distinguishable from one that
+    /// is.
+    ///
+    /// ```
+    /// use structfs_core_store::PathComponent;
+    ///
+    /// assert_eq!(PathComponent::encode("plain").as_str(), "plain");
+    /// assert_eq!(PathComponent::encode("42").as_str(), "42");
+    /// assert_eq!(PathComponent::encode("my-account").decode().unwrap(), "my-account");
+    /// assert_eq!(PathComponent::encode("").decode().unwrap(), "");
+    /// ```
     pub fn encode(s: &str) -> Self {
-        let encoded = namecode::encode(s);
-        debug_assert!(Path::validate_component(&encoded, 0).is_ok());
-        Self(encoded)
+        // Namecode's UAX#31 grammar and the component grammar disagree in two
+        // places — a bare `_` is an identifier only to Namecode, a numeric
+        // string only to the component grammar — so the passthrough test is
+        // the component grammar's own validator, checked at runtime.
+        if !s.starts_with(NAMECODE_PREFIX) && Path::validate_component(s, 0).is_ok() {
+            return Self(s.to_string());
+        }
+        // Everything else is valid by construction, so this is a debug
+        // assertion rather than a runtime check: `encode_forced` always emits
+        // `_N_` (underscore followed by the XID_Continue `N`, a valid
+        // component start), then basic characters that are all XID_Continue,
+        // then optionally `__` and base-32 digits `a`-`z`/`0`-`5`. Every
+        // character after the first is XID_Continue, which is exactly the
+        // component grammar. The corpus test below exercises it.
+        let forced = namecode::encode_forced(s);
+        debug_assert!(
+            Path::validate_component(&forced, 0).is_ok(),
+            "forced namecode encoding {forced:?} is not a valid component"
+        );
+        Self(forced)
     }
 
     /// Decode a component produced by [`PathComponent::encode`] back to the
     /// original string.
     ///
-    /// Components that are not Namecode-encoded are returned unchanged
-    /// (matching `encode`'s pass-through of valid identifiers). Returns an
-    /// error only for a malformed `_N_`-prefixed component.
+    /// Exact for every component `encode` can produce. Components that are
+    /// not Namecode encodings are returned unchanged, matching `encode`'s
+    /// pass-through of valid identifiers — and since `encode` never passes a
+    /// `_N_`-prefixed string through, the two cases cannot collide for any
+    /// component that came from `encode`.
+    ///
+    /// A component built by hand with [`PathComponent::try_new`] that happens
+    /// to spell a Namecode encoding (`_N_foo`, say) decodes as that encoding;
+    /// there is no way to tell it apart, which is the reason `encode` refuses
+    /// to pass such strings through in the first place. Returns an error only
+    /// for a `_N_`-prefixed component that is a malformed or non-canonical
+    /// encoding.
     pub fn decode(&self) -> Result<String, PathError> {
         match namecode::decode(&self.0) {
             Ok(decoded) => Ok(decoded),
@@ -384,13 +388,12 @@ impl PathComponent {
         &self.0
     }
 
-    /// Borrow the validated string.
-    ///
-    /// Used by the `path!` macro to enforce that only `PathComponent` values
-    /// (not bare `String`/`&str`) are accepted as runtime path components.
-    /// Named distinctly so no standard type matches.
-    pub fn validated_str(&self) -> &str {
-        &self.0
+    /// Wrap a string that was already validated as a component — a key of a
+    /// `PathTrie`, or a component split off an existing `Path`. Crate-private
+    /// so the public surface has exactly one unchecked-free construction path.
+    pub(crate) fn trusted(s: String) -> Self {
+        debug_assert!(Path::validate_component(&s, 0).is_ok());
+        Self(s)
     }
 
     /// Consume and return the inner string.
@@ -514,8 +517,8 @@ mod tests {
     #[test]
     fn ll_conversion_roundtrips() {
         let p = path!("users/123/name");
-        let ll = p.to_ll_path();
-        let p2 = Path::try_from_ll_path(&ll.iter().collect::<Vec<_>>()).unwrap();
+        let ll = p.as_ll().clone();
+        let p2 = Path::validate(ll).unwrap();
         assert_eq!(p, p2);
     }
 
@@ -533,18 +536,10 @@ mod tests {
     }
 
     #[test]
-    fn path_error_display_invalid_path() {
-        let err = PathError::InvalidPath {
-            message: "some reason".to_string(),
-        };
-        let display = format!("{}", err);
-        assert!(display.contains("invalid path"));
-        assert!(display.contains("some reason"));
-    }
-
-    #[test]
     fn path_error_is_error() {
-        let err: Box<dyn std::error::Error> = Box::new(PathError::InvalidPath {
+        let err: Box<dyn std::error::Error> = Box::new(PathError::InvalidComponent {
+            component: "bad-name".to_string(),
+            position: 0,
             message: "test".to_string(),
         });
         let _ = err.to_string();
@@ -669,8 +664,8 @@ mod tests {
 
     #[test]
     fn ll_conversion_invalid_utf8() {
-        let invalid_utf8: Vec<&[u8]> = vec![&[0xff, 0xfe]];
-        let result = Path::try_from_ll_path(&invalid_utf8);
+        let invalid_utf8: LLPath = [Bytes::from_static(&[0xff, 0xfe])].into_iter().collect();
+        let result = Path::validate(invalid_utf8);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("not valid UTF-8"));
@@ -736,29 +731,130 @@ mod tests {
         assert!(PathComponent::try_new("a/b").is_err());
     }
 
-    #[test]
-    fn path_component_encode_roundtrip() {
-        for original in [
-            "plain",
+    /// The same corpus namecode's own round-trip test uses, exercised through
+    /// the `PathComponent` API: every string must encode to something the
+    /// component grammar accepts, and decode back to itself.
+    fn encode_corpus() -> Vec<String> {
+        let mut cases: Vec<String> = [
+            // Empty, single characters, underscore runs
+            "",
+            "a",
+            "_",
+            "__",
+            "___",
+            "a__b",
+            "__ _x",
+            // Numeric components (valid components, not valid identifiers)
+            "0",
+            "42",
+            "007",
+            "1abc",
+            "3.14159",
+            // Namecode prefix collisions, including real and fake encodings
+            "_N",
+            "_N_",
+            "_N_x",
+            "_N_test",
+            "_N__N_test",
+            "_N_hello world",
+            "_N_helloworld__fa0b",
+            "_N_helloworld__FA0B",
+            "_N_abc__9",
+            "_N___",
+            // Punctuation, whitespace, separators
             "my-account",
             "hello world",
+            "   ",
+            " leading",
+            "trailing ",
             "slashes/and spaces",
-            "oxide-🦀",
+            "a/b/c",
+            "foo.bar",
+            "foo@bar.com",
+            "50% off",
+            "price: $100",
+            "with\ttab",
+            "new\nline",
+            "null\u{0}byte",
             "123-456",
-        ] {
-            let component = PathComponent::encode(original);
-            // Encoded form is a valid component usable in paths
-            assert!(PathComponent::try_new(component.as_str()).is_ok());
-            assert_eq!(component.decode().unwrap(), original);
+            // Mixed case and non-ASCII
+            "CamelCase",
+            "SCREAMING_SNAKE",
+            "café",
+            "CAFÉ",
+            "名前",
+            "привет",
+            "مرحبا",
+            "ＦＵＬＬＷＩＤＴＨ",
+            // Combining marks, emoji, ZWJ sequences, flags
+            "e\u{301}",
+            "🦀",
+            "oxide-🦀",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦",
+            "🇺🇸",
+            "\u{200b}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        cases.push("a".repeat(1000));
+        cases.push("a b".repeat(300));
+        cases
+    }
+
+    #[test]
+    fn path_component_encode_roundtrip() {
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for original in encode_corpus() {
+            let component = PathComponent::encode(&original);
+
+            // Encoded form is always a valid component usable in paths —
+            // no debug-only assertion, the real validator.
+            PathComponent::try_new(component.as_str())
+                .unwrap_or_else(|e| panic!("encode({original:?}) is not a component: {e}"));
+
+            assert_eq!(
+                component.decode().unwrap(),
+                original,
+                "roundtrip failed (encoded: {:?})",
+                component.as_str()
+            );
+
+            if let Some(other) = seen.insert(component.as_str().to_string(), original.clone()) {
+                panic!(
+                    "{original:?} and {other:?} both encode to {:?}",
+                    component.as_str()
+                );
+            }
         }
     }
 
     #[test]
     fn path_component_encode_passthrough() {
-        // Valid identifiers pass through unchanged
-        let component = PathComponent::encode("plain");
-        assert_eq!(component.as_str(), "plain");
-        assert_eq!(component.decode().unwrap(), "plain");
+        // Valid components pass through unchanged, numeric ones included
+        for s in ["plain", "_foo", "café", "名前", "42", "0", "a__b"] {
+            let component = PathComponent::encode(s);
+            assert_eq!(component.as_str(), s, "should pass through: {s:?}");
+            assert_eq!(component.decode().unwrap(), s);
+        }
+
+        // ... and everything else is encoded, including the strings the
+        // component grammar rejects but Namecode would pass through.
+        for s in ["", "_", "my-account", "_N_test"] {
+            let component = PathComponent::encode(s);
+            assert_ne!(component.as_str(), s, "should be encoded: {s:?}");
+            assert!(component.as_str().starts_with("_N_"));
+            assert_eq!(component.decode().unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn path_component_decode_rejects_malformed_encoding() {
+        // A hand-built component that spells a broken encoding is an error,
+        // not a silent passthrough.
+        let component = PathComponent::try_new("_N_abc__6").unwrap();
+        let err = component.decode().unwrap_err();
+        assert!(err.to_string().contains("malformed namecode encoding"));
     }
 
     #[test]
@@ -845,8 +941,13 @@ mod tests {
         let p = path!("users/名前/0");
         // Path -> LLPath (free) -> Path (validated) is the identity.
         assert_eq!(Path::validate(p.clone().into_ll()).unwrap(), p);
-        // The trusted constructor agrees on already-valid input.
-        assert_eq!(Path::from_ll_unchecked(p.clone().into_ll()), p);
+    }
+
+    #[test]
+    fn trusted_component_wraps_without_reparsing() {
+        let c = PathComponent::trusted("alice".to_string());
+        assert_eq!(c.as_str(), "alice");
+        assert_eq!(path!("users").child(c), path!("users/alice"));
     }
 }
 
@@ -854,8 +955,8 @@ mod tests {
 mod construction_boundary_tests {
     #[test]
     #[should_panic(expected = "invalid component")]
-    fn hidden_constructor_preserves_validation_in_release() {
-        super::Path::from_validated_components(vec!["bad-name".into()]);
+    fn macro_constructor_preserves_validation_in_release() {
+        super::Path::from_components(vec!["bad-name".into()]);
     }
 
     #[test]

@@ -9,11 +9,13 @@
 //! ## Docs Protocol
 //!
 //! Store-specific documentation is provided by stores themselves via a `docs` path.
-//! When a store is mounted, the routing system automatically creates a redirect
-//! from `/ctx/help/{name}` to `{mount}/docs` if the store provides docs.
+//! When a store is mounted, the routing system always creates a redirect
+//! from `/ctx/help/{name}` to `{mount}/docs`, where `{name}` is the mount
+//! path without its leading `/`; the help topic index only lists mounts whose
+//! `docs` path actually reads back a manifest.
 //!
 //! For example, mounting SysStore at `/ctx/sys` with docs at `/ctx/sys/docs`
-//! creates a redirect: `/ctx/help/sys` -> `/ctx/sys/docs`.
+//! creates a redirect: `/ctx/help/ctx/sys` -> `/ctx/sys/docs`.
 //!
 //! HelpStore holds NO content itself - it is purely an aggregator.
 
@@ -26,6 +28,7 @@ use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
 
 /// Manifest for a docs topic (used for search indexing).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DocsManifest {
     pub title: String,
     pub description: Option<String>,
@@ -196,6 +199,7 @@ impl DocsIndex {
 
 /// Redirect information stored for introspection.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RedirectInfo {
     pub from: String,
     pub to: String,
@@ -204,6 +208,7 @@ pub struct RedirectInfo {
 
 /// Shared state for HelpStore, allowing updates after mounting.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct HelpStoreState {
     /// Index for search functionality
     pub index: DocsIndex,
@@ -280,11 +285,16 @@ impl HelpStore {
         Arc::clone(&self.state)
     }
 
-    fn read_meta(&self, path: &Path) -> Result<Option<Record>, Error> {
-        let state = self
-            .state
+    /// The shared state. It is plain data that `StoreContext` rebuilds
+    /// wholesale, so a poisoned lock still holds a usable index.
+    fn state(&self) -> std::sync::RwLockReadGuard<'_, HelpStoreState> {
+        self.state
             .read()
-            .map_err(|_| Error::store("help", "read", "Failed to acquire read lock"))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn read_meta(&self, path: &Path) -> Result<Option<Record>, Error> {
+        let state = self.state();
 
         if path.is_empty() {
             // GET /ctx/help/meta -> all redirects
@@ -324,10 +334,7 @@ impl HelpStore {
     }
 
     fn read_search(&self, path: &Path) -> Result<Option<Record>, Error> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Error::store("help", "read", "Failed to acquire read lock"))?;
+        let state = self.state();
 
         if path.is_empty() {
             // No query provided
@@ -353,11 +360,7 @@ impl Reader for HelpStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
         if from.is_empty() {
             // GET /ctx/help -> list all topics
-            let state = self
-                .state
-                .read()
-                .map_err(|_| Error::store("help", "read", "Failed to acquire read lock"))?;
-            return Ok(Some(Record::parsed(state.index.list_topics())));
+            return Ok(Some(Record::parsed(self.state().index.list_topics())));
         }
 
         match &from[0] {
@@ -370,7 +373,7 @@ impl Reader for HelpStore {
 
 impl Writer for HelpStore {
     fn write(&mut self, _to: &Path, _data: Record) -> Result<Path, Error> {
-        Err(Error::store("help", "write", "Help store is read-only"))
+        Err(Error::permission_denied("Help store is read-only"))
     }
 }
 

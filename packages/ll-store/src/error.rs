@@ -10,6 +10,7 @@ use bytes::Bytes;
 /// These are transport and system-level errors only. Semantic errors
 /// (invalid paths, type mismatches, codec failures) belong in higher layers.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LLError {
     /// Generic I/O or transport failure.
     ///

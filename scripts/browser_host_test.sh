@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build -p featherweight-guest --target wasm32-unknown-unknown --release --locked --offline
+cargo build -p featherweight-guest --features reference-guest --target wasm32-unknown-unknown --release --locked --offline
 cp target/wasm32-unknown-unknown/release/featherweight_guest.wasm \
    featherweight/host/browser/kv.wasm
 

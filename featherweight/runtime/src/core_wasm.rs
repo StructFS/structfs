@@ -9,51 +9,28 @@
 //! Result delivery: the host calls the guest's `block_alloc`, copies the
 //! payload into the returned buffer, and stores `{ptr, len}` (two
 //! little-endian u32s) at the caller-provided ret pointer. Calls are
-//! stateless; the typed error taxonomy crosses as negative status codes.
+//! stateless; the typed error taxonomy crosses as negative status codes
+//! ([`crate::protocol::ErrorKind::status`]).
+//!
+//! There is one engine model: a [`CoreWasmEngine`] compiles and inspects
+//! an artifact once ([`CoreWasmEngine::prepare`]), and every run of the
+//! resulting [`CoreWasmBlock`] gets a fresh Wasmtime store. The import
+//! bodies are written once and instantiated for the synchronous and the
+//! asynchronous linker.
 
 use std::sync::Arc;
 
-use structfs_core_store::{Codec, Error as StoreError, Format, Path, Reader, Record, Writer};
+use structfs_core_store::{
+    AsyncReader, AsyncWriter, Codec, Error as StoreError, Format, NoCodec, Path, Reader, Record,
+    Writer,
+};
 use structfs_handles::CancelToken;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, TypedFunc};
 
-use crate::block::BlockId;
+use crate::adapter;
 use crate::error::{Result, RuntimeError};
-use crate::metering::{EpochTicker, Metering};
-
-/// Spec 11 status codes.
-mod status {
-    pub const OK: i32 = 0;
-    pub const ABSENT: i32 = 1;
-    pub const NOT_FOUND: i32 = -1;
-    pub const PERMISSION_DENIED: i32 = -2;
-    pub const CONFLICT: i32 = -3;
-    pub const OVERLOADED: i32 = -4;
-    pub const DEADLINE_EXCEEDED: i32 = -5;
-    pub const CANCELLED: i32 = -6;
-    pub const INVALID_PATH: i32 = -7;
-    pub const RESOURCE_LIMIT: i32 = -8;
-    pub const OTHER: i32 = -9;
-}
-
-/// Map a typed store error onto a spec 11 status code.
-fn status_of(error: &StoreError) -> i32 {
-    match error {
-        StoreError::NotFound { .. } | StoreError::NoRoute { .. } => status::NOT_FOUND,
-        StoreError::PermissionDenied { .. } => status::PERMISSION_DENIED,
-        StoreError::Conflict { .. } => status::CONFLICT,
-        StoreError::Overloaded { .. } => status::OVERLOADED,
-        StoreError::DeadlineExceeded { .. } => status::DEADLINE_EXCEEDED,
-        StoreError::Cancelled { .. } => status::CANCELLED,
-        StoreError::Path(_) => status::INVALID_PATH,
-        StoreError::ResourceLimit { .. }
-        | StoreError::Codec {
-            kind: structfs_core_store::CodecErrorKind::ResourceLimit,
-            ..
-        } => status::RESOURCE_LIMIT,
-        _ => status::OTHER,
-    }
-}
+use crate::protocol::{status, ErrorKind};
+use crate::{ExecutionMeter, ExecutionOutcome, ExecutionPolicy, GrowthFailure};
 
 /// UTF-8 diagnostics remain readable to old guests. Updated SDKs recognize the
 /// versioned JSON envelope only for codec errors; other errors remain plain text.
@@ -67,20 +44,80 @@ fn host_diagnostic(error: &StoreError) -> String {
     }
 }
 
+/// Host transfer budget, independent of the guest's linear-memory size.
+const MAX_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
+
 /// Per-instance host state: the block's namespace plus its codec.
 struct CoreState<S, C> {
     store: S,
     codec: C,
     format: Format,
     limits: wasmtime::StoreLimits,
-    usage: Option<(crate::ExecutionMeter, u64)>,
+    /// The run's meter and its initial fuel, for samples at imports.
+    meter: Option<(ExecutionMeter, u64)>,
     memory: Option<wasmtime::Memory>,
-    execution: Option<(crate::ExecutionPolicy, CancelToken)>,
+    /// Checked at every import: a cancelled or expired run dispatches
+    /// nothing further.
+    execution: Option<(ExecutionPolicy, CancelToken)>,
 }
 
-fn check_host<S, C>(
-    caller: &Caller<'_, CoreState<S, C>>,
-) -> std::result::Result<(), wasmtime::Error> {
+/// What an import answers: a status and the payload for the ret record
+/// (`None` zeroes it).
+struct Reply {
+    status: i32,
+    payload: Option<Vec<u8>>,
+}
+
+impl Reply {
+    fn ok(payload: Vec<u8>) -> Self {
+        Self {
+            status: status::OK,
+            payload: Some(payload),
+        }
+    }
+
+    fn error(error: &StoreError) -> Self {
+        Self {
+            status: ErrorKind::of(error).status(),
+            payload: Some(host_diagnostic(error).into_bytes()),
+        }
+    }
+
+    fn invalid_path(message: String) -> Self {
+        Self {
+            status: status::INVALID_PATH,
+            payload: Some(message.into_bytes()),
+        }
+    }
+
+    fn read<C: Codec>(
+        codec: &C,
+        format: &Format,
+        result: std::result::Result<Option<Record>, StoreError>,
+    ) -> Self {
+        match result.and_then(|found| {
+            found
+                .map(|record| record.into_bytes(codec, format))
+                .transpose()
+        }) {
+            Ok(Some(bytes)) => Reply::ok(bytes.to_vec()),
+            Ok(None) => Reply {
+                status: status::ABSENT,
+                payload: None,
+            },
+            Err(error) => Reply::error(&error),
+        }
+    }
+
+    fn written(result: std::result::Result<Path, StoreError>) -> Self {
+        match result {
+            Ok(path) => Reply::ok(path.to_string().into_bytes()),
+            Err(error) => Reply::error(&error),
+        }
+    }
+}
+
+fn check_host<S, C>(caller: &Caller<'_, CoreState<S, C>>) -> wasmtime::Result<()> {
     if let Some((policy, cancel)) = &caller.data().execution {
         policy
             .ensure_active(cancel)
@@ -90,7 +127,7 @@ fn check_host<S, C>(
 }
 
 fn sample_caller<S, C>(caller: &mut Caller<'_, CoreState<S, C>>) {
-    if let Some((meter, initial)) = caller.data().usage.clone() {
+    if let Some((meter, initial)) = caller.data().meter.clone() {
         if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
             meter.sample_wasm(
                 initial.saturating_sub(caller.get_fuel().unwrap_or(initial)),
@@ -100,14 +137,11 @@ fn sample_caller<S, C>(caller: &mut Caller<'_, CoreState<S, C>>) {
     }
 }
 
-/// Host transfer budget, independent of the guest's linear-memory size.
-const MAX_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
-
 fn checked_range(
     ptr: usize,
     len: usize,
     memory_len: usize,
-) -> std::result::Result<std::ops::Range<usize>, wasmtime::Error> {
+) -> wasmtime::Result<std::ops::Range<usize>> {
     if len > MAX_TRANSFER_BYTES {
         return Err(wasmtime::Error::msg("guest transfer exceeds 64 MiB limit"));
     }
@@ -118,100 +152,32 @@ fn checked_range(
     Ok(ptr..end)
 }
 
-/// Deliver payload bytes to the guest: allocate via `block_alloc`, copy,
-/// and fill the ret record. Errors here are guest-contract violations
-/// and surface as wasmtime errors (traps).
-fn deliver<S: Send, C: Send>(
+fn guest_memory<S, C>(
     caller: &mut Caller<'_, CoreState<S, C>>,
-    ret_ptr: i32,
-    payload: &[u8],
-) -> std::result::Result<(), wasmtime::Error> {
-    let memory = caller
+) -> wasmtime::Result<wasmtime::Memory> {
+    caller
         .get_export("memory")
         .and_then(Extern::into_memory)
-        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
-
-    checked_range(ret_ptr as u32 as usize, 8, memory.data_size(&*caller))?;
-    if payload.len() > MAX_TRANSFER_BYTES {
-        return Err(wasmtime::Error::msg("guest transfer exceeds 64 MiB limit"));
-    }
-    let ptr = if payload.is_empty() {
-        0u32
-    } else {
-        let alloc: TypedFunc<i32, i32> = caller
-            .get_export("block_alloc")
-            .and_then(Extern::into_func)
-            .ok_or_else(|| wasmtime::Error::msg("guest exports no block_alloc"))?
-            .typed(&mut *caller)?;
-        let ptr = alloc.call(&mut *caller, payload.len() as i32)?;
-        memory.write(&mut *caller, ptr as usize, payload)?;
-        ptr as u32
-    };
-
-    let mut record = [0u8; 8];
-    record[..4].copy_from_slice(&ptr.to_le_bytes());
-    record[4..].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    memory.write(&mut *caller, ret_ptr as usize, &record)?;
-    Ok(())
+        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))
 }
 
-async fn deliver_async<S: Send, C: Send>(
+fn guest_alloc<S, C>(
     caller: &mut Caller<'_, CoreState<S, C>>,
-    ret_ptr: i32,
-    payload: &[u8],
-) -> std::result::Result<(), wasmtime::Error> {
-    let memory = caller
-        .get_export("memory")
-        .and_then(Extern::into_memory)
-        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
-
-    checked_range(ret_ptr as u32 as usize, 8, memory.data_size(&*caller))?;
-    if payload.len() > MAX_TRANSFER_BYTES {
-        return Err(wasmtime::Error::msg("guest transfer exceeds 64 MiB limit"));
-    }
-    let ptr = if payload.is_empty() {
-        0u32
-    } else {
-        let alloc: TypedFunc<i32, i32> = caller
-            .get_export("block_alloc")
-            .and_then(Extern::into_func)
-            .ok_or_else(|| wasmtime::Error::msg("guest exports no block_alloc"))?
-            .typed(&mut *caller)?;
-        let ptr = alloc.call_async(&mut *caller, payload.len() as i32).await?;
-        memory.write(&mut *caller, ptr as usize, payload)?;
-        ptr as u32
-    };
-
-    let mut record = [0u8; 8];
-    record[..4].copy_from_slice(&ptr.to_le_bytes());
-    record[4..].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    memory.write(&mut *caller, ret_ptr as usize, &record)?;
-    Ok(())
-}
-
-/// Zero the ret record (absent reads).
-fn deliver_none<S: Send, C: Send>(
-    caller: &mut Caller<'_, CoreState<S, C>>,
-    ret_ptr: i32,
-) -> std::result::Result<(), wasmtime::Error> {
-    let memory = caller
-        .get_export("memory")
-        .and_then(Extern::into_memory)
-        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
-    memory.write(&mut *caller, ret_ptr as usize, &[0u8; 8])?;
-    Ok(())
+) -> wasmtime::Result<TypedFunc<i32, i32>> {
+    caller
+        .get_export("block_alloc")
+        .and_then(Extern::into_func)
+        .ok_or_else(|| wasmtime::Error::msg("guest exports no block_alloc"))?
+        .typed(&mut *caller)
 }
 
 /// Read guest memory into a Vec.
-fn read_guest<S: Send, C: Send>(
+fn read_guest<S, C>(
     caller: &mut Caller<'_, CoreState<S, C>>,
     ptr: i32,
     len: i32,
-) -> std::result::Result<Vec<u8>, wasmtime::Error> {
-    let memory = caller
-        .get_export("memory")
-        .and_then(Extern::into_memory)
-        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
+) -> wasmtime::Result<Vec<u8>> {
+    let memory = guest_memory(caller)?;
     let range = checked_range(
         ptr as u32 as usize,
         len as u32 as usize,
@@ -220,9 +186,166 @@ fn read_guest<S: Send, C: Send>(
     Ok(memory.data(&*caller)[range].to_vec())
 }
 
-fn parse_path(bytes: &[u8]) -> std::result::Result<Path, String> {
-    let text = std::str::from_utf8(bytes).map_err(|e| format!("path is not UTF-8: {e}"))?;
-    Path::parse(text).map_err(|e| e.to_string())
+/// The path argument of an import: a guest-contract violation traps; an
+/// invalid path is an answer (status -7).
+fn guest_path<S, C>(
+    caller: &mut Caller<'_, CoreState<S, C>>,
+    ptr: i32,
+    len: i32,
+) -> wasmtime::Result<std::result::Result<Path, String>> {
+    let bytes = read_guest(caller, ptr, len)?;
+    Ok(std::str::from_utf8(&bytes)
+        .map_err(|e| format!("path is not UTF-8: {e}"))
+        .and_then(|text| Path::parse(text).map_err(|e| e.to_string())))
+}
+
+fn ret_record(ptr: u32, len: u32) -> [u8; 8] {
+    let mut record = [0u8; 8];
+    record[..4].copy_from_slice(&ptr.to_le_bytes());
+    record[4..].copy_from_slice(&len.to_le_bytes());
+    record
+}
+
+/// Deliver a reply: allocate via the guest's `block_alloc` (`$call` is
+/// `call` or `call_async`, the latter with `await`), copy the payload, and
+/// store `{ptr, len}` at the ret pointer. Violations of the guest contract
+/// trap. Evaluates to the reply's status.
+macro_rules! deliver {
+    ($caller:ident, $ret_ptr:expr, $reply:expr, $call:ident $(, $aw:ident)?) => {{
+        let reply: Reply = $reply;
+        let memory = guest_memory(&mut $caller)?;
+        let ret_ptr = $ret_ptr as u32 as usize;
+        checked_range(ret_ptr, 8, memory.data_size(&$caller))?;
+        let payload = reply.payload.unwrap_or_default();
+        if payload.len() > MAX_TRANSFER_BYTES {
+            return Err(wasmtime::Error::msg("guest transfer exceeds 64 MiB limit"));
+        }
+        let ptr = if payload.is_empty() {
+            0u32
+        } else {
+            let alloc = guest_alloc(&mut $caller)?;
+            let ptr = alloc.$call(&mut $caller, payload.len() as i32)$(.$aw)??;
+            memory.write(&mut $caller, ptr as u32 as usize, &payload)?;
+            ptr as u32
+        };
+        memory.write(&mut $caller, ret_ptr, &ret_record(ptr, payload.len() as u32))?;
+        Ok(reply.status)
+    }};
+}
+
+/// The body of the `structfs.read` import, shared by both linkers.
+macro_rules! read_import {
+    ($caller:ident, $path_ptr:ident, $path_len:ident, $ret_ptr:ident,
+     $read:ident, $call:ident $(, $aw:ident)?) => {{
+        sample_caller(&mut $caller);
+        check_host(&$caller)?;
+        let reply = match guest_path(&mut $caller, $path_ptr, $path_len)? {
+            Err(message) => Reply::invalid_path(message),
+            Ok(path) => {
+                let result = $caller.data_mut().store.$read(&path)$(.$aw)?;
+                let state = $caller.data();
+                Reply::read(&state.codec, &state.format, result)
+            }
+        };
+        deliver!($caller, $ret_ptr, reply, $call $(, $aw)?)
+    }};
+}
+
+/// The body of the `structfs.write` import, shared by both linkers.
+macro_rules! write_import {
+    ($caller:ident, $path_ptr:ident, $path_len:ident, $data_ptr:ident, $data_len:ident,
+     $ret_ptr:ident, $write:ident, $call:ident $(, $aw:ident)?) => {{
+        sample_caller(&mut $caller);
+        check_host(&$caller)?;
+        let reply = match guest_path(&mut $caller, $path_ptr, $path_len)? {
+            Err(message) => Reply::invalid_path(message),
+            Ok(path) => {
+                let data = read_guest(&mut $caller, $data_ptr, $data_len)?;
+                let state = $caller.data_mut();
+                // Stores receive Values; the boundary carries bytes.
+                match state.codec.decode(&bytes::Bytes::from(data), &state.format) {
+                    Err(error) => Reply::error(&error),
+                    Ok(value) => Reply::written(
+                        state.store.$write(&path, Record::parsed(value))$(.$aw)?,
+                    ),
+                }
+            }
+        };
+        deliver!($caller, $ret_ptr, reply, $call $(, $aw)?)
+    }};
+}
+
+fn sync_linker<S, C>(engine: &Engine) -> Result<Linker<CoreState<S, C>>>
+where
+    S: Reader + Writer + Send + 'static,
+    C: Codec + Send + Sync + 'static,
+{
+    let mut linker: Linker<CoreState<S, C>> = Linker::new(engine);
+    linker
+        .func_wrap(
+            "structfs",
+            "read",
+            |mut caller: Caller<'_, CoreState<S, C>>,
+             path_ptr: i32,
+             path_len: i32,
+             ret_ptr: i32|
+             -> wasmtime::Result<i32> {
+                read_import!(caller, path_ptr, path_len, ret_ptr, read, call)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm("linker", e))?;
+    linker
+        .func_wrap(
+            "structfs",
+            "write",
+            |mut caller: Caller<'_, CoreState<S, C>>,
+             path_ptr: i32,
+             path_len: i32,
+             data_ptr: i32,
+             data_len: i32,
+             ret_ptr: i32|
+             -> wasmtime::Result<i32> {
+                write_import!(caller, path_ptr, path_len, data_ptr, data_len, ret_ptr, write, call)
+            },
+        )
+        .map_err(|e| RuntimeError::wasm("linker", e))?;
+    Ok(linker)
+}
+
+fn async_linker<S, C>(engine: &Engine) -> Result<Linker<CoreState<S, C>>>
+where
+    S: AsyncReader + AsyncWriter + Send + 'static,
+    C: Codec + Send + Sync + 'static,
+{
+    let mut linker: Linker<CoreState<S, C>> = Linker::new(engine);
+    linker
+        .func_wrap_async(
+            "structfs",
+            "read",
+            |mut caller: Caller<'_, CoreState<S, C>>,
+             (path_ptr, path_len, ret_ptr): (i32, i32, i32)| {
+                Box::new(async move {
+                    read_import!(caller, path_ptr, path_len, ret_ptr, read_async, call_async, await)
+                })
+            },
+        )
+        .map_err(|e| RuntimeError::wasm("linker", e))?;
+    linker
+        .func_wrap_async(
+            "structfs",
+            "write",
+            |mut caller: Caller<'_, CoreState<S, C>>,
+             (path_ptr, path_len, data_ptr, data_len, ret_ptr): (i32, i32, i32, i32, i32)| {
+                Box::new(async move {
+                    write_import!(
+                        caller, path_ptr, path_len, data_ptr, data_len, ret_ptr, write_async,
+                        call_async, await
+                    )
+                })
+            },
+        )
+        .map_err(|e| RuntimeError::wasm("linker", e))?;
+    Ok(linker)
 }
 
 /// A no-op store for use during manifest retrieval.
@@ -246,13 +369,13 @@ impl Writer for NoOpStore {
 }
 
 #[async_trait::async_trait]
-impl structfs_core_store::AsyncReader for NoOpStore {
+impl AsyncReader for NoOpStore {
     async fn read_async(&mut self, path: &Path) -> std::result::Result<Option<Record>, StoreError> {
         self.read(path)
     }
 }
 #[async_trait::async_trait]
-impl structfs_core_store::AsyncWriter for NoOpStore {
+impl AsyncWriter for NoOpStore {
     async fn write_async(
         &mut self,
         path: &Path,
@@ -262,24 +385,17 @@ impl structfs_core_store::AsyncWriter for NoOpStore {
     }
 }
 
-/// A block in the core-wasm binding.
-#[derive(Clone)]
-pub struct CoreWasmBlock {
-    module_bytes: Vec<u8>,
-    prepared: Option<(Arc<CoreWasmEngine>, Module, Vec<u8>)>,
-    session: Option<Arc<CoreWasmSession>>,
-}
-
 /// Shared compilation service for fresh guest stores. Create inside Tokio and
-/// keep its executor alive until all prepared artifacts and sessions finish.
-/// Artifact retention/eviction belongs to the embedding host.
+/// keep its executor alive until all prepared artifacts and runs finish: the
+/// engine's epoch ticker, its compilations, and synchronous runs all use that
+/// runtime. Artifact retention/eviction belongs to the embedding host.
 pub struct CoreWasmEngine {
     engine: Engine,
-    _ticker: crate::metering::AsyncEpochTicker,
+    handle: tokio::runtime::Handle,
+    _ticker: adapter::EpochTicker,
     compilation: Arc<tokio::sync::Semaphore>,
     memory_limit: usize,
     sessions: Arc<tokio::sync::Semaphore>,
-    epoch_interval: std::time::Duration,
 }
 
 /// Reserves every guest slot needed by an assembly before any block starts.
@@ -293,6 +409,14 @@ pub struct CoreWasmSession {
 impl CoreWasmEngine {
     /// One engine and one 10 ms epoch ticker; at most `compile_parallelism`
     /// compilations run concurrently. No guest memory is shared.
+    ///
+    /// At most 10,000 runs hold a store at once (64 MiB linear-memory
+    /// ceiling each); a run that finds every slot taken waits for one,
+    /// cancellably and within its deadline — observe the pressure with
+    /// [`CoreWasmEngine::available_sessions`]. Use
+    /// [`CoreWasmEngine::with_limits`] for other caps; a runtime's built-in
+    /// `.wasm` loader uses these defaults unless given an engine with
+    /// `RuntimeConfig::with_core_engine`.
     pub fn new(compile_parallelism: usize) -> Result<Arc<Self>> {
         Self::with_limits(compile_parallelism, 10_000, 64 * 1024 * 1024)
     }
@@ -308,63 +432,47 @@ impl CoreWasmEngine {
             compile_parallelism,
             max_sessions,
             memory_limit,
-            std::time::Duration::from_millis(10),
+            adapter::DEFAULT_EPOCH_INTERVAL,
         )
     }
 
-    /// Engine-wide epoch cadence. Per-run policy never changes the shared ticker.
+    /// Engine-wide epoch cadence: how often a running guest observes
+    /// cancellation and its deadline. Any positive interval is accepted.
+    /// Per-run policy never changes the shared ticker.
     pub fn with_epoch_interval(
         compile_parallelism: usize,
         max_sessions: usize,
         memory_limit: usize,
         epoch_interval: std::time::Duration,
     ) -> Result<Arc<Self>> {
-        if epoch_interval.is_zero() {
-            return Err(RuntimeError::wasm(
-                "engine",
-                "epoch interval must be positive",
-            ));
-        }
         if max_sessions == 0 || memory_limit == 0 {
-            return Err(RuntimeError::wasm(
-                "engine",
-                "session and memory limits must be positive",
+            return Err(RuntimeError::EngineConfig(
+                "session and memory limits must be positive".into(),
             ));
         }
         if compile_parallelism == 0 {
-            return Err(RuntimeError::wasm(
-                "engine",
-                "compile parallelism must be positive",
+            return Err(RuntimeError::EngineConfig(
+                "compile parallelism must be positive".into(),
             ));
         }
         let mut config = wasmtime::Config::new();
-        config.consume_fuel(true);
-        config.epoch_interruption(true);
-        config.cranelift_nan_canonicalization(true);
-        config.relaxed_simd_deterministic(true);
-        let engine = Engine::new(&config).map_err(|e| RuntimeError::wasm("engine", e))?;
-        tokio::runtime::Handle::try_current().map_err(|_| {
-            RuntimeError::wasm("engine", "create the engine inside a live Tokio runtime")
-        })?;
-        let ticker = Metering {
-            fuel: None,
-            epoch_interval: Some(epoch_interval),
-        }
-        .start_async_ticker(&engine)
-        .unwrap();
+        adapter::configure_engine(&mut config);
+        let engine = Engine::new(&config).map_err(|e| RuntimeError::EngineConfig(e.to_string()))?;
+        let ticker = adapter::start_ticker(&engine, epoch_interval)?;
         Ok(Arc::new(Self {
             engine,
+            handle: tokio::runtime::Handle::current(),
             _ticker: ticker,
             compilation: Arc::new(tokio::sync::Semaphore::new(compile_parallelism)),
             memory_limit,
-            epoch_interval,
             sessions: Arc::new(tokio::sync::Semaphore::new(max_sessions)),
         }))
     }
 
-    /// Cadence of the shared engine ticker.
-    pub fn epoch_interval(&self) -> std::time::Duration {
-        self.epoch_interval
+    /// Execution slots currently free. A run that starts when this is zero
+    /// waits (cancellably, within its deadline) until another run ends.
+    pub fn available_sessions(&self) -> usize {
+        self.sessions.available_permits()
     }
 
     /// Fail fast if the complete assembly cannot be admitted. Include lazy
@@ -373,12 +481,12 @@ impl CoreWasmEngine {
         let blocks = u32::try_from(blocks)
             .ok()
             .filter(|n| *n > 0)
-            .ok_or_else(|| RuntimeError::wasm("admission", "invalid assembly block count"))?;
+            .ok_or_else(|| RuntimeError::Admission("invalid assembly block count".into()))?;
         let reservation = self
             .sessions
             .clone()
             .try_acquire_many_owned(blocks)
-            .map_err(|_| RuntimeError::wasm("admission", "assembly capacity exhausted"))?;
+            .map_err(|_| RuntimeError::Admission("assembly capacity exhausted".into()))?;
         Ok(Arc::new(CoreWasmSession {
             engine: self.clone(),
             slots: Arc::new(tokio::sync::Semaphore::new(blocks as usize)),
@@ -386,10 +494,10 @@ impl CoreWasmEngine {
         }))
     }
 
-    fn store_limits(&self) -> wasmtime::StoreLimits {
+    fn store_limits(&self, memory: usize, growth: GrowthFailure) -> wasmtime::StoreLimits {
         wasmtime::StoreLimitsBuilder::new()
-            .memory_size(self.memory_limit)
-            .trap_on_grow_failure(true)
+            .memory_size(memory)
+            .trap_on_grow_failure(growth == GrowthFailure::Trap)
             .memories(1)
             .table_elements(100_000)
             .tables(1)
@@ -399,635 +507,99 @@ impl CoreWasmEngine {
 
     /// Compile host-resolved bytes and inspect the manifest once using the same
     /// module. Callers verify artifact identity before preparation and cache the
-    /// returned driver under that identity. Each execution gets a fresh store.
+    /// returned block under that identity. Each execution gets a fresh store.
     pub async fn prepare(self: &Arc<Self>, bytes: Vec<u8>) -> Result<CoreWasmBlock> {
         let permit = self
             .compilation
             .clone()
             .acquire_owned()
             .await
-            .map_err(|e| RuntimeError::wasm("compile admission", e))?;
-        let engine = self.engine.clone();
-        let module = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            Module::new(&engine, bytes).map_err(|e| RuntimeError::wasm("module", e))
+            .map_err(|e| RuntimeError::Admission(e.to_string()))?;
+        let engine = self.clone();
+        self.handle
+            .spawn_blocking(move || {
+                let _permit = permit;
+                engine.prepare_blocking(&bytes)
+            })
+            .await
+            .map_err(|e| RuntimeError::task_failed("compile task", e))?
+    }
+
+    /// Compile and inspect on the calling thread. The runtime's built-in
+    /// loader uses this; embedders use [`CoreWasmEngine::prepare`].
+    pub(crate) fn prepare_blocking(self: &Arc<Self>, bytes: &[u8]) -> Result<CoreWasmBlock> {
+        let module =
+            Module::new(&self.engine, bytes).map_err(|e| RuntimeError::wasm("module", e))?;
+        let manifest = self.inspect(&module)?;
+        Ok(CoreWasmBlock {
+            engine: self.clone(),
+            module,
+            manifest,
+            session: None,
         })
-        .await
-        .map_err(|e| RuntimeError::wasm("compile task", e))??;
-        let linker =
-            CoreWasmBlock::async_linker::<NoOpStore, structfs_core_store::NoCodec>(&self.engine)?;
+    }
+
+    /// Instantiate once over a no-op store and call the guest's `manifest`
+    /// export (spec 01), fuel-bounded. Also checks the `run` export exists.
+    fn inspect(&self, module: &Module) -> Result<Vec<u8>> {
+        let linker = sync_linker::<NoOpStore, NoCodec>(&self.engine)?;
         let mut store = Store::new(
             &self.engine,
             CoreState {
                 store: NoOpStore,
-                codec: structfs_core_store::NoCodec,
+                codec: NoCodec,
                 format: Format::OCTET_STREAM,
-                limits: self.store_limits(),
-                usage: None,
+                limits: self.store_limits(self.memory_limit, GrowthFailure::Trap),
+                meter: None,
                 memory: None,
                 execution: None,
             },
         );
         store.limiter(|state| &mut state.limits);
         store
-            .set_fuel(10_000_000)
+            .set_fuel(adapter::MANIFEST_FUEL)
             .map_err(|e| RuntimeError::wasm("fuel", e))?;
-        store
-            .fuel_async_yield_interval(Some(100_000))
-            .map_err(|e| RuntimeError::wasm("fuel yield", e))?;
         store.set_epoch_deadline(u64::MAX / 2);
         let instance = linker
-            .instantiate_async(&mut store, &module)
-            .await
+            .instantiate(&mut store, module)
             .map_err(|e| RuntimeError::wasm("instantiate", e))?;
         instance
             .get_typed_func::<(), i32>(&mut store, "run")
-            .map_err(|e| RuntimeError::wasm("run; rebuild with the native binding", e))?;
+            .map_err(|e| RuntimeError::wasm("run export", e))?;
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, "block_alloc")
             .map_err(|e| RuntimeError::wasm("block_alloc", e))?;
         let ret = alloc
-            .call_async(&mut store, 8)
-            .await
+            .call(&mut store, 8)
             .map_err(|e| RuntimeError::wasm("block_alloc", e))?;
-        let manifest = instance
+        let code = instance
             .get_typed_func::<i32, i32>(&mut store, "manifest")
-            .map_err(|e| RuntimeError::wasm("manifest; rebuild with the native binding", e))?;
-        let code = manifest
-            .call_async(&mut store, ret)
-            .await
+            .map_err(|e| RuntimeError::wasm("manifest export", e))?
+            .call(&mut store, ret)
             .map_err(|e| RuntimeError::wasm("manifest", e))?;
         if code != status::OK {
             return Err(RuntimeError::Manifest(format!(
                 "guest manifest returned status {code}"
             )));
         }
-        let manifest = CoreWasmBlock::take_ret(&mut store, &instance, ret as u32 as usize)?;
-        let _: serde_json::Value =
-            serde_json::from_slice(&manifest).map_err(|e| RuntimeError::Manifest(e.to_string()))?;
-        Ok(CoreWasmBlock {
-            module_bytes: Vec::new(),
-            prepared: Some((self.clone(), module, manifest)),
-            session: None,
-        })
-    }
-}
-
-impl CoreWasmBlock {
-    /// Synchronous loader preparation. Runtime loading is synchronous; compile
-    /// and inspect once here, then share exactly that module with every run.
-    pub(crate) fn prepare_for_loader(bytes: Vec<u8>) -> Result<Self> {
-        let engine = CoreWasmEngine::new(1)?;
-        let module =
-            Module::new(&engine.engine, bytes).map_err(|e| RuntimeError::wasm("module", e))?;
-        let linker = Self::linker::<NoOpStore, structfs_core_store::NoCodec>(&engine.engine)?;
-        let mut store = Store::new(
-            &engine.engine,
-            CoreState {
-                store: NoOpStore,
-                codec: structfs_core_store::NoCodec,
-                format: Format::OCTET_STREAM,
-                limits: engine.store_limits(),
-                usage: None,
-                memory: None,
-                execution: None,
-            },
-        );
-        store.limiter(|state| &mut state.limits);
-        store
-            .set_fuel(10_000_000)
-            .map_err(|e| RuntimeError::wasm("fuel", e))?;
-        store.set_epoch_deadline(u64::MAX / 2);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| RuntimeError::wasm("instantiate", e))?;
-        instance
-            .get_typed_func::<(), i32>(&mut store, "run")
-            .map_err(|e| RuntimeError::wasm("run", e))?;
-        let ret = Self::alloc_ret(&mut store, &instance)?;
-        let manifest = instance
-            .get_typed_func::<i32, i32>(&mut store, "manifest")
-            .map_err(|e| RuntimeError::wasm("manifest", e))?;
-        let code = manifest
-            .call(&mut store, ret as i32)
-            .map_err(|e| RuntimeError::wasm("manifest", e))?;
-        if code != status::OK {
-            return Err(RuntimeError::Manifest(format!(
-                "guest manifest returned status {code}"
-            )));
-        }
-        let manifest = Self::take_ret(&mut store, &instance, ret)?;
-        let _: serde_json::Value =
-            serde_json::from_slice(&manifest).map_err(|e| RuntimeError::Manifest(e.to_string()))?;
-        Ok(Self {
-            module_bytes: Vec::new(),
-            prepared: Some((engine, module, manifest)),
-            session: None,
-        })
-    }
-
-    /// Wrap core-module bytes (or wat text — wasmtime accepts both).
-    #[cfg(test)]
-    fn new(module_bytes: Vec<u8>) -> Self {
-        Self {
-            module_bytes,
-            prepared: None,
-            session: None,
-        }
-    }
-
-    /// Bind shared code to an assembly's pre-reserved capacity. Guest memory
-    /// remains fresh. The reservation must belong to the code's engine.
-    pub fn in_session(&self, session: Arc<CoreWasmSession>) -> Result<Arc<Self>> {
-        let (engine, module, manifest) = self
-            .prepared
-            .as_ref()
-            .ok_or_else(|| RuntimeError::wasm("admission", "prepare the artifact first"))?;
-        if !Arc::ptr_eq(engine, &session.engine) {
-            return Err(RuntimeError::wasm(
-                "admission",
-                "reservation belongs to a different engine",
-            ));
-        }
-        Ok(Arc::new(Self {
-            module_bytes: Vec::new(),
-            prepared: Some((engine.clone(), module.clone(), manifest.clone())),
-            session: Some(session),
-        }))
-    }
-
-    /// Load from a file.
-    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Self::prepare_for_loader(std::fs::read(path)?)
-    }
-
-    fn linker<S, C>(engine: &Engine) -> Result<Linker<CoreState<S, C>>>
-    where
-        S: Reader + Writer + Send + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        let mut linker: Linker<CoreState<S, C>> = Linker::new(engine);
-
-        linker
-            .func_wrap(
-                "structfs",
-                "read",
-                |mut caller: Caller<'_, CoreState<S, C>>,
-                 path_ptr: i32,
-                 path_len: i32,
-                 ret_ptr: i32|
-                 -> std::result::Result<i32, wasmtime::Error> {
-                    check_host(&caller)?;
-                    let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
-                    let path = match parse_path(&path_bytes) {
-                        Ok(path) => path,
-                        Err(message) => {
-                            deliver(&mut caller, ret_ptr, message.as_bytes())?;
-                            return Ok(status::INVALID_PATH);
-                        }
-                    };
-                    let state = caller.data_mut();
-                    let format = state.format.clone();
-                    match state.store.read(&path) {
-                        Ok(None) => {
-                            deliver_none(&mut caller, ret_ptr)?;
-                            Ok(status::ABSENT)
-                        }
-                        Ok(Some(record)) => {
-                            let state = caller.data_mut();
-                            match record.into_bytes(&state.codec, &format) {
-                                Ok(bytes) => {
-                                    let bytes = bytes.to_vec();
-                                    deliver(&mut caller, ret_ptr, &bytes)?;
-                                    Ok(status::OK)
-                                }
-                                Err(e) => {
-                                    let code = status_of(&e);
-                                    deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
-                                    Ok(code)
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let code = status_of(&e);
-                            deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
-                            Ok(code)
-                        }
-                    }
-                },
-            )
-            .map_err(|e| RuntimeError::wasm("linker", e))?;
-
-        linker
-            .func_wrap(
-                "structfs",
-                "write",
-                |mut caller: Caller<'_, CoreState<S, C>>,
-                 path_ptr: i32,
-                 path_len: i32,
-                 data_ptr: i32,
-                 data_len: i32,
-                 ret_ptr: i32|
-                 -> std::result::Result<i32, wasmtime::Error> {
-                    check_host(&caller)?;
-                    let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
-                    let path = match parse_path(&path_bytes) {
-                        Ok(path) => path,
-                        Err(message) => {
-                            deliver(&mut caller, ret_ptr, message.as_bytes())?;
-                            return Ok(status::INVALID_PATH);
-                        }
-                    };
-                    let data = read_guest(&mut caller, data_ptr, data_len)?;
-                    let state = caller.data_mut();
-                    // Decode into a parsed record here: stores receive
-                    // Values, the boundary carries bytes.
-                    let value = match state
-                        .codec
-                        .decode(&bytes::Bytes::from(data), &state.format.clone())
-                    {
-                        Ok(value) => value,
-                        Err(e) => {
-                            let code = status_of(&e);
-                            deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
-                            return Ok(code);
-                        }
-                    };
-                    let state = caller.data_mut();
-                    match state.store.write(&path, Record::parsed(value)) {
-                        Ok(result_path) => {
-                            let text = result_path.to_string();
-                            deliver(&mut caller, ret_ptr, text.as_bytes())?;
-                            Ok(status::OK)
-                        }
-                        Err(e) => {
-                            let code = status_of(&e);
-                            deliver(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())?;
-                            Ok(code)
-                        }
-                    }
-                },
-            )
-            .map_err(|e| RuntimeError::wasm("linker", e))?;
-
-        Ok(linker)
-    }
-
-    fn async_linker<S, C>(engine: &Engine) -> Result<Linker<CoreState<S, C>>>
-    where
-        S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + Send + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        let mut linker: Linker<CoreState<S, C>> = Linker::new(engine);
-
-        linker
-            .func_wrap_async(
-                "structfs",
-                "read",
-                |mut caller: Caller<'_, CoreState<S, C>>,
-                 (path_ptr, path_len, ret_ptr): (i32, i32, i32)| {
-                    Box::new(async move {
-                        sample_caller(&mut caller);
-                        check_host(&caller)?;
-                        let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
-                        let path = match parse_path(&path_bytes) {
-                            Ok(path) => path,
-                            Err(message) => {
-                                deliver_async(&mut caller, ret_ptr, message.as_bytes()).await?;
-                                return Ok(status::INVALID_PATH);
-                            }
-                        };
-                        let state = caller.data_mut();
-                        let format = state.format.clone();
-                        match state.store.read_async(&path).await {
-                            Ok(None) => {
-                                deliver_none(&mut caller, ret_ptr)?;
-                                Ok(status::ABSENT)
-                            }
-                            Ok(Some(record)) => {
-                                let state = caller.data_mut();
-                                match record.into_bytes(&state.codec, &format) {
-                                    Ok(bytes) => {
-                                        let bytes = bytes.to_vec();
-                                        deliver_async(&mut caller, ret_ptr, &bytes).await?;
-                                        Ok(status::OK)
-                                    }
-                                    Err(e) => {
-                                        let code = status_of(&e);
-                                        deliver_async(
-                                            &mut caller,
-                                            ret_ptr,
-                                            host_diagnostic(&e).as_bytes(),
-                                        )
-                                        .await?;
-                                        Ok(code)
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let code = status_of(&e);
-                                deliver_async(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes())
-                                    .await?;
-                                Ok(code)
-                            }
-                        }
-                    })
-                },
-            )
-            .map_err(|e| RuntimeError::wasm("linker", e))?;
-
-        linker
-            .func_wrap_async(
-                "structfs",
-                "write",
-                |mut caller: Caller<'_, CoreState<S, C>>,
-                 (path_ptr, path_len, data_ptr, data_len, ret_ptr): (i32, i32, i32, i32, i32)| {
-                    Box::new(async move {
-                    check_host(&caller)?;
-                    let path_bytes = read_guest(&mut caller, path_ptr, path_len)?;
-                    let path = match parse_path(&path_bytes) {
-                        Ok(path) => path,
-                        Err(message) => {
-                            deliver_async(&mut caller, ret_ptr, message.as_bytes()).await?;
-                            return Ok(status::INVALID_PATH);
-                        }
-                    };
-                    let data = read_guest(&mut caller, data_ptr, data_len)?;
-                    let state = caller.data_mut();
-                    // Decode into a parsed record here: stores receive
-                    // Values, the boundary carries bytes.
-                    let value = match state
-                        .codec
-                        .decode(&bytes::Bytes::from(data), &state.format.clone())
-                    {
-                        Ok(value) => value,
-                        Err(e) => {
-                            let code = status_of(&e);
-                            deliver_async(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes()).await?;
-                            return Ok(code);
-                        }
-                    };
-                    let state = caller.data_mut();
-                    match state.store.write_async(&path, Record::parsed(value)).await {
-                        Ok(result_path) => {
-                            let text = result_path.to_string();
-                            deliver_async(&mut caller, ret_ptr, text.as_bytes()).await?;
-                            Ok(status::OK)
-                        }
-                        Err(e) => {
-                            let code = status_of(&e);
-                            deliver_async(&mut caller, ret_ptr, host_diagnostic(&e).as_bytes()).await?;
-                            Ok(code)
-                        }
-                    }
-                    })
-                },
-            )
-            .map_err(|e| RuntimeError::wasm("linker", e))?;
-
-        Ok(linker)
-    }
-
-    /// Run a core guest on Tokio. Imports suspend the Wasmtime fiber;
-    /// parked guests do not own a blocking-pool thread.
-    #[cfg(test)]
-    async fn run_async<S, C>(
-        &self,
-        _id: BlockId,
-        root: S,
-        codec: C,
-        format: Format,
-        metering: &Metering,
-        cancel: CancelToken,
-    ) -> Result<i32>
-    where
-        S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        self.run_metered_async(
-            _id,
-            root,
-            codec,
-            format,
-            metering,
-            cancel,
-            crate::ExecutionMeter::default(),
-        )
-        .await
-    }
-
-    /// Async execution with host-visible samples at imports, epoch yields and
-    /// termination. Fuel counts Wasmtime units, not emulated instructions.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn run_metered_async<S, C>(
-        &self,
-        _id: BlockId,
-        root: S,
-        codec: C,
-        format: Format,
-        metering: &Metering,
-        cancel: CancelToken,
-        usage: crate::ExecutionMeter,
-    ) -> Result<i32>
-    where
-        S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        let prepared = match &self.prepared {
-            Some(_) => Arc::new(self.clone()),
-            None => {
-                let engine = CoreWasmEngine::new(1)?;
-                Arc::new(engine.prepare(self.module_bytes.clone()).await?)
-            }
-        };
-        let outcome = prepared
-            .run_host_async(
-                root,
-                codec,
-                format,
-                crate::ExecutionPolicy {
-                    fuel: metering.fuel,
-                    ..Default::default()
-                },
-                cancel,
-            )
-            .await;
-        usage.replace(outcome.usage);
-        outcome.result
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn instantiate<S, C>(
-        &self,
-        state: CoreState<S, C>,
-        metering: &Metering,
-        cancel: CancelToken,
-    ) -> Result<(
-        Store<CoreState<S, C>>,
-        wasmtime::Instance,
-        Option<EpochTicker>,
-    )>
-    where
-        S: Reader + Writer + Send + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        if self.prepared.is_some() {
-            return Err(RuntimeError::wasm(
-                "execution",
-                "prepared artifacts require run_async",
-            ));
-        }
-        let mut config = wasmtime::Config::new();
-        // Deterministic execution (spec 12, runtime obligation 2), on
-        // unconditionally: the same guest bytes on the same answers must
-        // compute the same result on every host, or replay's claim is
-        // hollow. NaN canonicalization pins the one float behavior wasm
-        // leaves loose; deterministic relaxed-SIMD pins the other.
-        config.cranelift_nan_canonicalization(true);
-        config.relaxed_simd_deterministic(true);
-        metering.configure_engine(&mut config);
-        let engine = Engine::new(&config).map_err(|e| RuntimeError::wasm("engine", e))?;
-        let ticker = metering.start_ticker(&engine);
-        let module = Module::new(&engine, &self.module_bytes)
-            .map_err(|e| RuntimeError::wasm("module", e))?;
-        let linker = Self::linker::<S, C>(&engine)?;
-        let mut store = Store::new(&engine, state);
-        store.limiter(|state| &mut state.limits);
-        metering.arm_store(&mut store, cancel)?;
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| RuntimeError::wasm("instantiate", e))?;
-        Ok((store, instance, ticker))
-    }
-
-    /// Read the ret record and copy the payload out of guest memory.
-    fn take_ret<S, C>(
-        store: &mut Store<CoreState<S, C>>,
-        instance: &wasmtime::Instance,
-        ret_ptr: usize,
-    ) -> Result<Vec<u8>>
-    where
-        S: Reader + Writer + Send + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
         let memory = instance
-            .get_memory(&mut *store, "memory")
+            .get_memory(&mut store, "memory")
             .ok_or_else(|| RuntimeError::wasm("memory", "guest exports no memory"))?;
         let mut record = [0u8; 8];
         memory
-            .read(&mut *store, ret_ptr, &mut record)
+            .read(&store, ret as u32 as usize, &mut record)
             .map_err(|e| RuntimeError::wasm("ret", e))?;
-        let ptr = u32::from_le_bytes(record[..4].try_into().unwrap()) as usize;
-        let len = u32::from_le_bytes(record[4..].try_into().unwrap()) as usize;
-        let range = checked_range(ptr, len, memory.data_size(&*store))
-            .map_err(|e| RuntimeError::wasm("ret", e))?;
-        Ok(memory.data(&*store)[range].to_vec())
-    }
-
-    /// Fixed scratch address for host-driven calls' ret records: the
-    /// guest's `block_alloc` provides it, keeping the host out of the
-    /// guest's memory layout.
-    fn alloc_ret<S, C>(
-        store: &mut Store<CoreState<S, C>>,
-        instance: &wasmtime::Instance,
-    ) -> Result<usize>
-    where
-        S: Reader + Writer + Send + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        let alloc = instance
-            .get_typed_func::<i32, i32>(&mut *store, "block_alloc")
-            .map_err(|e| RuntimeError::wasm("block_alloc", e))?;
-        let ptr = alloc
-            .call(&mut *store, 8)
-            .map_err(|e| RuntimeError::wasm("block_alloc", e))?;
-        Ok(ptr as usize)
-    }
-
-    /// Retrieve the manifest (spec 01), pre-wiring.
-    ///
-    /// Fuel-bounded so a misbehaving manifest cannot hang the loader.
-    pub fn manifest(&self) -> Result<Vec<u8>> {
-        if let Some((_, _, manifest)) = &self.prepared {
-            return Ok(manifest.clone());
-        }
-        use structfs_core_store::NoCodec;
-        let state = CoreState {
-            store: NoOpStore,
-            codec: NoCodec,
-            format: Format::OCTET_STREAM,
-            limits: wasmtime::StoreLimitsBuilder::new()
-                .memory_size(64 * 1024 * 1024)
-                .trap_on_grow_failure(true)
-                .build(),
-            usage: None,
-            memory: None,
-            execution: None,
-        };
-        let metering = Metering {
-            fuel: Some(10_000_000),
-            epoch_interval: None,
-        };
-        let (mut store, instance, _ticker) =
-            self.instantiate(state, &metering, CancelToken::new())?;
-        let ret_ptr = Self::alloc_ret(&mut store, &instance)?;
-        let manifest = instance
-            .get_typed_func::<i32, i32>(&mut store, "manifest")
-            .map_err(|e| RuntimeError::wasm("manifest", e))?;
-        let code = manifest
-            .call(&mut store, ret_ptr as i32)
-            .map_err(|e| RuntimeError::wasm("manifest", e))?;
-        if code != status::OK {
-            return Err(RuntimeError::Manifest(format!(
-                "guest manifest returned status {code}"
-            )));
-        }
-        Self::take_ret(&mut store, &instance, ret_ptr)
-    }
-
-    /// Run the block over its namespace with the declared codec/format.
-    ///
-    /// Returns the guest's exit code. Per spec 11 the code is advisory:
-    /// a `shutdown/complete {code}` the block wrote takes precedence,
-    /// which the runtime enforces when recording the outcome.
-    ///
-    /// `cancel` interrupts *guest execution* via epoch interruption (when
-    /// metering enables it); parked store reads are cancelled by the same
-    /// token through the store contract.
-    #[cfg(test)]
-    fn run<S, C>(
-        &self,
-        _id: BlockId,
-        root: S,
-        codec: C,
-        format: Format,
-        metering: &Metering,
-        cancel: CancelToken,
-    ) -> Result<i32>
-    where
-        S: Reader + Writer + Send + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        let state = CoreState {
-            store: root,
-            codec,
-            format,
-            limits: wasmtime::StoreLimitsBuilder::new()
-                .memory_size(64 * 1024 * 1024)
-                .trap_on_grow_failure(true)
-                .build(),
-            usage: None,
-            memory: None,
-            execution: None,
-        };
-        let (mut store, instance, _ticker) = self.instantiate(state, metering, cancel)?;
-        let run = instance
-            .get_typed_func::<(), i32>(&mut store, "run")
-            .map_err(|e| RuntimeError::wasm("run", e))?;
-        // `{:#}` renders the whole cause chain: fuel exhaustion and
-        // shutdown interrupts live below the trap's backtrace header.
-        run.call(&mut store, ())
-            .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
+        let [p0, p1, p2, p3, l0, l1, l2, l3] = record;
+        let range = checked_range(
+            u32::from_le_bytes([p0, p1, p2, p3]) as usize,
+            u32::from_le_bytes([l0, l1, l2, l3]) as usize,
+            memory.data_size(&store),
+        )
+        .map_err(|e| RuntimeError::wasm("ret", e))?;
+        let manifest = memory.data(&store)[range].to_vec();
+        serde_json::from_slice::<serde_json::Value>(&manifest)
+            .map_err(|e| RuntimeError::Manifest(e.to_string()))?;
+        Ok(manifest)
     }
 }
 
@@ -1037,252 +609,291 @@ pub fn is_component(bytes: &[u8]) -> bool {
     bytes.len() >= 8 && &bytes[..4] == b"\0asm" && bytes[6] == 0x01
 }
 
+/// A prepared block in the core-wasm binding: compiled code plus its
+/// manifest, bound to the engine that compiled it. Start runs with
+/// [`CoreWasmBlock::start_sync`] / [`CoreWasmBlock::start_async`], or
+/// register it with [`crate::RuntimeConfig::register_core_artifact`].
+#[derive(Clone)]
+pub struct CoreWasmBlock {
+    engine: Arc<CoreWasmEngine>,
+    module: Module,
+    manifest: Vec<u8>,
+    session: Option<Arc<CoreWasmSession>>,
+}
+
+impl std::fmt::Debug for CoreWasmBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreWasmBlock")
+            .field("manifest", &String::from_utf8_lossy(&self.manifest))
+            .field("session", &self.session.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Everything one run needs besides the prepared code.
+pub(crate) struct HostRun<S, C> {
+    pub(crate) host: S,
+    pub(crate) codec: C,
+    pub(crate) format: Format,
+    pub(crate) policy: ExecutionPolicy,
+    pub(crate) cancel: CancelToken,
+    /// Samples land here during the run, so an instance meter shows live
+    /// usage; it is finished when the run ends.
+    pub(crate) meter: ExecutionMeter,
+}
+
 impl CoreWasmBlock {
-    async fn host_admission(
-        &self,
-        policy: &crate::ExecutionPolicy,
-        cancel: &CancelToken,
-    ) -> Result<(Module, tokio::sync::OwnedSemaphorePermit, usize)> {
-        policy.ensure_active(cancel)?;
-        let (engine, module, _) = self.prepared.as_ref().ok_or_else(|| {
-            RuntimeError::wasm(
-                "execution",
-                "prepare the artifact before starting owned execution",
-            )
-        })?;
-        let memory = policy.memory_bytes.unwrap_or(engine.memory_limit);
-        if memory == 0 || memory > engine.memory_limit {
-            return Err(RuntimeError::wasm(
-                "policy",
-                "memory limit must be positive and cannot exceed engine ceiling",
+    /// Bind shared code to an assembly's pre-reserved capacity. Guest memory
+    /// remains fresh. The reservation must belong to the code's engine.
+    pub fn in_session(&self, session: Arc<CoreWasmSession>) -> Result<Arc<Self>> {
+        if !Arc::ptr_eq(&self.engine, &session.engine) {
+            return Err(RuntimeError::Admission(
+                "reservation belongs to a different engine".into(),
             ));
         }
-        let admission = async {
-            if let Some(session) = &self.session {
-                // Session reservations are already owned; retain the session and
-                // use its local slots through an Arc semaphore.
-                session.slots.clone().acquire_owned().await
-            } else {
-                engine.sessions.clone().acquire_owned().await
-            }
+        Ok(Arc::new(Self {
+            session: Some(session),
+            ..self.clone()
+        }))
+    }
+
+    /// The block's JSON manifest (spec 01), captured at preparation.
+    pub fn manifest(&self) -> &[u8] {
+        &self.manifest
+    }
+
+    /// Wait for an execution slot (the session's, or the engine's) and
+    /// validate the policy. Returns the slot and the memory ceiling.
+    async fn admit(
+        &self,
+        policy: &ExecutionPolicy,
+        cancel: &CancelToken,
+    ) -> Result<(tokio::sync::OwnedSemaphorePermit, usize)> {
+        policy.ensure_active(cancel)?;
+        let memory = policy.memory_bytes.unwrap_or(self.engine.memory_limit);
+        if memory == 0 || memory > self.engine.memory_limit {
+            return Err(RuntimeError::Policy(
+                "memory limit must be positive and cannot exceed engine ceiling".into(),
+            ));
+        }
+        let slots = match &self.session {
+            // Session reservations are already owned; use the session's
+            // local slots.
+            Some(session) => session.slots.clone(),
+            None => self.engine.sessions.clone(),
         };
         let deadline = async {
-            if let Some(deadline) = policy.deadline {
-                tokio::time::sleep_until(deadline).await;
-            } else {
-                std::future::pending::<()>().await;
+            match policy.deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
             }
         };
         let permit = tokio::select! { biased;
-            _ = cancel.cancelled() => return Err(structfs_core_store::Error::cancelled("execution admission cancelled").into()),
-            _ = deadline => return Err(structfs_core_store::Error::deadline_exceeded("execution admission deadline").into()),
-            permit = admission => permit.map_err(|e| RuntimeError::wasm("admission", e))?,
+            _ = cancel.cancelled() => return Err(StoreError::cancelled("execution admission cancelled").into()),
+            _ = deadline => return Err(StoreError::deadline_exceeded("execution admission deadline").into()),
+            permit = slots.acquire_owned() => permit.map_err(|e| RuntimeError::Admission(e.to_string()))?,
         };
         policy.ensure_active(cancel)?;
-        Ok((module.clone(), permit, memory))
+        Ok((permit, memory))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn host_store<S, C>(
-        module: &Module,
-        host: S,
-        codec: C,
-        format: Format,
+    fn new_store<S, C>(
+        &self,
         memory: usize,
-        policy: &crate::ExecutionPolicy,
-        cancel: &CancelToken,
-        usage: &crate::ExecutionMeter,
-    ) -> Store<CoreState<S, C>> {
-        usage.configure_wasm(policy.fuel, Some(memory));
-        Store::new(
-            module.engine(),
-            CoreState {
-                store: host,
-                codec,
-                format,
-                limits: wasmtime::StoreLimitsBuilder::new()
-                    .memory_size(memory)
-                    .trap_on_grow_failure(policy.growth_failure == crate::GrowthFailure::Trap)
-                    .memories(1)
-                    .instances(1)
-                    .tables(1)
-                    .table_elements(100_000)
-                    .build(),
-                usage: Some((usage.clone(), policy.fuel.unwrap_or(u64::MAX))),
-                memory: None,
-                execution: Some((policy.clone(), cancel.clone())),
-            },
-        )
+        run: HostRun<S, C>,
+    ) -> (Store<CoreState<S, C>>, ExecutionMeter) {
+        let HostRun {
+            host,
+            codec,
+            format,
+            policy,
+            cancel,
+            meter,
+        } = run;
+        meter.configure_wasm(policy.fuel, Some(memory));
+        let limits = self.engine.store_limits(memory, policy.growth_failure);
+        let state = CoreState {
+            store: host,
+            codec,
+            format,
+            limits,
+            meter: Some((meter.clone(), policy.fuel.unwrap_or(u64::MAX))),
+            memory: None,
+            execution: Some((policy, cancel)),
+        };
+        (Store::new(&self.engine.engine, state), meter)
     }
 
-    fn arm_host<S: Send, C: Send>(
+    fn arm<S: 'static, C: 'static>(
         store: &mut Store<CoreState<S, C>>,
         asynchronous: bool,
     ) -> Result<()> {
         store.limiter(|state| &mut state.limits);
-        let (policy, cancel) = store.data().execution.as_ref().unwrap().clone();
+        let (policy, cancel) = store
+            .data()
+            .execution
+            .clone()
+            .ok_or_else(|| RuntimeError::Policy("store has no execution policy".into()))?;
         policy.ensure_active(&cancel)?;
-        store
-            .set_fuel(policy.fuel.unwrap_or(u64::MAX))
-            .map_err(|e| RuntimeError::wasm("fuel", e))?;
-        if asynchronous {
-            store
-                .fuel_async_yield_interval(Some(100_000))
-                .map_err(|e| RuntimeError::wasm("fuel yield", e))?;
-        }
-        store.set_epoch_deadline(1);
-        store.epoch_deadline_callback(move |_| {
-            policy
-                .ensure_active(&cancel)
-                .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-            Ok(if asynchronous {
-                wasmtime::UpdateDeadline::Yield(1)
-            } else {
-                wasmtime::UpdateDeadline::Continue(1)
-            })
-        });
-        Ok(())
+        let fuel = policy.fuel;
+        adapter::arm_store(store, fuel, asynchronous, move || {
+            policy.ensure_active(&cancel).map_err(|e| e.to_string())
+        })
     }
 
-    fn finish_host<S, C>(
+    /// Record final usage and hand the host back. The host is extracted
+    /// before the Wasm store drops; memory then reads as reclaimed.
+    fn finish<S, C>(
         mut store: Store<CoreState<S, C>>,
         mut result: Result<i32>,
         host_panicked: bool,
-        usage: crate::ExecutionMeter,
-    ) -> crate::ExecutionOutcome<S> {
-        let (policy, cancel) = store.data().execution.as_ref().unwrap();
-        if !host_panicked {
-            if let Err(error) = policy.ensure_active(cancel) {
-                result = Err(error);
+        meter: ExecutionMeter,
+    ) -> ExecutionOutcome<S> {
+        let accounted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some((policy, cancel)) = &store.data().execution {
+                if !host_panicked {
+                    if let Err(error) = policy.ensure_active(cancel) {
+                        result = Err(error);
+                    }
+                }
             }
-        }
-        let fuel = policy
-            .fuel
-            .unwrap_or(u64::MAX)
-            .saturating_sub(store.get_fuel().unwrap_or(0));
-        if let Some(memory) = store.data().memory {
-            usage.sample_wasm(fuel, memory.data_size(&store));
-        } else {
-            usage.sample_fuel(fuel);
-        }
-        // Extract the host before dropping the Wasm store, then mark memory reclaimed.
+            let initial = store
+                .data()
+                .meter
+                .as_ref()
+                .map_or(u64::MAX, |(_, fuel)| *fuel);
+            let fuel = initial.saturating_sub(store.get_fuel().unwrap_or(0));
+            match store.data().memory {
+                Some(memory) => meter.sample_wasm(fuel, memory.data_size(&store)),
+                None => meter.sample_fuel(fuel),
+            }
+        }));
         let _ = &mut store;
         let host = store.into_data().store;
-        usage.finish();
-        crate::ExecutionOutcome {
+        meter.finish();
+        ExecutionOutcome {
             result,
             host,
-            usage: usage.snapshot(),
-            host_panicked,
+            usage: meter.snapshot(),
+            host_panicked: host_panicked || accounted.is_err(),
         }
     }
 
-    pub(crate) async fn run_host_sync<S, C>(
-        self: &Arc<Self>,
-        host: S,
-        codec: C,
-        format: Format,
-        policy: crate::ExecutionPolicy,
-        cancel: CancelToken,
-    ) -> crate::ExecutionOutcome<S>
-    where
-        S: Reader + Writer + 'static,
-        C: Codec + Send + Sync + 'static,
-    {
-        let usage = crate::ExecutionMeter::default();
-        let (module, permit, memory) = match self.host_admission(&policy, &cancel).await {
-            Ok(admission) => admission,
-            Err(error) => {
-                usage.finish();
-                return crate::ExecutionOutcome {
-                    result: Err(error),
-                    host,
-                    usage: usage.snapshot(),
-                    host_panicked: false,
-                };
-            }
-        };
-        // Retain code, engine ticker, and assembly reservation while blocking.
-        let block = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _keep = (block, permit);
-            let mut store = Self::host_store(
-                &module, host, codec, format, memory, &policy, &cancel, &usage,
-            );
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::arm_host(&mut store, false)?;
-                let linker = Self::linker::<S, C>(module.engine())?;
-                let instance = linker
-                    .instantiate(&mut store, &module)
-                    .map_err(|e| RuntimeError::wasm("instantiate", format!("{e:#}")))?;
-                store.data_mut().memory = instance.get_memory(&mut store, "memory");
-                let run = instance
-                    .get_typed_func::<(), i32>(&mut store, "run")
-                    .map_err(|e| RuntimeError::wasm("run", e))?;
-                run.call(&mut store, ())
-                    .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
-            }));
-            let panicked = result.is_err();
-            Self::finish_host(
-                store,
-                result.unwrap_or_else(|_| {
-                    Err(RuntimeError::wasm(
-                        "host panic",
-                        "host state may be inconsistent",
-                    ))
-                }),
-                panicked,
-                usage,
-            )
-        })
-        .await
-        .expect("blocking execution catches host panics; keep executor alive until joined")
+    fn refused<S>(host: S, error: RuntimeError, meter: ExecutionMeter) -> ExecutionOutcome<S> {
+        meter.finish();
+        ExecutionOutcome {
+            result: Err(error),
+            host,
+            usage: meter.snapshot(),
+            host_panicked: false,
+        }
     }
 
-    pub(crate) async fn run_host_async<S, C>(
+    fn host_panic<T>(_: T) -> RuntimeError {
+        RuntimeError::HostPanic("host state may be inconsistent".into())
+    }
+
+    /// Run on the engine's blocking pool with synchronous host effects.
+    ///
+    /// Returns `None` only when the host state itself was destroyed (a
+    /// panic in the engine outside every guarded region); a run that never
+    /// started, or whose host panicked, still returns the host.
+    pub(crate) async fn run_host_sync<S, C>(
         self: &Arc<Self>,
-        host: S,
-        codec: C,
-        format: Format,
-        policy: crate::ExecutionPolicy,
-        cancel: CancelToken,
-    ) -> crate::ExecutionOutcome<S>
+        run: HostRun<S, C>,
+    ) -> Option<ExecutionOutcome<S>>
     where
-        S: structfs_core_store::AsyncReader + structfs_core_store::AsyncWriter + 'static,
+        S: Reader + Writer + Send + 'static,
         C: Codec + Send + Sync + 'static,
     {
-        let usage = crate::ExecutionMeter::default();
-        let (module, _permit, memory) = match self.host_admission(&policy, &cancel).await {
-            Ok(admission) => admission,
-            Err(error) => {
-                usage.finish();
-                return crate::ExecutionOutcome {
-                    result: Err(error),
-                    host,
-                    usage: usage.snapshot(),
-                    host_panicked: false,
-                };
-            }
+        let (permit, memory) = match self.admit(&run.policy, &run.cancel).await {
+            Ok(admitted) => admitted,
+            Err(error) => return Some(Self::refused(run.host, error, run.meter)),
         };
-        let mut store = Self::host_store(
-            &module, host, codec, format, memory, &policy, &cancel, &usage,
-        );
+        // The run parks in a slot until the worker takes it, so a worker
+        // that never starts (its executor shut down) cannot lose the host.
+        let slot = Arc::new(std::sync::Mutex::new(Some(run)));
+        let pending = slot.clone();
+        // Retain code, engine ticker, and assembly reservation while blocking.
+        let block = self.clone();
+        let joined = self
+            .engine
+            .handle
+            .spawn_blocking(move || {
+                let _permit = permit;
+                let run = pending.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+                let (mut store, meter) = block.new_store(memory, run);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::arm(&mut store, false)?;
+                    let linker = sync_linker::<S, C>(&block.engine.engine)?;
+                    let instance = linker
+                        .instantiate(&mut store, &block.module)
+                        .map_err(|e| RuntimeError::wasm("instantiate", format!("{e:#}")))?;
+                    store.data_mut().memory = instance.get_memory(&mut store, "memory");
+                    instance
+                        .get_typed_func::<(), i32>(&mut store, "run")
+                        .map_err(|e| RuntimeError::wasm("run", e))?
+                        .call(&mut store, ())
+                        .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
+                }));
+                let panicked = result.is_err();
+                Some(Self::finish(
+                    store,
+                    result.unwrap_or_else(|e| Err(Self::host_panic(e))),
+                    panicked,
+                    meter,
+                ))
+            })
+            .await;
+        match joined {
+            Ok(outcome) => outcome,
+            Err(join) => {
+                let run = slot.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+                let error = if join.is_panic() {
+                    Self::host_panic(join)
+                } else {
+                    RuntimeError::ExecutionLost("the blocking worker never started".into())
+                };
+                let mut outcome = Self::refused(run.host, error, run.meter);
+                outcome.host_panicked = matches!(outcome.result, Err(RuntimeError::HostPanic(_)));
+                Some(outcome)
+            }
+        }
+    }
+
+    /// Run on the calling task with asynchronous host effects: imports
+    /// suspend the Wasmtime fiber, so a parked guest owns no thread.
+    pub(crate) async fn run_host_async<S, C>(
+        self: &Arc<Self>,
+        run: HostRun<S, C>,
+    ) -> ExecutionOutcome<S>
+    where
+        S: AsyncReader + AsyncWriter + Send + 'static,
+        C: Codec + Send + Sync + 'static,
+    {
+        let (_permit, memory) = match self.admit(&run.policy, &run.cancel).await {
+            Ok(admitted) => admitted,
+            Err(error) => return Self::refused(run.host, error, run.meter),
+        };
+        let (mut store, meter) = self.new_store(memory, run);
         let result = {
             let work = async {
-                Self::arm_host(&mut store, true)?;
-                let linker = Self::async_linker::<S, C>(module.engine())?;
+                Self::arm(&mut store, true)?;
+                let linker = async_linker::<S, C>(&self.engine.engine)?;
                 let instance = linker
-                    .instantiate_async(&mut store, &module)
+                    .instantiate_async(&mut store, &self.module)
                     .await
                     .map_err(|e| RuntimeError::wasm("instantiate", format!("{e:#}")))?;
                 store.data_mut().memory = instance.get_memory(&mut store, "memory");
-                let run = instance
+                instance
                     .get_typed_func::<(), i32>(&mut store, "run")
-                    .map_err(|e| RuntimeError::wasm("run", e))?;
-                run.call_async(&mut store, ())
+                    .map_err(|e| RuntimeError::wasm("run", e))?
+                    .call_async(&mut store, ())
                     .await
                     .map_err(|e| RuntimeError::wasm("run", format!("{e:#}")))
             };
+            // Host panics are caught per poll, so the store (and the host
+            // inside it) outlives them.
             let mut work = std::pin::pin!(work);
             std::future::poll_fn(|cx| {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1290,490 +901,20 @@ impl CoreWasmBlock {
                 })) {
                     Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
                     Ok(std::task::Poll::Ready(result)) => std::task::Poll::Ready(Ok(result)),
-                    Err(_) => std::task::Poll::Ready(Err(())),
+                    Err(panic) => std::task::Poll::Ready(Err(panic)),
                 }
             })
             .await
         };
         let panicked = result.is_err();
-        Self::finish_host(
+        Self::finish(
             store,
-            result.unwrap_or_else(|_| {
-                Err(RuntimeError::wasm(
-                    "host panic",
-                    "host state may be inconsistent",
-                ))
-            }),
+            result.unwrap_or_else(|e| Err(Self::host_panic(e))),
             panicked,
-            usage,
+            meter,
         )
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use structfs_core_store::{path, MemoryStore, Value};
-    use structfs_serde_store::JsonCodec;
-
-    /// A complete spec 11 guest, hand-written in wat (~40 lines): a bump
-    /// allocator, a static manifest, and a run() that reads `input`,
-    /// verifies `missing` is absent, and echoes the data to `output`.
-    /// This is the "an SDK is an afternoon" claim, demonstrated in the
-    /// least ergonomic language available.
-    const ECHO_GUEST: &str = r#"
-        (module
-          (import "structfs" "read"
-            (func $read (param i32 i32 i32) (result i32)))
-          (import "structfs" "write"
-            (func $write (param i32 i32 i32 i32 i32) (result i32)))
-          (memory (export "memory") 1)
-          (global $bump (mut i32) (i32.const 4096))
-          (func (export "block_alloc") (param $len i32) (result i32)
-            (local $ptr i32)
-            (local.set $ptr (global.get $bump))
-            (global.set $bump (i32.add (global.get $bump) (local.get $len)))
-            (local.get $ptr))
-          (data (i32.const 1040) "input")
-          (data (i32.const 1056) "missing")
-          (data (i32.const 1072) "output")
-          (data (i32.const 1088)
-            "{\"name\":\"wat-echo\",\"serialization\":\"application/json\"}")
-          (func (export "manifest") (param $ret i32) (result i32)
-            (i32.store (local.get $ret) (i32.const 1088))
-            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 54))
-            (i32.const 0))
-          (func (export "run") (result i32)
-            (local $st i32)
-            ;; read "input" -> ret record at 1024
-            (local.set $st
-              (call $read (i32.const 1040) (i32.const 5) (i32.const 1024)))
-            (if (i32.ne (local.get $st) (i32.const 0))
-              (then (return (i32.const 1))))
-            ;; read "missing" -> must be status 1 (absent)
-            (local.set $st
-              (call $read (i32.const 1056) (i32.const 7) (i32.const 1032)))
-            (if (i32.ne (local.get $st) (i32.const 1))
-              (then (return (i32.const 2))))
-            ;; write the input bytes to "output"
-            (local.set $st
-              (call $write (i32.const 1072) (i32.const 6)
-                (i32.load (i32.const 1024)) (i32.load (i32.const 1028))
-                (i32.const 1032)))
-            (if (i32.ne (local.get $st) (i32.const 0))
-              (then (return (i32.const 3))))
-            (i32.const 0)))
-    "#;
-
-    /// A guest asserting that the typed error taxonomy crosses the
-    /// boundary: reading an unwired path must be status -2
-    /// (permission denied / ENOTCAPABLE).
-    const DENIED_GUEST: &str = r#"
-        (module
-          (import "structfs" "read"
-            (func $read (param i32 i32 i32) (result i32)))
-          (memory (export "memory") 1)
-          (global $bump (mut i32) (i32.const 4096))
-          (func (export "block_alloc") (param $len i32) (result i32)
-            (local $ptr i32)
-            (local.set $ptr (global.get $bump))
-            (global.set $bump (i32.add (global.get $bump) (local.get $len)))
-            (local.get $ptr))
-          (data (i32.const 1040) "secret")
-          (data (i32.const 1088) "{\"serialization\":\"application/json\"}")
-          (func (export "manifest") (param $ret i32) (result i32)
-            (i32.store (local.get $ret) (i32.const 1088))
-            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 36))
-            (i32.const 0))
-          (func (export "run") (result i32)
-            (if (i32.ne
-                  (call $read (i32.const 1040) (i32.const 6) (i32.const 1024))
-                  (i32.const -2))
-              (then (return (i32.const 1))))
-            (i32.const 0)))
-    "#;
-
-    /// Denies everything, like an unwired namespace.
-    struct DenyStore;
-
-    impl Reader for DenyStore {
-        fn read(&mut self, from: &Path) -> std::result::Result<Option<Record>, StoreError> {
-            Err(StoreError::permission_denied(format!("not wired: {from}")))
-        }
-    }
-
-    impl Writer for DenyStore {
-        fn write(&mut self, to: &Path, _data: Record) -> std::result::Result<Path, StoreError> {
-            Err(StoreError::permission_denied(format!("not wired: {to}")))
-        }
-    }
-
-    #[test]
-    fn manifest_crosses_the_boundary() {
-        let block = CoreWasmBlock::new(ECHO_GUEST.as_bytes().to_vec());
-        let manifest = block.manifest().unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
-        assert_eq!(json["name"], "wat-echo");
-        assert_eq!(json["serialization"], "application/json");
-    }
-
-    #[test]
-    fn wat_guest_echoes_through_the_store() {
-        let mut store = MemoryStore::new();
-        store
-            .write(
-                &path!("input"),
-                Record::parsed(Value::from("hello from the host")),
-            )
-            .unwrap();
-
-        let block = CoreWasmBlock::new(ECHO_GUEST.as_bytes().to_vec());
-        let mut store_after = {
-            let shared = structfs_core_store::Shared::new(store);
-            let code = block
-                .run(
-                    BlockId::new(),
-                    shared.clone(),
-                    JsonCodec,
-                    Format::JSON,
-                    &Metering::disabled(),
-                    CancelToken::new(),
-                )
-                .unwrap();
-            assert_eq!(code, 0, "guest reported failure");
-            shared
-        };
-
-        // The guest round-tripped the JSON bytes through its own memory.
-        let output = store_after.read(&path!("output")).unwrap().unwrap();
-        assert_eq!(output.as_value(), Some(&Value::from("hello from the host")));
-    }
-
-    #[test]
-    fn every_transport_crosses_the_boundary() {
-        use structfs_serde_store::MultiCodec;
-
-        // The echo guest moves the payload bytes verbatim, so a
-        // round trip proves host encode -> guest -> host decode for
-        // each transport. The binary transports carry Value::Bytes
-        // faithfully — the JSON tier cannot.
-        let cases = [
-            (Format::JSON, Value::from("hello over json")),
-            (Format::CBOR, Value::Bytes(vec![0, 159, 146, 150])),
-            (Format::FLEXBUFFERS, Value::Bytes(vec![255, 0, 7])),
-            (
-                Format::VALUE_JSON,
-                Value::Array(vec![
-                    Value::Unsigned(u64::MAX),
-                    Value::Bytes(vec![0, 255]),
-                    Value::Null,
-                    Value::Float(-0.0),
-                    Value::Float(f64::NAN),
-                ]),
-            ),
-        ];
-        for (format, value) in cases {
-            let mut store = MemoryStore::new();
-            store
-                .write(&path!("input"), Record::parsed(value.clone()))
-                .unwrap();
-
-            let block = CoreWasmBlock::new(ECHO_GUEST.as_bytes().to_vec());
-            let shared = structfs_core_store::Shared::new(store);
-            let code = block
-                .run(
-                    BlockId::new(),
-                    shared.clone(),
-                    MultiCodec::standard(),
-                    format.clone(),
-                    &Metering::disabled(),
-                    CancelToken::new(),
-                )
-                .unwrap();
-            assert_eq!(code, 0, "guest reported failure under {format}");
-
-            let mut after = shared.clone();
-            let output = after.read(&path!("output")).unwrap().unwrap();
-            assert!(
-                output.as_value().unwrap().semantic_eq(&value),
-                "mangled by {format}"
-            );
-        }
-    }
-
-    #[test]
-    fn typed_errors_cross_as_status_codes() {
-        let block = CoreWasmBlock::new(DENIED_GUEST.as_bytes().to_vec());
-        let code = block
-            .run(
-                BlockId::new(),
-                DenyStore,
-                JsonCodec,
-                Format::JSON,
-                &Metering::disabled(),
-                CancelToken::new(),
-            )
-            .unwrap();
-        assert_eq!(code, 0, "guest did not observe status -2");
-    }
-
-    /// Spins forever: the metering test subject.
-    const SPIN_GUEST: &str = r#"
-        (module
-          (memory (export "memory") 1)
-          (func (export "block_alloc") (param i32) (result i32) (i32.const 4096))
-          (data (i32.const 1088) "{\"serialization\":\"application/json\"}")
-          (func (export "manifest") (param $ret i32) (result i32)
-            (i32.store (local.get $ret) (i32.const 1088))
-            (i32.store (i32.add (local.get $ret) (i32.const 4)) (i32.const 36))
-            (i32.const 0))
-          (func (export "run") (result i32)
-            (loop $spin (br $spin))
-            (i32.const 0)))
-    "#;
-
-    #[test]
-    fn fuel_cap_stops_a_spinning_guest() {
-        let block = CoreWasmBlock::new(SPIN_GUEST.as_bytes().to_vec());
-        let metering = Metering {
-            fuel: Some(1_000_000),
-            epoch_interval: None,
-        };
-        let err = block
-            .run(
-                BlockId::new(),
-                DenyStore,
-                JsonCodec,
-                Format::JSON,
-                &metering,
-                CancelToken::new(),
-            )
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("fuel"),
-            "expected fuel exhaustion, got: {err}"
-        );
-    }
-
-    #[test]
-    fn cancellation_interrupts_a_spinning_guest() {
-        let block = std::sync::Arc::new(CoreWasmBlock::new(SPIN_GUEST.as_bytes().to_vec()));
-        let cancel = CancelToken::new();
-        let metering = Metering {
-            fuel: None,
-            epoch_interval: Some(std::time::Duration::from_millis(2)),
-        };
-
-        let runner = {
-            let block = block.clone();
-            let cancel = cancel.clone();
-            std::thread::spawn(move || {
-                block.run(
-                    BlockId::new(),
-                    DenyStore,
-                    JsonCodec,
-                    Format::JSON,
-                    &metering,
-                    cancel,
-                )
-            })
-        };
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        cancel.cancel();
-
-        let err = runner.join().unwrap().unwrap_err();
-        assert!(
-            err.to_string().contains("interrupted"),
-            "expected shutdown interrupt, got: {err}"
-        );
-    }
-
-    #[test]
-    fn no_op_store_read_returns_none() {
-        let mut store = NoOpStore;
-        assert!(store.read(&path!("some/path")).unwrap().is_none());
-    }
-
-    #[test]
-    fn no_op_store_write_echoes_path() {
-        let mut store = NoOpStore;
-        let record = Record::raw(bytes::Bytes::from_static(b"data"), Format::OCTET_STREAM);
-        assert_eq!(
-            store.write(&path!("some/path"), record).unwrap(),
-            path!("some/path")
-        );
-    }
-
-    #[test]
-    fn transfer_ranges_are_bounded_before_copying() {
-        assert!(checked_range(usize::MAX, 1, usize::MAX).is_err());
-        assert!(checked_range(0, MAX_TRANSFER_BYTES + 1, usize::MAX).is_err());
-        assert!(checked_range(65535, 2, 65536).is_err());
-        assert_eq!(checked_range(65536, 0, 65536).unwrap(), 65536..65536);
-    }
-
-    #[tokio::test]
-    async fn malformed_import_ranges_trap_on_both_execution_paths() {
-        for (ptr, len) in [(0, -1), (-1, 1), (65535, 2)] {
-            let guest = format!(
-                r#"(module
-                (import "structfs" "read" (func $read (param i32 i32 i32) (result i32)))
-                (memory (export "memory") 1)
-                (data (i32.const 512) "{{}}")
-                (func (export "block_alloc") (param i32) (result i32) i32.const 1024)
-                (func (export "manifest") (param $ret i32) (result i32)
-                    local.get $ret i32.const 512 i32.store
-                    local.get $ret i32.const 4 i32.add i32.const 2 i32.store i32.const 0)
-                (func (export "run") (result i32)
-                    (call $read (i32.const {ptr}) (i32.const {len}) (i32.const 0))))"#
-            );
-            let block = CoreWasmBlock::new(guest.into_bytes());
-            let err = block
-                .run(
-                    BlockId::new(),
-                    NoOpStore,
-                    JsonCodec,
-                    Format::JSON,
-                    &Metering::disabled(),
-                    CancelToken::new(),
-                )
-                .unwrap_err();
-            assert!(
-                err.to_string().contains("guest transfer")
-                    || err.to_string().contains("out of bounds"),
-                "{err}"
-            );
-            let err = block
-                .run_async(
-                    BlockId::new(),
-                    structfs_core_store::SyncToAsync::new(NoOpStore),
-                    JsonCodec,
-                    Format::JSON,
-                    &Metering::disabled(),
-                    CancelToken::new(),
-                )
-                .await
-                .unwrap_err();
-            assert!(
-                err.to_string().contains("guest transfer")
-                    || err.to_string().contains("out of bounds"),
-                "{err}"
-            );
-        }
-    }
-
-    #[test]
-    fn malformed_manifest_range_is_rejected_before_allocation() {
-        let guest = ECHO_GUEST.replace("(i32.const 54)", "(i32.const -1)");
-        let err = CoreWasmBlock::new(guest.into_bytes())
-            .manifest()
-            .unwrap_err();
-        assert!(err.to_string().contains("guest transfer"), "{err}");
-    }
-
-    #[test]
-    fn async_echo_runs_with_one_blocking_worker() {
-        // A guest occupying the sole blocking worker would deadlock when
-        // SyncToAsync dispatches the guest's provider operation to that pool.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .max_blocking_threads(1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let mut store = structfs_core_store::Shared::new(MemoryStore::new());
-            let value = Value::from("fresh async guest");
-            store
-                .write(&path!("input"), Record::parsed(value.clone()))
-                .unwrap();
-            let block = CoreWasmBlock::new(ECHO_GUEST.as_bytes().to_vec());
-            let code = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                block.run_async(
-                    BlockId::new(),
-                    structfs_core_store::SyncToAsync::new(store.clone()),
-                    JsonCodec,
-                    Format::JSON,
-                    &Metering::default(),
-                    CancelToken::new(),
-                ),
-            )
-            .await
-            .expect("guest held the blocking worker")
-            .unwrap();
-            assert_eq!(code, 0);
-            assert_eq!(
-                store.read(&path!("output")).unwrap().unwrap().as_value(),
-                Some(&value)
-            );
-        });
-    }
-
-    #[tokio::test]
-    async fn async_spin_yields_to_cancellation_on_current_thread() {
-        let block = CoreWasmBlock::new(SPIN_GUEST.as_bytes().to_vec());
-        let cancel = CancelToken::new();
-        let trigger = cancel.clone();
-        let timer = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            trigger.cancel();
-        });
-        let err = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            block.run_async(
-                BlockId::new(),
-                structfs_core_store::SyncToAsync::new(NoOpStore),
-                JsonCodec,
-                Format::JSON,
-                &Metering::default(),
-                cancel,
-            ),
-        )
-        .await
-        .expect("guest starved the executor")
-        .unwrap_err();
-        timer.await.unwrap();
-        assert!(
-            err.to_string().contains("interrupted") || err.to_string().contains("cancelled"),
-            "{err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn prepared_memory_limits_cover_instantiation_and_growth() {
-        let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
-        let too_large = SPIN_GUEST.replace(
-            "(memory (export \"memory\") 1)",
-            "(memory (export \"memory\") 2)",
-        );
-        assert!(engine.prepare(too_large.into_bytes()).await.is_err());
-        let guest = SPIN_GUEST.replace(
-            "(loop $spin (br $spin))",
-            r#"
-            (if (i32.ne (memory.grow (i32.const 1)) (i32.const -1))
-                (then unreachable))"#,
-        );
-        let prepared = engine.prepare(guest.into_bytes()).await.unwrap();
-        assert!(prepared
-            .run_async(
-                BlockId::new(),
-                NoOpStore,
-                JsonCodec,
-                Format::JSON,
-                &Metering::disabled(),
-                CancelToken::new()
-            )
-            .await
-            .is_err());
-    }
-
-    #[test]
-    fn component_sniffing() {
-        // Core module: version 1, layer 0.
-        assert!(!is_component(b"\0asm\x01\x00\x00\x00rest"));
-        // Component: version 0x0d, layer 1.
-        assert!(is_component(b"\0asm\x0d\x00\x01\x00rest"));
-        assert!(!is_component(b"short"));
-        assert!(!is_component(b"not wasm"));
-    }
-}
+mod tests;

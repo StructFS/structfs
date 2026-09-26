@@ -7,13 +7,25 @@ use std::time::Duration;
 
 use featherweight_runtime::{
     native, protocol, register_builtins, AssemblyDef, BlockState, NativeBlock, Runtime,
+    RuntimeConfig,
 };
 use structfs_core_store::{path, Error, Reader, Record, Value, Writer};
 
+fn config() -> RuntimeConfig {
+    let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+    register_builtins(&mut config);
+    config
+}
+
 fn runtime() -> Runtime {
-    let mut runtime = Runtime::new();
-    register_builtins(&mut runtime);
-    runtime
+    Runtime::new(config())
+}
+
+/// The builtins plus one extra native block.
+fn runtime_with(name: &str, block: fn() -> Box<dyn NativeBlock>) -> Runtime {
+    let mut config = config();
+    config.register_builtin(name, Arc::new(block));
+    Runtime::new(config)
 }
 
 fn base_dir() -> std::path::PathBuf {
@@ -77,11 +89,7 @@ impl NativeBlock for ProxyBlock {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn blocks_call_wired_blocks_through_namespaces() {
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "proxy",
-        Arc::new(|| Box::new(ProxyBlock) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("proxy", || Box::new(ProxyBlock) as Box<dyn NativeBlock>);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "proxied",
             "blocks": {"proxy": "builtin:proxy", "kv": "builtin:kv"},
@@ -122,11 +130,7 @@ impl NativeBlock for CrashBlock {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn isolate_failure_is_contained() {
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "crash",
-        Arc::new(|| Box::new(CrashBlock) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("crash", || Box::new(CrashBlock) as Box<dyn NativeBlock>);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "iso_fail",
             "blocks": {"kv": "builtin:kv", "crash": "builtin:crash"},
@@ -173,11 +177,7 @@ async fn isolate_failure_is_contained() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fail_fast_takes_down_siblings() {
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "crash",
-        Arc::new(|| Box::new(CrashBlock) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("crash", || Box::new(CrashBlock) as Box<dyn NativeBlock>);
     // The crashing block is public, so it starts eagerly and fails fast.
     let def = AssemblyDef::from_str(
         r#"{"assembly": "ff",
@@ -228,11 +228,7 @@ async fn nested_assembly_is_a_block() {
     )
     .unwrap();
 
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "proxy",
-        Arc::new(|| Box::new(ProxyBlock) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("proxy", || Box::new(ProxyBlock) as Box<dyn NativeBlock>);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "parent",
             "blocks": {"proxy": "builtin:proxy", "store": "child.json"},
@@ -253,6 +249,108 @@ async fn nested_assembly_is_a_block() {
         Some(Value::Integer(42))
     );
 
+    assembly.shutdown(Duration::from_secs(2)).await;
+}
+
+/// A failed instantiation leaves no registration behind: blocks created
+/// before the failure — nested assemblies and already-started blocks
+/// included — are shut down and deregistered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_instantiation_leaves_nothing_registered() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("child.json"),
+        r#"{"assembly": "child", "blocks": {"kv": "builtin:kv", "echo": "builtin:echo"},
+            "public": "kv"}"#,
+    )
+    .unwrap();
+
+    // The nested child ("a_child") registers, then "z" fails to resolve.
+    let runtime = runtime();
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "broken",
+            "blocks": {"a_child": "child.json", "b": "builtin:kv", "z": "builtin:missing"},
+            "public": "b"}"#,
+    )
+    .unwrap();
+    let err = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap_err();
+    assert!(err.to_string().contains("unknown builtin"), "{err}");
+    assert_eq!(runtime.registered_blocks(), 0);
+
+    // Every block registers and the nested child's public block starts;
+    // then the parent's public block cannot open its transcript store.
+    let provider: Arc<featherweight_runtime::transcript::TranscriptProvider> =
+        Arc::new(|key: &str| {
+            if key == "unrecordable/b" {
+                return Err(Error::permission_denied("no transcript store"));
+            }
+            Ok(
+                featherweight_runtime::host_store(
+                    structfs_json_store::LogStore::open(
+                        structfs_json_store::MemoryAppendBacking::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        });
+    let runtime = Runtime::new(config().with_transcripts(
+        featherweight_runtime::transcript::TranscriptMode::Record(provider),
+    ));
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "unrecordable",
+            "blocks": {"a_child": "child.json", "b": "builtin:kv"},
+            "public": "b"}"#,
+    )
+    .unwrap();
+    let err = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap_err();
+    assert!(err.to_string().contains("transcript store"), "{err}");
+    assert_eq!(runtime.registered_blocks(), 0);
+    // The nested child's public block had started: its driver task is
+    // joined under the cleanup supervisor, visibly, rather than abandoned.
+    let reports = runtime
+        .cleanup_supervisor()
+        .join(Duration::from_secs(5))
+        .await;
+    assert!(!reports.is_empty());
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.is_quiescent() && report.failures == 0),
+        "{reports:?}"
+    );
+}
+
+/// A failed instantiation releases its transcript-key claims, so a retry
+/// gets the identities a first success would have had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_instantiation_keeps_its_block_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime();
+    let def = AssemblyDef::from_str(
+        r#"{"assembly": "retry", "blocks": {"a": "builtin:kv", "b": "later.json"},
+            "public": "a"}"#,
+    )
+    .unwrap();
+    assert!(runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .is_err());
+    std::fs::write(
+        dir.path().join("later.json"),
+        r#"{"assembly": "later", "blocks": {"kv": "builtin:kv"}, "public": "kv"}"#,
+    )
+    .unwrap();
+    let assembly = runtime
+        .instantiate(&def, HashMap::new(), dir.path())
+        .unwrap();
+    assert_eq!(assembly.public_cell().id().as_str(), "block:retry/a");
+    assert_eq!(
+        assembly.cell("b").unwrap().id().as_str(),
+        "block:retry/b/kv"
+    );
     assembly.shutdown(Duration::from_secs(2)).await;
 }
 
@@ -301,12 +399,12 @@ async fn unresponsive_block_hits_deadline() {
         }
     }
 
-    let mut runtime = Runtime::new().with_timeout(Duration::from_millis(200));
-    register_builtins(&mut runtime);
-    runtime.register_builtin(
+    let mut config = config().with_timeout(Duration::from_millis(200));
+    config.register_builtin(
         "deaf",
         Arc::new(|| Box::new(DeafBlock) as Box<dyn NativeBlock>),
     );
+    let runtime = Runtime::new(config);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "deaf", "blocks": {"deaf": "builtin:deaf"}, "public": "deaf"}"#,
     )
@@ -347,16 +445,10 @@ async fn shell_exercises_the_os_surface() {
     let stdio = featherweight_runtime::ScriptedStdio::with_input(script);
     let provided = stdio.clone();
 
-    let runtime = Runtime::new().with_stdio_provider(Arc::new(move |name| {
+    let runtime = Runtime::new(config().with_stdio_provider(Arc::new(move |name| {
         (name == "shell")
             .then(|| Arc::new(provided.clone()) as Arc<dyn featherweight_runtime::Stdio>)
-    }));
-    let mut runtime = {
-        let mut runtime = runtime;
-        register_builtins(&mut runtime);
-        runtime
-    };
-    let _ = &mut runtime;
+    })));
 
     let def = AssemblyDef::from_str(
         r#"{"assembly": "demo",
@@ -467,12 +559,13 @@ async fn immediate_shutdown_kills_a_spinning_wasm_guest() {
 
     // Graceful can never complete (the guest never reads its mailbox);
     // shutdown escalates to immediate, which traps the spinning guest.
-    tokio::time::timeout(
+    let report = tokio::time::timeout(
         Duration::from_secs(10),
-        assembly.shutdown(Duration::from_millis(200)),
+        assembly.shutdown(Duration::from_secs(2)),
     )
     .await
     .expect("shutdown could not stop the spinning guest");
+    assert!(report.complete(), "{report:?}");
     assert!(assembly.public_cell().state().is_terminal());
 }
 
@@ -577,11 +670,7 @@ impl NativeBlock for SpawnerBlock {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn blocks_spawn_and_kill_assemblies_through_iso_proc() {
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "spawner",
-        Arc::new(|| Box::new(SpawnerBlock) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("spawner", || Box::new(SpawnerBlock) as Box<dyn NativeBlock>);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "sp",
             "blocks": {"spawner": {"artifact": "builtin:spawner", "spawn": true}},
@@ -701,11 +790,9 @@ async fn signals_reach_the_mailbox() {
         }
     }
 
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "sig",
-        Arc::new(|| Box::new(SignalEcho { last: None }) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("sig", || {
+        Box::new(SignalEcho { last: None }) as Box<dyn NativeBlock>
+    });
     let def = AssemblyDef::from_str(
         r#"{"assembly": "sig", "blocks": {"sig": "builtin:sig"}, "public": "sig"}"#,
     )
@@ -797,15 +884,16 @@ impl NativeBlock for GrantSpawner {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_grants_attenuate_the_spawner_namespace() {
-    let mut runtime = runtime();
-    runtime.register_builtin(
+    let mut config = config();
+    config.register_builtin(
         "proxy",
         Arc::new(|| Box::new(ProxyBlock) as Box<dyn NativeBlock>),
     );
-    runtime.register_builtin(
+    config.register_builtin(
         "grant_spawner",
         Arc::new(|| Box::new(GrantSpawner) as Box<dyn NativeBlock>),
     );
+    let runtime = Runtime::new(config);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "grants",
             "blocks": {"spawner": {"artifact": "builtin:grant_spawner", "spawn": true},
@@ -869,11 +957,7 @@ impl NativeBlock for ExitingBlock {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_codes_propagate() {
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "exiting",
-        Arc::new(|| Box::new(ExitingBlock) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("exiting", || Box::new(ExitingBlock) as Box<dyn NativeBlock>);
     let def = AssemblyDef::from_str(
         r#"{"assembly": "ex", "blocks": {"main": "builtin:exiting"}, "public": "main"}"#,
     )
@@ -903,11 +987,7 @@ async fn explicit_server_presence_preserves_null_across_assembly_calls() {
             })
         }
     }
-    let mut runtime = runtime();
-    runtime.register_builtin(
-        "nulls",
-        Arc::new(|| Box::new(NullServer) as Box<dyn NativeBlock>),
-    );
+    let runtime = runtime_with("nulls", || Box::new(NullServer) as Box<dyn NativeBlock>);
     let def = AssemblyDef::from_str(
         r#"{"assembly":"presence","blocks":{"server":"builtin:nulls"},"public":"server"}"#,
     )

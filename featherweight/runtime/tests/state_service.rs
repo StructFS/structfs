@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use structfs_core_store::{path, Codec, Value};
-use structfs_serde_store::{to_value, Profile, ValueCodec};
+use structfs_serde_store::{to_value, CodecProfile as Profile, ValueCodec};
 use structfs_service::{BudgetAdmission, CallBudget, CallLimits, CleanupSupervisor, Mount, Router};
 use structfs_state::{Command, Mutation, ReadLimits, Request, State, StateClient, StateLimits};
 
@@ -13,13 +13,12 @@ use structfs_state::{Command, Mutation, ReadLimits, Request, State, StateClient,
 async fn guest_observes_then_commits_and_reads_changes_with_owned_handles() {
     let supervisor = CleanupSupervisor::new(1).unwrap();
     let owner = supervisor.owner(Default::default()).unwrap();
-    let state = State::new(
+    let state = State::shared(
         &owner.handle(),
         Some(Value::Map(BTreeMap::new())),
-        StateLimits {
-            handles: 2,
-            ..Default::default()
-        },
+        // A global ceiling of two: the guest's owned handles hold it until
+        // the instance shuts down, so the host's own view is refused.
+        StateLimits::default().with_handles(2).with_max_handles(2),
     )
     .unwrap();
     let codec = ValueCodec::new(Profile::ValueJson);
@@ -83,8 +82,9 @@ async fn guest_observes_then_commits_and_reads_changes_with_owned_handles() {
     );
     let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
     let code = Arc::new(engine.prepare(wat.into_bytes()).await.unwrap());
-    let mut runtime = Runtime::new();
-    runtime.register_core_artifact("state-guest", code);
+    let mut config = featherweight_runtime::RuntimeConfig::new(tokio::runtime::Handle::current());
+    config.register_core_artifact("state-guest", code);
+    let runtime = Runtime::new(config);
     let def=AssemblyDef::from_str(r#"{"assembly":"state","imports":{"state":"revisioned"},"blocks":{"guest":"state-guest"},"public":"guest","wiring":["guest:/state -> $state"]}"#).unwrap();
     let assembly = runtime
         .instantiate(
@@ -102,14 +102,14 @@ async fn guest_observes_then_commits_and_reads_changes_with_owned_handles() {
     assert_eq!(assembly.public_cell().state(), BlockState::Stopped);
     assert_eq!(state.token().revision, 1);
     let client = StateClient::new(
-        Router::new(vec![Mount::new(
+        Router::shared(vec![Mount::new(
             path!(""),
             path!(""),
             state.view(path!(""), true),
-            Arc::new(BudgetAdmission {
-                budget: CallBudget::<String>::new(CallLimits::default()),
-                key: "state".into(),
-            }),
+            Arc::new(BudgetAdmission::new(
+                CallBudget::<String>::shared(CallLimits::default()),
+                "state",
+            )),
         )])
         .unwrap()
         .client(),
@@ -133,5 +133,5 @@ async fn guest_observes_then_commits_and_reads_changes_with_owned_handles() {
         })
         .await
         .is_ok());
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
 }

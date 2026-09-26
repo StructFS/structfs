@@ -1,6 +1,7 @@
 # Adoption contracts after the Ox supplement
 
-Status: implemented and validated for the unpublished 0.4 candidate. Publication remains separate.
+Status: implemented and validated for the 0.4 candidate; 0.4.0 was published on
+2026-09-16 (see [registry status](../../release-status.md)).
 
 The September 15 supplement identifies additional contracts beyond the first
 letter. No backward compatibility constraint applies; Null writes remain the
@@ -38,7 +39,7 @@ fallible decode happens before OnceLock::set and may run concurrently. Read
 Read core async traits and service envelopes: child enumeration is not forwarded.
 Read runtime status/protocol and guest SDK: codec detail is reduced to text.
 
-See [supplement validation](../docs/release-validation-supplement-2026-09-15.md)
+See [supplement validation](../release-validation-supplement-2026-09-15.md)
 for the final quality, package, guest, browser and site evidence.
-The [follow-up audit](../docs/ox-supplement-audit-2026-09-16.md) closes the
+The [follow-up audit](../ox-supplement-audit-2026-09-16.md) closes the
 parked-reader, polled-abandonment, late-open and async-import evidence gaps.

@@ -18,20 +18,31 @@
 //! ids derive from keys — so `iso/self/id`, like every other input,
 //! answers the same on every run.
 //!
-//! What this does not virtualize: scheduling. Blocks run on OS threads
-//! and the cross-block interleaving of mailbox events is the host's; a
-//! single block that consumes only its own boundary is deterministic
-//! under a seed, an assembly's cross-block interleaving is not yet.
-//! Epoch-based metering can also kill a slow guest on wall-clock
-//! grounds — it never changes a surviving run's values, but whether a
-//! run survives a timeout is the host's, not the seed's.
+//! Scheduling is the one input the sources cannot pin. Under `Live` and
+//! `Seeded`, blocks run concurrently and the cross-block interleaving of
+//! mailbox events is the host's: a single block that consumes only its
+//! own boundary is deterministic under a seed, but an assembly's
+//! cross-block interleaving is not. `Simulation` closes that gap with the
+//! seeded scheduler (`crate::turnstile`): one block runs at a time and
+//! the next is drawn from the seed, so the whole assembly — interleaving
+//! included — is one reproducible run per seed, and a dependency cycle is
+//! detected and shut down rather than hanging. Deadlock detection exists
+//! only under `Simulation`.
+//!
+//! Under every mode, epoch-based interruption can stop a guest on
+//! wall-clock grounds (a deadline or an immediate shutdown) — it never
+//! changes a surviving run's values, but whether a run survives a
+//! timeout is the host's, not the seed's.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
+use crate::hash::{fnv1a, splitmix64};
+
 /// The runtime's determinism mode: how the `/iso` surface sources what
 /// only the world can normally answer.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub enum Determinism {
     /// Real clock, real entropy.
     #[default]
@@ -157,26 +168,6 @@ impl Default for VirtualClock {
             ticks: AtomicI64::new(0),
         }
     }
-}
-
-/// splitmix64: tiny, well-distributed, and needs no dependency — the
-/// point is reproducibility, not cryptography, and the spec's entropy
-/// path makes no stronger promise than "the host decides".
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    hash
 }
 
 #[cfg(test)]

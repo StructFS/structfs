@@ -103,10 +103,12 @@ pub fn path(input: TokenStream) -> TokenStream {
                 }
             },
             other => {
-                // An explicit borrow enforces the validated type without consuming it.
+                // An explicit borrow with a type annotation enforces the
+                // validated type without consuming it; no impostor type can
+                // satisfy `&PathComponent`.
                 component_exprs.push(quote! {{
                     let component: &#root::PathComponent = &(#other);
-                    ::std::string::String::from(component.validated_str())
+                    ::std::string::String::from(component.as_str())
                 }});
             }
         }
@@ -116,7 +118,7 @@ pub fn path(input: TokenStream) -> TokenStream {
     // PathComponent values at their construction site. The constructor
     // also validates in release builds to protect direct callers.
     quote! {
-        #root::Path::from_validated_components(
+        #root::Path::from_components(
             ::std::vec![#(#component_exprs),*]
         )
     }

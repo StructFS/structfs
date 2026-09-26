@@ -42,9 +42,11 @@ let mut wasi = WasiIso::with_preopens(
     namespace, // anything implementing Reader + Writer
     vec![("/data".to_string(), path!("files"))],
 );
-let fd = wasi.path_open(3, "notes.txt", OpenFlags {
-    write: true, create: true, ..Default::default()
-})?;
+let fd = wasi.path_open(
+    3,
+    "notes.txt",
+    OpenFlags::default().with_write(true).with_create(true),
+)?;
 wasi.fd_write(fd, b"hello")?;
 wasi.fd_close(fd)?;
 # Ok::<(), featherweight_wasi::Errno>(())

@@ -117,8 +117,19 @@ impl<A: Writer, B: Send + Sync> Writer for Cascade<A, B> {
 /// `Reader`/`Writer` take `&mut self`, so sharing a store between owners
 /// requires a lock. `Shared` is that lock, packaged: it implements the
 /// store traits over `Arc<Mutex<S>>` so callers don't hand-roll the
-/// wrapper. Lock poisoning is recovered from (the store may be mid-update,
-/// but path-level operations are individually atomic).
+/// wrapper. `SyncToAsync` (feature `async`) is the
+/// same handle viewed through the async traits: it wraps a `Shared`, so both
+/// share one lock and one poison policy.
+///
+/// # Poisoning
+///
+/// Lock poisoning is recovered from: a panic while holding the lock leaves
+/// the store as it was mid-operation, and the next operation proceeds
+/// against that state. This is the one policy every lock-holding wrapper in
+/// this crate follows (`Shared`, `DetachedShared`, `SyncToAsync`, and
+/// `SyncToAsyncLL` in the LL crate) — path-level operations are individually
+/// atomic, so a half-applied operation is a stale value, not a corrupted
+/// store.
 pub struct Shared<S> {
     inner: Arc<Mutex<S>>,
 }
@@ -136,6 +147,12 @@ impl<S> Shared<S> {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The lock itself, for `SyncToAsync::inner`.
+    #[cfg(feature = "async")]
+    pub(crate) fn mutex(&self) -> &Mutex<S> {
+        &self.inner
     }
 }
 
@@ -258,7 +275,8 @@ impl<S: Writer> Writer for Masked<S> {
 /// Incoming paths are joined under `root` before reaching the inner store,
 /// and result paths from writes have the root stripped (component-wise)
 /// before being returned, so the root never leaks to callers. A write
-/// result that escapes the root is an error rather than a leak.
+/// result that escapes the root is an `Error::PermissionDenied` rather
+/// than a leak.
 pub struct Rooted<S> {
     root: Path,
     inner: S,
@@ -298,46 +316,21 @@ impl<S: Reader> Reader for Rooted<S> {
 impl<S: Writer> Writer for Rooted<S> {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
         let result = self.inner.write(&self.root.join(to), data)?;
-        result.strip_prefix(&self.root).ok_or_else(|| {
-            Error::store(
-                "rooted",
-                "write",
-                format!("inner store returned path outside root: {}", result),
-            )
-        })
+        result
+            .strip_prefix(&self.root)
+            .ok_or_else(|| escaped_root(&result))
     }
+}
+
+/// The error for a write result that lands outside a `Rooted` subtree.
+fn escaped_root(result: &Path) -> Error {
+    Error::permission_denied(format!("inner store returned path outside root: {result}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{path, Value};
-    use std::collections::HashMap;
-
-    struct MapStore {
-        data: HashMap<Path, Record>,
-    }
-
-    impl MapStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
-        }
-    }
-
-    impl Reader for MapStore {
-        fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            Ok(self.data.get(from).cloned())
-        }
-    }
-
-    impl Writer for MapStore {
-        fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            self.data.insert(to.clone(), data);
-            Ok(to.clone())
-        }
-    }
+    use crate::{path, MemoryStore as MapStore, Value};
 
     #[test]
     fn read_only_passes_reads_rejects_writes() {
@@ -423,6 +416,28 @@ mod tests {
         });
         handle.join().unwrap();
         assert!(shared.lock().read(&path!("from_thread")).unwrap().is_some());
+    }
+
+    #[test]
+    fn shared_recovers_from_poisoned_lock() {
+        let shared = Shared::new(MapStore::new());
+        let poisoner = shared.clone();
+        let _ = std::thread::spawn(move || {
+            let mut guard = poisoner.lock();
+            guard
+                .write(&path!("before_panic"), Record::parsed(Value::from(1i64)))
+                .unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+
+        // The store is still usable and holds the state left mid-operation.
+        let mut shared = shared;
+        assert!(shared.read(&path!("before_panic")).unwrap().is_some());
+        shared
+            .write(&path!("after"), Record::parsed(Value::from(2i64)))
+            .unwrap();
+        assert!(shared.read(&path!("after")).unwrap().is_some());
     }
 
     #[test]
@@ -553,6 +568,7 @@ mod tests {
         let err = rooted
             .write(&path!("key"), Record::parsed(Value::Null))
             .unwrap_err();
+        assert!(matches!(err, Error::PermissionDenied { .. }));
         assert!(err.to_string().contains("outside root"));
     }
 }
@@ -566,13 +582,21 @@ mod detached {
     /// construction and is released before polling the returned future.
     /// Unlike `Shared`, this delegates to detached operations, not sync ones.
     /// Acceptance and future-drop behavior are inherited from the provider.
-    /// A panic during construction poisons the lock; all later operations fail
-    /// without reentering the possibly inconsistent provider.
+    ///
+    /// Lock poisoning follows the crate-wide policy documented on
+    /// [`Shared`]: a panic during construction is recovered from, and the
+    /// next operation is constructed against the provider as it was left.
     pub struct DetachedShared<S>(Arc<Mutex<S>>);
 
     impl<S> DetachedShared<S> {
         pub fn new(inner: S) -> Self {
             Self(Arc::new(Mutex::new(inner)))
+        }
+
+        fn lock(&self) -> std::sync::MutexGuard<'_, S> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
         }
     }
     impl<S> Clone for DetachedShared<S> {
@@ -581,37 +605,23 @@ mod detached {
         }
     }
     impl<S: DetachedReader> crate::SharedReader for DetachedShared<S> {
-        fn read(&self, path: Path) -> DetachedFuture<Option<Record>> {
-            match self.0.lock() {
-                Ok(mut store) => store.read_detached(&path),
-                Err(_) => Box::pin(async {
-                    Err(Error::store("shared", "read", "construction lock poisoned"))
-                }),
-            }
+        fn read_shared(&self, path: Path) -> DetachedFuture<Option<Record>> {
+            self.lock().read_detached(&path)
         }
     }
     impl<S: DetachedWriter> crate::SharedWriter for DetachedShared<S> {
-        fn write(&self, path: Path, record: Record) -> DetachedFuture<Path> {
-            match self.0.lock() {
-                Ok(mut store) => store.write_detached(&path, record),
-                Err(_) => Box::pin(async {
-                    Err(Error::store(
-                        "shared",
-                        "write",
-                        "construction lock poisoned",
-                    ))
-                }),
-            }
+        fn write_shared(&self, path: Path, record: Record) -> DetachedFuture<Path> {
+            self.lock().write_detached(&path, record)
         }
     }
     impl<S: DetachedReader> DetachedReader for DetachedShared<S> {
         fn read_detached(&mut self, from: &Path) -> DetachedFuture<Option<Record>> {
-            crate::SharedReader::read(self, from.clone())
+            self.lock().read_detached(from)
         }
     }
     impl<S: DetachedWriter> DetachedWriter for DetachedShared<S> {
         fn write_detached(&mut self, to: &Path, data: Record) -> DetachedFuture<Path> {
-            crate::SharedWriter::write(self, to.clone(), data)
+            self.lock().write_detached(to, data)
         }
     }
 
@@ -637,13 +647,9 @@ mod detached {
             let root = self.root.clone();
             Box::pin(async move {
                 let result = operation.await?;
-                result.strip_prefix(&root).ok_or_else(|| {
-                    Error::store(
-                        "rooted",
-                        "write",
-                        format!("inner store returned path outside root: {result}"),
-                    )
-                })
+                result
+                    .strip_prefix(&root)
+                    .ok_or_else(|| escaped_root(&result))
             })
         }
     }

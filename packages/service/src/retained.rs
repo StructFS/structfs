@@ -1,4 +1,4 @@
-//! Bounded, owned byte results and event tails. Copies returned to consumers are
+//! Bounded, owned event tails. Copies returned to consumers are
 //! consumer-owned; reserve their transport/response budget separately.
 use crate::{CancelToken, Error, OwnerHandle, Registration, ResourceKind};
 use std::{
@@ -7,41 +7,6 @@ use std::{
 };
 use structfs_handles::Gate;
 
-/// A result whose storage is registered before it can be delivered. Abandoning
-/// delivery drops this handle and schedules cleanup; owner cancellation also
-/// releases storage even if callers keep the handle.
-pub struct RetainedBytes {
-    inner: Arc<Mutex<Option<Vec<u8>>>>,
-    registration: Registration,
-}
-impl RetainedBytes {
-    pub fn new(owner: &OwnerHandle, value: Vec<u8>) -> Result<Self, Error> {
-        let bytes = value.capacity();
-        let inner = Arc::new(Mutex::new(Some(value)));
-        let cleanup = inner.clone();
-        let registration = owner.register(ResourceKind::Retained, bytes, move || async move {
-            *cleanup.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            Ok(())
-        })?;
-        Ok(Self {
-            inner,
-            registration,
-        })
-    }
-    pub fn snapshot(&self) -> Result<Vec<u8>, Error> {
-        if self.registration.cancellation().is_cancelled() {
-            return Err(Error::cancelled("result released"));
-        }
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .ok_or_else(|| Error::cancelled("result released"))
-    }
-    pub fn release(&self) {
-        self.registration.release();
-    }
-}
 struct TailState {
     items: VecDeque<Vec<u8>>,
     first: u64,
@@ -54,7 +19,14 @@ struct TailInner {
     state: Mutex<TailState>,
     gate: Gate,
 }
+/// One page of a tail read: the items from the requested cursor, the cursor to
+/// pass next, and whether the tail is finished.
+///
+/// This is the one page envelope across `structfs-service` and
+/// `structfs-state`: `SnapshotPage` and `ChangePage` carry the same
+/// `items`/`next`/`done` shape with a typed cursor.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TailRead {
     pub items: Vec<Vec<u8>>,
     pub next: u64,
@@ -72,7 +44,9 @@ pub struct OwnedTail {
 impl OwnedTail {
     pub fn new(owner: &OwnerHandle, max_items: usize, max_bytes: usize) -> Result<Self, Error> {
         if max_items == 0 {
-            return Err(Error::overloaded("tail item capacity must be positive"));
+            return Err(Error::invalid_argument(
+                "tail item capacity must be positive",
+            ));
         }
         let reserved = max_items
             .checked_mul(std::mem::size_of::<Vec<u8>>())
@@ -121,9 +95,13 @@ impl OwnedTail {
         if s.done {
             return Err(Error::cancelled("tail finished"));
         }
+        // Charge the same measure everywhere: `read_bounded` pages by
+        // `len()`, `acknowledge` refunds by `len()`, so admission must count
+        // `len()` too. Charging `capacity()` here and refunding `len()` let
+        // the accounting drift upward on every over-allocated Vec.
         let bytes = values
             .iter()
-            .try_fold(0usize, |n, v| n.checked_add(v.capacity()))
+            .try_fold(0usize, |n, v| n.checked_add(v.len()))
             .ok_or_else(|| Error::overloaded("tail byte count overflow"))?;
         if values.len() > self.max_items.saturating_sub(s.items.len())
             || bytes > self.max_bytes.saturating_sub(s.bytes)
@@ -150,8 +128,15 @@ impl OwnedTail {
             .done = true;
         self.inner.gate.notify();
     }
-    pub fn release(&self) {
-        self.registration.release();
+    /// Request release of the tail's storage. Non-blocking; parked readers
+    /// wake and fail, and further pushes are refused.
+    pub fn close(&self) {
+        self.registration.close();
+    }
+    /// [`OwnedTail::close`], then wait at most `timeout` for the storage to be
+    /// released, and report the owner's remaining resources.
+    pub async fn join(&self, timeout: std::time::Duration) -> crate::CloseReport {
+        self.registration.join(timeout).await
     }
     /// Discard entries strictly before cursor. Cursor must be in the retained range.
     pub fn acknowledge(&self, cursor: u64) -> Result<(), Error> {
@@ -160,11 +145,13 @@ impl OwnedTail {
             return Err(Error::cancelled("tail released"));
         }
         if cursor < s.first || cursor > s.next {
-            return Err(Error::conflict("tail cursor outside retained range"));
+            return Err(Error::invalid_argument(
+                "tail cursor outside retained range",
+            ));
         }
         while s.first < cursor {
             let v = s.items.pop_front().unwrap();
-            s.bytes -= v.capacity();
+            s.bytes -= v.len();
             s.first += 1;
         }
         Ok(())
@@ -189,7 +176,9 @@ impl OwnedTail {
         cancel: &CancelToken,
     ) -> Result<TailRead, Error> {
         if max_items == 0 {
-            return Err(Error::conflict("tail page must contain at least one item"));
+            return Err(Error::invalid_argument(
+                "tail page must contain at least one item",
+            ));
         }
         let revoked = self.registration.cancellation();
         let read = self.inner.gate.wait_until_cancellable(cancel, || {
@@ -198,7 +187,9 @@ impl OwnedTail {
                 return Some(Err(Error::cancelled("tail released")));
             }
             if cursor < s.first || cursor > s.next {
-                return Some(Err(Error::conflict("tail cursor outside retained range")));
+                return Some(Err(Error::invalid_argument(
+                    "tail cursor outside retained range",
+                )));
             }
             if cursor == s.next && !s.done {
                 return None;

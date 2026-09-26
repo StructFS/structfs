@@ -56,7 +56,7 @@ async fn main() {
         );
     }
     assert!(supervisor
-        .close(Duration::from_secs(1))
+        .join(Duration::from_secs(1))
         .await
         .iter()
         .all(|r| r.is_quiescent()));

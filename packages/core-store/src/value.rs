@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Error, Path, PathError};
+use crate::{Error, Path};
 
 /// A tree-shaped value that can be read from or written to a Store.
 ///
@@ -144,8 +144,10 @@ impl Value {
     ///
     /// # Errors
     ///
-    /// Returns an error if the path traverses through a non-container value
-    /// (e.g., trying to set `foo/bar` when `foo` is a string).
+    /// Returns [`Error::InvalidArgument`] if the path traverses through a
+    /// non-container value (e.g., trying to set `foo/bar` when `foo` is a
+    /// string), or names an array index that is not numeric or is out of
+    /// bounds.
     pub fn set(&mut self, path: &Path, value: Value) -> Result<(), Error> {
         if path.is_empty() {
             *self = value;
@@ -167,28 +169,25 @@ impl Value {
                     }
                     Value::Array(arr) => {
                         let index: usize = component.parse().map_err(|_| {
-                            Error::Path(PathError::InvalidPath {
-                                message: format!("invalid array index: {}", component),
-                            })
+                            Error::invalid_argument(format!("invalid array index: {}", component))
                         })?;
                         if index < arr.len() {
                             arr[index] = value;
                         } else if index == arr.len() {
                             arr.push(value);
                         } else {
-                            return Err(Error::Path(PathError::InvalidPath {
-                                message: format!("array index {} out of bounds", index),
-                            }));
+                            return Err(Error::invalid_argument(format!(
+                                "array index {} out of bounds",
+                                index
+                            )));
                         }
                         return Ok(());
                     }
                     _ => {
-                        return Err(Error::Path(PathError::InvalidPath {
-                            message: format!(
-                                "cannot set child '{}' on non-container value",
-                                component
-                            ),
-                        }));
+                        return Err(Error::invalid_argument(format!(
+                            "cannot set child '{}' on non-container value",
+                            component
+                        )));
                     }
                 }
             } else {
@@ -201,23 +200,17 @@ impl Value {
                     }
                     Value::Array(arr) => {
                         let index: usize = component.parse().map_err(|_| {
-                            Error::Path(PathError::InvalidPath {
-                                message: format!("invalid array index: {}", component),
-                            })
+                            Error::invalid_argument(format!("invalid array index: {}", component))
                         })?;
                         current = arr.get_mut(index).ok_or_else(|| {
-                            Error::Path(PathError::InvalidPath {
-                                message: format!("array index {} out of bounds", index),
-                            })
+                            Error::invalid_argument(format!("array index {} out of bounds", index))
                         })?;
                     }
                     _ => {
-                        return Err(Error::Path(PathError::InvalidPath {
-                            message: format!(
-                                "cannot navigate through non-container at '{}'",
-                                component
-                            ),
-                        }));
+                        return Err(Error::invalid_argument(format!(
+                            "cannot navigate through non-container at '{}'",
+                            component
+                        )));
                     }
                 }
             }
@@ -227,6 +220,11 @@ impl Value {
     }
 
     /// Remove a value at a path, returning it if it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] if the final component addresses an
+    /// array with a non-numeric index.
     pub fn remove(&mut self, path: &Path) -> Result<Option<Value>, Error> {
         if path.is_empty() {
             let old = std::mem::replace(self, Value::Null);
@@ -246,9 +244,7 @@ impl Value {
             Value::Map(map) => Ok(map.remove(last_component)),
             Value::Array(arr) => {
                 let index: usize = last_component.parse().map_err(|_| {
-                    Error::Path(PathError::InvalidPath {
-                        message: format!("invalid array index: {}", last_component),
-                    })
+                    Error::invalid_argument(format!("invalid array index: {}", last_component))
                 })?;
                 if index < arr.len() {
                     Ok(Some(arr.remove(index)))
@@ -483,7 +479,7 @@ mod tests {
     fn set_on_primitive_error() {
         let mut value = Value::from("hello");
         let result = value.set(&path!("foo"), Value::from("bar"));
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidArgument { .. })));
     }
 
     #[test]
@@ -525,7 +521,7 @@ mod tests {
         let mut value = Value::map();
         value.set(&path!("foo"), Value::from("primitive")).unwrap();
         let result = value.set(&path!("foo/bar"), Value::from("x"));
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidArgument { .. })));
     }
 
     #[test]
@@ -567,7 +563,7 @@ mod tests {
     fn remove_invalid_array_index_error() {
         let mut value = Value::Array(vec![Value::from("a")]);
         let result = value.remove(&path!("not_a_number"));
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidArgument { .. })));
     }
 
     #[test]

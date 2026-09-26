@@ -1,12 +1,14 @@
 use clap::Parser;
 
+use structfs_repl::EditMode;
+
 /// StructFS - Interactive REPL for StructFS stores
 #[derive(Parser, Debug)]
 #[command(name = "structfs")]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Force vi editing mode
-    #[arg(long)]
+    #[arg(long, conflicts_with = "emacs")]
     vi: bool,
 
     /// Force emacs editing mode
@@ -17,15 +19,15 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // Set edit mode override if specified
-    if args.vi {
-        std::env::set_var("STRUCTFS_EDIT_MODE", "vi");
+    let edit_mode = if args.vi {
+        Some(EditMode::Vi)
     } else if args.emacs {
-        std::env::set_var("STRUCTFS_EDIT_MODE", "emacs");
-    }
+        Some(EditMode::Emacs)
+    } else {
+        None
+    };
 
-    // Run the REPL
-    if let Err(e) = structfs_repl::run() {
+    if let Err(e) = structfs_repl::run(edit_mode) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

@@ -1,7 +1,14 @@
-//! HTTP execution abstraction for testing.
+//! The blocking HTTP execution seam.
 //!
-//! This module provides a trait for HTTP execution that can be mocked in tests,
-//! avoiding the need for actual network calls.
+//! Every blocking store in this crate — [`crate::HttpBrokerStore`],
+//! [`crate::BackgroundHttpBrokerStore`], [`crate::HttpClientStore`] — sends
+//! its requests through a [`BlockingHttpExecutor`]. One seam means one place
+//! that builds a client, one place that maps transport failures onto typed
+//! errors, and one thing to substitute in tests (the crate-internal
+//! `MockExecutor`, or any implementation of your own).
+//!
+//! The async counterpart is [`crate::streaming::AsyncHttpExecutor`], behind
+//! the `streaming` feature.
 
 use std::time::Duration;
 
@@ -9,51 +16,84 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::types::{HttpRequest, HttpResponse};
+use crate::Error;
 
-/// Trait for executing HTTP requests.
+/// Trait for executing HTTP requests, blocking the calling thread.
 ///
 /// Implementations can use real HTTP clients or mock responses for testing.
-pub trait HttpExecutor: Send + Sync {
+///
+/// Errors are [`crate::Error`] so that the typed mapping documented on
+/// [`crate::error`] applies uniformly — a timeout reaches a store caller as
+/// `DeadlineExceeded`, not as a string.
+pub trait BlockingHttpExecutor: Send + Sync {
     /// Execute an HTTP request and return the response.
     ///
-    /// Returns `Err` with a message if the request fails.
-    fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, String>;
+    /// A non-2xx *response* is still `Ok`: whether a status is a failure is
+    /// the calling store's decision. `Err` means the exchange did not
+    /// produce a response at all.
+    fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, Error>;
 }
 
 /// Production HTTP executor using reqwest.
-pub struct ReqwestExecutor {
+///
+/// Holds a single [`reqwest::blocking::Client`] and reuses it for every
+/// request, so connection pooling and TLS session reuse actually happen.
+///
+/// # Runtime constraint
+///
+/// Constructing a blocking reqwest client **panics when called from inside
+/// a Tokio runtime** (it starts its own background runtime). Build
+/// `BlockingReqwestExecutor` on an ordinary thread — or on a
+/// `spawn_blocking` thread — never inside an `async fn` driven by a
+/// runtime. The same applies transitively to every store that defaults to
+/// this executor.
+pub struct BlockingReqwestExecutor {
     client: Client,
 }
 
-impl ReqwestExecutor {
+impl BlockingReqwestExecutor {
     /// Create a new executor with the given timeout.
-    pub fn new(timeout: Duration) -> Result<Self, String> {
-        let client = Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| e.to_string())?;
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within a Tokio runtime; see the type docs.
+    pub fn new(timeout: Duration) -> Result<Self, Error> {
+        let client =
+            Client::builder()
+                .timeout(timeout)
+                .build()
+                .map_err(|e| Error::ClientBuild {
+                    message: e.to_string(),
+                })?;
 
         Ok(Self { client })
     }
 
     /// Create with default timeout of 30 seconds.
-    pub fn with_default_timeout() -> Result<Self, String> {
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within a Tokio runtime; see the type docs.
+    pub fn with_default_timeout() -> Result<Self, Error> {
         Self::new(Duration::from_secs(30))
     }
 }
 
-impl HttpExecutor for ReqwestExecutor {
-    fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, String> {
+impl BlockingHttpExecutor for BlockingReqwestExecutor {
+    fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, Error> {
         let method: http::Method = request.method.clone().into();
+        // Validate before reqwest sees it: a malformed or non-http(s) URL is
+        // the caller's mistake (InvalidArgument), not a transport failure.
+        let url = request.url()?;
 
         let mut headers = HeaderMap::new();
         for (name, value) in &request.headers {
-            let header_name = HeaderName::try_from(name.as_str()).map_err(|e| e.to_string())?;
-            let header_value = HeaderValue::try_from(value.as_str()).map_err(|e| e.to_string())?;
+            let header_name = HeaderName::try_from(name.as_str())?;
+            let header_value = HeaderValue::try_from(value.as_str())?;
             headers.insert(header_name, header_value);
         }
 
-        let mut req_builder = self.client.request(method, &request.path);
+        let mut req_builder = self.client.request(method, url);
         req_builder = req_builder.headers(headers);
 
         if !request.query.is_empty() {
@@ -64,7 +104,7 @@ impl HttpExecutor for ReqwestExecutor {
             req_builder = req_builder.json(body);
         }
 
-        let response = req_builder.send().map_err(|e| e.to_string())?;
+        let response = req_builder.send()?;
 
         let status = response.status().as_u16();
         let status_text = response
@@ -80,16 +120,14 @@ impl HttpExecutor for ReqwestExecutor {
             }
         }
 
-        let body_text = response.text().map_err(|e| e.to_string())?;
+        let body_text = response.text()?;
         let body = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
 
-        Ok(HttpResponse {
-            status,
-            status_text,
-            headers: resp_headers,
-            body,
-            body_text: Some(body_text),
-        })
+        Ok(HttpResponse::new(status)
+            .with_status_text(status_text)
+            .with_json_body(body)
+            .with_body_text(body_text)
+            .with_headers(resp_headers))
     }
 }
 
@@ -154,25 +192,15 @@ pub mod mock {
 
         /// Create a simple success response.
         pub fn success_response(body: serde_json::Value) -> HttpResponse {
-            let body_text = body.to_string();
-            HttpResponse {
-                status: 200,
-                status_text: "OK".to_string(),
-                headers: HashMap::new(),
-                body,
-                body_text: Some(body_text),
-            }
+            HttpResponse::new(200).with_json_body(body)
         }
 
         /// Create a simple error response.
         pub fn error_response(status: u16, message: &str) -> HttpResponse {
-            HttpResponse {
-                status,
-                status_text: message.to_string(),
-                headers: HashMap::new(),
-                body: serde_json::json!({"error": message}),
-                body_text: Some(format!(r#"{{"error":"{}"}}"#, message)),
-            }
+            HttpResponse::new(status)
+                .with_status_text(message)
+                .with_json_body(serde_json::json!({"error": message}))
+                .with_body_text(format!(r#"{{"error":"{}"}}"#, message))
         }
 
         /// Create a 404 Not Found response.
@@ -181,8 +209,8 @@ pub mod mock {
         }
     }
 
-    impl HttpExecutor for MockExecutor {
-        fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, String> {
+    impl BlockingHttpExecutor for MockExecutor {
+        fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, Error> {
             // Record the request
             self.recorded_requests.lock().unwrap().push(request.clone());
 
@@ -194,7 +222,7 @@ pub mod mock {
                     .unwrap()
                     .clone()
                     .unwrap_or_else(|| "Mock failure".to_string());
-                return Err(msg);
+                return Err(Error::Other { message: msg });
             }
 
             // Look for a matching response
@@ -219,17 +247,11 @@ mod tests {
     use super::mock::MockExecutor;
     use super::*;
     use crate::types::Method;
-    use std::collections::HashMap;
 
     #[test]
     fn mock_executor_returns_configured_response() {
-        let response = HttpResponse {
-            status: 200,
-            status_text: "OK".to_string(),
-            headers: HashMap::new(),
-            body: serde_json::json!({"result": "success"}),
-            body_text: Some(r#"{"result":"success"}"#.to_string()),
-        };
+        let response =
+            HttpResponse::new(200).with_json_body(serde_json::json!({"result": "success"}));
 
         let executor = MockExecutor::new().with_response("/test", response.clone());
 
@@ -268,7 +290,7 @@ mod tests {
         let result = executor.execute(&request);
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Network error");
+        assert_eq!(result.unwrap_err().to_string(), "Network error");
     }
 
     #[test]
@@ -390,13 +412,13 @@ mod tests {
 
     #[test]
     fn reqwest_executor_creation() {
-        let executor = ReqwestExecutor::with_default_timeout();
+        let executor = BlockingReqwestExecutor::with_default_timeout();
         assert!(executor.is_ok());
     }
 
     #[test]
     fn reqwest_executor_custom_timeout() {
-        let executor = ReqwestExecutor::new(Duration::from_secs(10));
+        let executor = BlockingReqwestExecutor::new(Duration::from_secs(10));
         assert!(executor.is_ok());
     }
 }

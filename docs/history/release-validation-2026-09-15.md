@@ -4,16 +4,20 @@ Historical validation of the original-letter revision (`ef02a92`). The later
 [supplement validation](release-validation-supplement-2026-09-15.md) supersedes
 this record for the current release candidate.
 
-The [holistic plan](../plans/02-coherent-contracts.md) is implemented for the
+The [holistic plan](plans/02-coherent-contracts.md) is implemented for the
 StructFS/Featherweight 0.4.0 candidate and Isotope 2026-09-14 specification candidate.
-[Implementation decisions](design/2026-09-14-coherent-contracts.md) and
-[migration](migration-0.4.md) describe the final contracts.
+[Implementation decisions](../design/2026-09-14-coherent-contracts.md) and
+[migration](../migration-0.4.md) describe the final contracts.
 
 Source baseline: `c8a9b1527cebf4b7c6362971c9aea0c1cefc6aea` plus the uncommitted changes identified in
 [the source manifest](release-validation-2026-09-15.json). This is a validated
 working-tree candidate, not a release commit or tag. No packages were published.
-The generated [registry record](release-status.md) verifies 0.4.0 as unpublished;
-Namecode remains independently published at 0.1.1.
+At the time of this record the generated registry record verified 0.4.0 as
+unpublished; Namecode remains independently published at 0.1.1.
+
+> Note (2026-09-17): 0.4.0 was published for all 19 crates on 2026-09-16; the
+> current [registry record](../release-status.md) records that. This file is kept
+> as the dated candidate validation only.
 
 ## Results
 

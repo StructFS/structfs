@@ -26,16 +26,18 @@
 //! and replay (the re-run's own timeline, comparable to the
 //! original's).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use structfs_core_store::{path, Error, Path, Record, Writer as _};
+use structfs_core_store::{path, Error, Path, Record};
 use structfs_serde_store::to_value;
 
 use crate::namespace::HostStore;
+use crate::protocol::ErrorKind;
 
 /// One boundary operation, as the session witnessed it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SessionEntry {
     /// Arrival order across the whole session, dense from 0.
     pub seq: u64,
@@ -79,21 +81,22 @@ struct SessionInner {
 
 /// The assembly-wide arrival-order log. One lock covers sequence
 /// assignment and the append, so the log's physical order is the seq
-/// order.
-pub struct SessionLog {
-    inner: Mutex<SessionInner>,
+/// order. The lock is async and the append is the store's async write:
+/// witnessing never blocks a runtime worker thread.
+pub(crate) struct SessionLog {
+    inner: tokio::sync::Mutex<SessionInner>,
 }
 
 impl SessionLog {
-    pub fn new(log: HostStore) -> Arc<Self> {
+    pub(crate) fn new(log: HostStore) -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(SessionInner { seq: 0, log }),
+            inner: tokio::sync::Mutex::new(SessionInner { seq: 0, log }),
         })
     }
 
     /// Witness one completed operation. Never fails the operation it
     /// observes: an append error is traced and dropped.
-    pub(crate) fn witness(
+    pub(crate) async fn witness(
         &self,
         block: &str,
         op: &str,
@@ -101,7 +104,7 @@ impl SessionLog {
         outcome: String,
         entry: Option<u64>,
     ) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock().await;
         let record = SessionEntry {
             seq: inner.seq,
             block: block.to_string(),
@@ -110,8 +113,15 @@ impl SessionLog {
             outcome,
             entry,
         };
-        let appended = to_value(&record)
-            .and_then(|value| inner.log.write(&path!("append"), Record::parsed(value)));
+        let appended = match to_value(&record) {
+            Ok(value) => {
+                inner
+                    .log
+                    .write(&path!("append"), Record::parsed(value))
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         match appended {
             Ok(_) => inner.seq += 1,
             Err(error) => {
@@ -139,49 +149,43 @@ pub(crate) fn write_outcome(result: &Result<Path, Error>) -> String {
 }
 
 fn failed(error: &Error) -> String {
-    let kind = match error {
-        Error::NotFound { .. } => "not_found",
-        Error::NoRoute { .. } => "no_route",
-        Error::PermissionDenied { .. } => "permission_denied",
-        Error::Conflict { .. } => "conflict",
-        Error::Overloaded { .. } => "overloaded",
-        Error::DeadlineExceeded { .. } => "deadline_exceeded",
-        Error::ResourceLimit { .. } => "resource_limit",
-        Error::Cancelled { .. } => "cancelled",
-        _ => "other",
-    };
-    format!("failed:{kind}")
+    format!("failed:{}", ErrorKind::of(error).label())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::host_store;
-    use structfs_core_store::{Reader as _, Value};
+    use crate::namespace::{async_host_store, host_store};
+    use structfs_core_store::Value;
     use structfs_json_store::{LogStore, MemoryAppendBacking};
 
-    #[test]
-    fn the_log_orders_and_labels_operations() {
+    #[tokio::test]
+    async fn the_log_orders_and_labels_operations() {
         let store = host_store(LogStore::open(MemoryAppendBacking::new()).unwrap());
         let session = SessionLog::new(store.clone());
-        session.witness(
-            "demo/a",
-            "read",
-            &path!("iso/random/uuid"),
-            "found".into(),
-            Some(0),
-        );
-        session.witness("demo/b", "write", &path!("greeting"), "wrote".into(), None);
-        session.witness(
-            "demo/a",
-            "read",
-            &path!("secrets"),
-            "failed:permission_denied".into(),
-            Some(1),
-        );
+        session
+            .witness(
+                "demo/a",
+                "read",
+                &path!("iso/random/uuid"),
+                "found".into(),
+                Some(0),
+            )
+            .await;
+        session
+            .witness("demo/b", "write", &path!("greeting"), "wrote".into(), None)
+            .await;
+        session
+            .witness(
+                "demo/a",
+                "read",
+                &path!("secrets"),
+                "failed:permission_denied".into(),
+                Some(1),
+            )
+            .await;
 
-        let mut store = store;
-        let all = store.read(&path!("")).unwrap().unwrap();
+        let all = store.read(&path!("")).await.unwrap().unwrap();
         let Some(Value::Array(items)) = all.as_value() else {
             panic!("expected the log's array");
         };
@@ -199,6 +203,19 @@ mod tests {
         assert_eq!(entries[2].outcome, "failed:permission_denied");
         assert_eq!(entries[2].entry, Some(1));
         assert_eq!(entries[1].entry, None);
+    }
+
+    /// A detached (non-`Sync`-variant) store is appended to asynchronously,
+    /// on a current-thread runtime where any blocking bridge would deadlock.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_detached_store_logs_without_blocking() {
+        let log =
+            structfs_core_store::Shared::new(LogStore::open(MemoryAppendBacking::new()).unwrap());
+        let session = SessionLog::new(async_host_store(log.clone()));
+        session
+            .witness("demo/a", "write", &path!("x"), "wrote".into(), None)
+            .await;
+        assert_eq!(log.lock().len(), 1);
     }
 
     #[test]

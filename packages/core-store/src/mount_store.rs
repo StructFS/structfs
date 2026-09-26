@@ -5,75 +5,56 @@
 //! - Write to `/ctx/mounts/<name>` to create a mount at `/<name>`
 //! - Write `null` to `/ctx/mounts/<name>` to unmount
 //!
-//! Mount configurations are JSON objects like:
-//! ```json
-//! {"type": "memory"}
-//! {"type": "local", "path": "/path/to/dir"}
-//! {"type": "http", "url": "https://api.example.com"}
-//! {"type": "structfs", "url": "https://structfs.example.com"}
-//! ```
+//! `MountStore` owns only the mechanism. What a mount configuration looks
+//! like, and which stores it can create, belongs to the [`StoreFactory`]:
+//! the factory names its config type, decodes it from the `Value` written
+//! to `ctx/mounts/<name>`, encodes it back for the listing, and builds the
+//! store. The REPL's factory, for example, accepts maps such as
+//! `{"type": "memory"}`.
+//!
+//! Every mount also registers a read-only redirect from `ctx/help/<name>`
+//! to `<name>/docs` (the docs protocol), so `read /ctx/help/<name>` reaches
+//! the store's own documentation. Mounting never reads the store: whether
+//! docs exist is discovered by the first read through the redirect.
 
 use collection_literals::btree;
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
 use crate::overlay_store::{OverlayStore, RedirectMode, StoreBox};
 use crate::{path, Error, Path, Reader, Record, Value, Writer};
 
-/// Configuration for a mount point
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum MountConfig {
-    /// In-memory JSON store
-    Memory,
-    /// Local filesystem JSON store
-    Local { path: String },
-    /// HTTP client store (for making HTTP requests to a base URL)
-    Http { url: String },
-    /// HTTP broker store - write HttpRequest, read from handle to execute (sync)
-    HttpBroker,
-    /// Async HTTP broker - executes requests in background threads
-    AsyncHttpBroker,
-    /// Remote StructFS store over HTTP
-    Structfs { url: String },
-    /// Help/documentation store (read-only)
-    Help,
-    /// System primitives store (env, time, proc, fs, random)
-    Sys,
-    /// REPL documentation store
-    Repl,
-    /// Register storage (session-local named values)
-    Registers,
-    /// A JSONL append log served as a store (ledgers, transcripts,
-    /// session logs): read `/` for every entry, `len` for the count,
-    /// `entries/{n}` for one, and page with the `entries/from/{n}`
-    /// cursor tail. Writing `append` adds an entry.
-    Log { path: String },
-    /// A recording directory (as `fw run --record DIR` writes it) as one
-    /// read-only tree: the session log at `session`, each block's
-    /// transcript at its assembly-scoped key. Forensics — writes are
-    /// denied so the evidence stays evidence.
-    Recording { path: String },
-}
-
-/// Information about a mount point
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MountInfo {
-    pub path: String,
-    pub config: MountConfig,
-}
-
-/// A factory for creating stores from mount configurations
+/// Creates stores from mount configurations and defines their wire form.
+///
+/// `MountStore` stores configs as `Self::Config` and never interprets them;
+/// it converts through [`config_from_value`](Self::config_from_value) when a
+/// config is written to `ctx/mounts/<name>` and through
+/// [`config_to_value`](Self::config_to_value) when the listing is read.
 pub trait StoreFactory: Send + Sync {
-    fn create(&self, config: &MountConfig) -> Result<StoreBox, Error>;
+    /// The factory's mount configuration.
+    type Config: Clone + Send + Sync;
+
+    /// Build the store a config describes.
+    fn create(&self, config: &Self::Config) -> Result<StoreBox, Error>;
+
+    /// Decode a config from the value written to `ctx/mounts/<name>`.
+    /// Malformed configs should be `Error::InvalidArgument`.
+    fn config_from_value(&self, value: Value) -> Result<Self::Config, Error>;
+
+    /// Encode a config for the `ctx/mounts` listing.
+    fn config_to_value(&self, config: &Self::Config) -> Result<Value, Error>;
 }
 
-/// A store that manages mounts through read/write operations
+/// A store that manages mounts through read/write operations.
+///
+/// Every mount name is registered exactly once: mounting a name that is
+/// already taken is `Error::Conflict` (unmount first), and `unmount` works
+/// for names mounted through the factory and for pre-built stores mounted
+/// with [`mount_store`](Self::mount_store) alike. Stores mounted without a
+/// config list with a `null` config.
 pub struct MountStore<F: StoreFactory> {
     overlay: OverlayStore,
-    mounts: BTreeMap<String, MountConfig>,
+    /// Registered mounts; `None` for stores mounted without a config.
+    mounts: BTreeMap<String, Option<F::Config>>,
     factory: F,
 }
 
@@ -88,90 +69,80 @@ impl<F: StoreFactory> MountStore<F> {
         }
     }
 
-    /// Mount a store at the given path
-    pub fn mount(&mut self, name: &str, config: MountConfig) -> Result<(), Error> {
-        // Create the store from the config
+    /// Mount a store created by the factory from `config` at `name`.
+    ///
+    /// Fails with `Error::Conflict` if `name` is already mounted; the
+    /// factory is not consulted in that case.
+    pub fn mount(&mut self, name: &str, config: F::Config) -> Result<(), Error> {
+        let mount_path = self.reserve(name)?;
         let store = self.factory.create(&config)?;
-
-        // Parse the mount path
-        let mount_path = Path::parse(name).map_err(Error::Path)?;
-
-        // Add to overlay
-        self.overlay.mount(mount_path.clone(), store);
-
-        // Track the mount
-        self.mounts.insert(name.to_string(), config);
-
-        // Discover and redirect docs
-        self.discover_and_redirect_docs(name, &mount_path);
-
+        self.install(mount_path, store, Some(config));
         Ok(())
-    }
-
-    /// Probe for docs at mount path and create redirect if found.
-    fn discover_and_redirect_docs(&mut self, name: &str, mount_path: &Path) {
-        let docs_path = mount_path.join(&path!("docs"));
-
-        // Probe for docs - if readable, create redirect
-        if self.overlay.read(&docs_path).ok().flatten().is_some() {
-            // Use the full mount path for the help path
-            // e.g., "ctx/sys" -> help path is "ctx/help/ctx/sys"
-            // This allows `read /ctx/help/ctx/sys` to get docs for the store at `/ctx/sys`
-            if let Ok(help_suffix) = Path::parse(name) {
-                let help_path = path!("ctx/help").join(&help_suffix);
-
-                self.overlay.add_redirect(
-                    help_path,
-                    docs_path,
-                    RedirectMode::ReadOnly,
-                    Some(name.to_string()),
-                );
-            }
-        }
     }
 
     /// Mount a pre-created store at the given path.
     ///
     /// This bypasses the factory and allows mounting stores that have
     /// complex initialization requirements (e.g., cross-store dependencies).
+    /// The mount is tracked like any other (it can be unmounted and lists
+    /// with a `null` config). Fails with `Error::Conflict` if `name` is
+    /// already mounted.
     pub fn mount_store(&mut self, name: &str, store: StoreBox) -> Result<(), Error> {
-        // Parse the mount path
-        let mount_path = Path::parse(name).map_err(Error::Path)?;
-
-        // Add to overlay
-        self.overlay.mount(mount_path.clone(), store);
-
-        // Discover and redirect docs
-        self.discover_and_redirect_docs(name, &mount_path);
-
-        // Don't track in mounts BTreeMap since we don't have a config
-        // This mount won't show up in list_mounts or be serializable,
-        // which is fine for built-in stores like help
-
+        let mount_path = self.reserve(name)?;
+        self.install(mount_path, store, None);
         Ok(())
     }
 
-    /// Unmount a store at the given path
-    pub fn unmount(&mut self, name: &str) -> Result<(), Error> {
-        if !self.mounts.contains_key(name) {
-            return Err(Error::store(
-                "mount_store",
-                "unmount",
-                format!("No mount at '{}'", name),
-            ));
-        }
-
-        // Parse the mount path
+    /// Validate `name` as a mount path and check it is free. Names are
+    /// compared as normalized paths, so `a/` and `a` are the same mount.
+    fn reserve(&self, name: &str) -> Result<Path, Error> {
         let mount_path = Path::parse(name)?;
+        let key = mount_path.to_string();
+        if self.mounts.contains_key(&key) {
+            return Err(Error::conflict(format!("'{key}' is already mounted")));
+        }
+        Ok(mount_path)
+    }
+
+    /// Route the store, record the mount, and link its docs into `ctx/help`.
+    fn install(&mut self, mount_path: Path, store: StoreBox, config: Option<F::Config>) {
+        let name = mount_path.to_string();
+        self.overlay.mount_boxed(mount_path.clone(), store);
+        self.mounts.insert(name.clone(), config);
+
+        // `ctx/help/<name>` -> `<name>/docs`. Registered without reading the
+        // store: a mount must not perform operations on the store it mounts.
+        // (Mounting at `ctx` or `ctx/help` itself would alias the help tree
+        // onto itself, so those names get no redirect.)
+        let help_prefix = path!("ctx/help");
+        if !help_prefix.has_prefix(&mount_path) {
+            self.overlay.add_redirect(
+                help_prefix.join(&mount_path),
+                mount_path.join(&path!("docs")),
+                RedirectMode::ReadOnly,
+                Some(name),
+            );
+        }
+    }
+
+    /// Unmount the store at `name`, along with any redirects it created.
+    ///
+    /// Fails with `Error::NotFound` if nothing is mounted there.
+    pub fn unmount(&mut self, name: &str) -> Result<(), Error> {
+        let mount_path = Path::parse(name)?;
+        let key = mount_path.to_string();
+        if !self.mounts.contains_key(&key) {
+            return Err(Error::not_found(mount_path));
+        }
 
         // Remove from overlay (the actual routing)
         self.overlay.unmount(&mount_path);
 
         // Cascade: remove any redirects this mount created
-        self.overlay.remove_redirects_for_mount(name);
+        self.overlay.remove_redirects_for_mount(&key);
 
         // Remove from tracking (the metadata)
-        self.mounts.remove(name);
+        self.mounts.remove(&key);
 
         Ok(())
     }
@@ -181,15 +152,24 @@ impl<F: StoreFactory> MountStore<F> {
         self.overlay.list_redirects()
     }
 
-    /// List all mounts
-    pub fn list_mounts(&self) -> Vec<MountInfo> {
+    /// List all mounts as `(name, config)`; the config is `None` for stores
+    /// mounted with [`mount_store`](Self::mount_store).
+    pub fn list_mounts(&self) -> Vec<(String, Option<F::Config>)> {
         self.mounts
             .iter()
-            .map(|(path, config)| MountInfo {
-                path: path.clone(),
-                config: config.clone(),
-            })
+            .map(|(path, config)| (path.clone(), config.clone()))
             .collect()
+    }
+
+    /// The factory that builds this store's mounts.
+    pub fn factory(&self) -> &F {
+        &self.factory
+    }
+
+    fn encode(&self, config: Option<&F::Config>) -> Result<Value, Error> {
+        config.map_or(Ok(Value::Null), |config| {
+            self.factory.config_to_value(config)
+        })
     }
 
     fn is_mounts_path(path: &Path) -> bool {
@@ -204,193 +184,80 @@ impl<F: StoreFactory> MountStore<F> {
         }
     }
 
-    /// Convert MountInfo list to Value
-    fn mounts_to_value(&self) -> Value {
-        let mounts = self.list_mounts();
-        let arr: Vec<Value> = mounts
-            .into_iter()
-            .map(|info| {
-                Value::Map(btree! {
-                    "path".to_string() => Value::String(info.path),
-                    "config".to_string() => config_to_value(&info.config),
-                })
+    /// The mount listing as a Value: `[{"path": name, "config": {...}|null}]`.
+    fn mounts_to_value(&self) -> Result<Value, Error> {
+        let arr = self
+            .mounts
+            .iter()
+            .map(|(path, config)| {
+                Ok(Value::Map(btree! {
+                    "path".to_string() => Value::String(path.clone()),
+                    "config".to_string() => self.encode(config.as_ref())?,
+                }))
             })
-            .collect();
-        Value::Array(arr)
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Value::Array(arr))
     }
 
-    /// Convert a MountConfig to Value
-    fn config_to_value(config: &MountConfig) -> Value {
-        config_to_value(config)
-    }
-}
-
-/// Convert a MountConfig to Value
-fn config_to_value(config: &MountConfig) -> Value {
-    Value::Map(match config {
-        MountConfig::Memory => btree! {
-            "type".to_string() => Value::String("memory".to_string()),
-        },
-        MountConfig::Local { path } => btree! {
-            "type".to_string() => Value::String("local".to_string()),
-            "path".to_string() => Value::String(path.clone()),
-        },
-        MountConfig::Http { url } => btree! {
-            "type".to_string() => Value::String("http".to_string()),
-            "url".to_string() => Value::String(url.clone()),
-        },
-        MountConfig::HttpBroker => btree! {
-            "type".to_string() => Value::String("httpbroker".to_string()),
-        },
-        MountConfig::AsyncHttpBroker => btree! {
-            "type".to_string() => Value::String("asynchttpbroker".to_string()),
-        },
-        MountConfig::Structfs { url } => btree! {
-            "type".to_string() => Value::String("structfs".to_string()),
-            "url".to_string() => Value::String(url.clone()),
-        },
-        MountConfig::Help => btree! {
-            "type".to_string() => Value::String("help".to_string()),
-        },
-        MountConfig::Sys => btree! {
-            "type".to_string() => Value::String("sys".to_string()),
-        },
-        MountConfig::Repl => btree! {
-            "type".to_string() => Value::String("repl".to_string()),
-        },
-        MountConfig::Registers => btree! {
-            "type".to_string() => Value::String("registers".to_string()),
-        },
-        MountConfig::Log { path } => btree! {
-            "type".to_string() => Value::String("log".to_string()),
-            "path".to_string() => Value::String(path.clone()),
-        },
-        MountConfig::Recording { path } => btree! {
-            "type".to_string() => Value::String("recording".to_string()),
-            "path".to_string() => Value::String(path.clone()),
-        },
-    })
-}
-
-/// Try to parse a Value as MountConfig
-fn value_to_config(value: &Value) -> Result<MountConfig, Error> {
-    match value {
-        Value::Map(map) => {
-            let type_str = map
-                .get("type")
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.as_str()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    Error::decode(crate::Format::VALUE, "Missing 'type' field in mount config")
-                })?;
-
-            match type_str {
-                "memory" => Ok(MountConfig::Memory),
-                "local" => {
-                    let path = map
-                        .get("path")
-                        .and_then(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            Error::decode(
-                                crate::Format::VALUE,
-                                "Missing 'path' field for local mount",
-                            )
-                        })?;
-                    Ok(MountConfig::Local { path })
-                }
-                "http" => {
-                    let url = map
-                        .get("url")
-                        .and_then(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            Error::decode(
-                                crate::Format::VALUE,
-                                "Missing 'url' field for http mount",
-                            )
-                        })?;
-                    Ok(MountConfig::Http { url })
-                }
-                "httpbroker" => Ok(MountConfig::HttpBroker),
-                "asynchttpbroker" => Ok(MountConfig::AsyncHttpBroker),
-                "structfs" => {
-                    let url = map
-                        .get("url")
-                        .and_then(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            Error::decode(
-                                crate::Format::VALUE,
-                                "Missing 'url' field for structfs mount",
-                            )
-                        })?;
-                    Ok(MountConfig::Structfs { url })
-                }
-                "help" => Ok(MountConfig::Help),
-                "sys" => Ok(MountConfig::Sys),
-                "repl" => Ok(MountConfig::Repl),
-                "registers" => Ok(MountConfig::Registers),
-                "log" | "recording" => {
-                    let path = map
-                        .get("path")
-                        .and_then(|v| match v {
-                            Value::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            Error::decode(
-                                crate::Format::VALUE,
-                                format!("Missing 'path' field for {type_str} mount"),
-                            )
-                        })?;
-                    Ok(match type_str {
-                        "log" => MountConfig::Log { path },
-                        _ => MountConfig::Recording { path },
-                    })
-                }
-                other => Err(Error::decode(
-                    crate::Format::VALUE,
-                    format!("Unknown mount type: {}", other),
-                )),
-            }
+    /// The value served at `ctx/mounts...`, if `from` addresses that tree.
+    fn read_mounts_value(&self, from: &Path) -> Option<Result<Option<Value>, Error>> {
+        if !Self::is_mounts_path(from) {
+            return None;
         }
-        _ => Err(Error::decode(
-            crate::Format::VALUE,
-            "Mount config must be a map",
-        )),
+        if from.len() == 2 {
+            return Some(self.mounts_to_value().map(Some));
+        }
+        let name = Self::get_mount_name(from)?;
+        Some(
+            self.mounts
+                .get(&name)
+                .map(|config| self.encode(config.as_ref()))
+                .transpose(),
+        )
+    }
+
+    /// Child names under `ctx/mounts...`, if `from` addresses that tree.
+    /// The listing's children are the mount names (which may contain `/`),
+    /// not array indices; a config's children are its keys.
+    fn mounts_children(&self, from: &Path) -> Option<Result<Option<Vec<String>>, Error>> {
+        if Self::is_mounts_path(from) && from.len() == 2 {
+            return Some(Ok(Some(self.mounts.keys().cloned().collect())));
+        }
+        self.read_mounts_value(from)
+            .map(|value| value.map(|value| value.as_ref().map(crate::children::names_of_value)))
     }
 }
 
 impl<F: StoreFactory> Reader for MountStore<F> {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        if Self::is_mounts_path(from) {
-            // Handle reads to /ctx/mounts/*
-            if from.len() == 2 {
-                // Reading /ctx/mounts - return list of mounts
-                let value = self.mounts_to_value();
-                return Ok(Some(Record::parsed(value)));
-            } else if let Some(name) = Self::get_mount_name(from) {
-                // Reading /ctx/mounts/<name> - return mount config
-                if let Some(config) = self.mounts.get(&name) {
-                    let value = Self::config_to_value(config);
-                    return Ok(Some(Record::parsed(value)));
-                } else {
-                    return Ok(None);
-                }
-            }
+        if let Some(value) = self.read_mounts_value(from) {
+            return Ok(value?.map(Record::parsed));
         }
-
-        // Delegate to overlay
         self.overlay.read(from)
+    }
+
+    fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
+        if let Some(names) = self.mounts_children(from) {
+            return names;
+        }
+        self.overlay.read_children(from)
+    }
+
+    fn read_children_page(
+        &mut self,
+        from: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<crate::ChildPage>, Error> {
+        if let Some(names) = self.mounts_children(from) {
+            if limit == 0 {
+                return Err(Error::invalid_argument("child page limit must be positive"));
+            }
+            return names?
+                .map(|names| crate::children::page_names(names, offset, limit))
+                .transpose();
+        }
+        self.overlay.read_children_page(from, offset, limit)
     }
 }
 
@@ -398,26 +265,22 @@ impl<F: StoreFactory> Writer for MountStore<F> {
     fn write(&mut self, destination: &Path, data: Record) -> Result<Path, Error> {
         if Self::is_mounts_path(destination) {
             // Handle writes to /ctx/mounts/*
-            if let Some(name) = Self::get_mount_name(destination) {
-                // Get the value from the record
-                let value = data.into_value(&crate::NoCodec)?;
-
-                if value == Value::Null {
-                    // Unmount
-                    self.unmount(&name)?;
-                } else {
-                    // Parse as MountConfig and mount
-                    let config = value_to_config(&value)?;
-                    self.mount(&name, config)?;
-                }
-                return Ok(destination.clone());
-            } else {
-                return Err(Error::store(
-                    "mount_store",
-                    "write",
-                    "Cannot write directly to /ctx/mounts",
+            let Some(name) = Self::get_mount_name(destination) else {
+                return Err(Error::permission_denied(
+                    "cannot write directly to ctx/mounts; write a config to ctx/mounts/<name>",
                 ));
+            };
+            // Get the value from the record
+            let value = data.into_value(&crate::NoCodec)?;
+
+            if value == Value::Null {
+                // Unmount
+                self.unmount(&name)?;
+            } else {
+                let config = self.factory.config_from_value(value)?;
+                self.mount(&name, config)?;
             }
+            return Ok(destination.clone());
         }
 
         // Delegate to overlay
@@ -428,41 +291,55 @@ impl<F: StoreFactory> Writer for MountStore<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{path, NoCodec};
-    use std::collections::HashMap;
+    use crate::{path, MemoryStore, NoCodec};
 
-    // Simple test store
-    struct TestStore {
-        data: HashMap<Path, Record>,
+    /// A config the tests' factories understand: any map with a string
+    /// `type`. The mechanism never looks inside it.
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestConfig(Value);
+
+    fn memory() -> TestConfig {
+        TestConfig(Value::Map(
+            btree! {"type".to_string() => Value::from("memory")},
+        ))
     }
 
-    impl TestStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
+    fn local(path: &str) -> TestConfig {
+        TestConfig(Value::Map(btree! {
+            "type".to_string() => Value::from("local"),
+            "path".to_string() => Value::from(path),
+        }))
+    }
+
+    fn decode_test_config(value: Value) -> Result<TestConfig, Error> {
+        match &value {
+            Value::Map(map) if matches!(map.get("type"), Some(Value::String(_))) => {
+                Ok(TestConfig(value))
             }
+            _ => Err(Error::invalid_argument("config needs a string 'type'")),
         }
     }
 
-    impl Reader for TestStore {
-        fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            Ok(self.data.get(from).cloned())
-        }
+    /// Implements the config half of `StoreFactory` for `TestConfig`.
+    macro_rules! test_config_codec {
+        () => {
+            type Config = TestConfig;
+            fn config_from_value(&self, value: Value) -> Result<TestConfig, Error> {
+                decode_test_config(value)
+            }
+            fn config_to_value(&self, config: &TestConfig) -> Result<Value, Error> {
+                Ok(config.0.clone())
+            }
+        };
     }
 
-    impl Writer for TestStore {
-        fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            self.data.insert(to.clone(), data);
-            Ok(to.clone())
-        }
-    }
-
-    // Simple factory that always creates test stores
+    // Simple factory that always creates memory stores
     struct TestFactory;
 
     impl StoreFactory for TestFactory {
-        fn create(&self, _config: &MountConfig) -> Result<StoreBox, Error> {
-            Ok(Box::new(TestStore::new()))
+        test_config_codec!();
+        fn create(&self, _config: &TestConfig) -> Result<StoreBox, Error> {
+            Ok(Box::new(MemoryStore::new()))
         }
     }
 
@@ -471,7 +348,7 @@ mod tests {
         let mut store = MountStore::new(TestFactory);
 
         // Mount a store
-        store.mount("data", MountConfig::Memory).unwrap();
+        store.mount("data", memory()).unwrap();
 
         // Write to it
         store
@@ -488,15 +365,8 @@ mod tests {
     fn list_mounts() {
         let mut store = MountStore::new(TestFactory);
 
-        store.mount("data", MountConfig::Memory).unwrap();
-        store
-            .mount(
-                "local",
-                MountConfig::Local {
-                    path: "/tmp".to_string(),
-                },
-            )
-            .unwrap();
+        store.mount("data", memory()).unwrap();
+        store.mount("local", local("/tmp")).unwrap();
 
         // Read /ctx/mounts
         let record = store.read(&path!("ctx/mounts")).unwrap().unwrap();
@@ -508,6 +378,13 @@ mod tests {
             }
             _ => panic!("expected array"),
         }
+        assert_eq!(
+            store.list_mounts(),
+            vec![
+                ("data".to_string(), Some(memory())),
+                ("local".to_string(), Some(local("/tmp"))),
+            ]
+        );
     }
 
     #[test]
@@ -515,15 +392,67 @@ mod tests {
         let mut store = MountStore::new(TestFactory);
 
         // Mount via write to /ctx/mounts/<name>
-        let config = config_to_value(&MountConfig::Memory);
         store
-            .write(&path!("ctx/mounts/data"), Record::parsed(config))
+            .write(&path!("ctx/mounts/data"), Record::parsed(memory().0))
             .unwrap();
 
-        // Verify mount exists
+        // Verify mount exists, and the listing is the factory's encoding.
         let mounts = store.list_mounts();
         assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].path, "data");
+        assert_eq!(mounts[0].0, "data");
+        assert_eq!(
+            store
+                .read(&path!("ctx/mounts/data"))
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&memory().0)
+        );
+    }
+
+    #[test]
+    fn malformed_config_is_the_factorys_error_and_mounts_nothing() {
+        let mut store = MountStore::new(TestFactory);
+        for bad in [
+            Value::from("not a map"),
+            Value::Map(BTreeMap::new()),
+            Value::Map(btree! {"type".to_string() => Value::Integer(1)}),
+        ] {
+            let err = store
+                .write(&path!("ctx/mounts/data"), Record::parsed(bad))
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidArgument { .. }), "{err}");
+        }
+        assert!(store.list_mounts().is_empty());
+    }
+
+    #[test]
+    fn listing_propagates_encode_errors() {
+        struct Opaque;
+        impl StoreFactory for Opaque {
+            type Config = ();
+            fn create(&self, _: &()) -> Result<StoreBox, Error> {
+                Ok(Box::new(MemoryStore::new()))
+            }
+            fn config_from_value(&self, _: Value) -> Result<(), Error> {
+                Ok(())
+            }
+            fn config_to_value(&self, _: &()) -> Result<Value, Error> {
+                Err(Error::invalid_argument("unencodable"))
+            }
+        }
+        let mut store = MountStore::new(Opaque);
+        store.mount("x", ()).unwrap();
+        assert!(matches!(
+            store.read(&path!("ctx/mounts")),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            store.read_children(&path!("ctx/mounts/x")),
+            Err(Error::InvalidArgument { .. })
+        ));
+        // Unrelated reads are unaffected.
+        assert!(store.read(&path!("x/anything")).unwrap().is_none());
     }
 
     #[test]
@@ -531,7 +460,7 @@ mod tests {
         let mut store = MountStore::new(TestFactory);
 
         // Mount first
-        store.mount("data", MountConfig::Memory).unwrap();
+        store.mount("data", memory()).unwrap();
         assert_eq!(store.list_mounts().len(), 1);
 
         // Unmount via write null
@@ -543,40 +472,13 @@ mod tests {
     }
 
     #[test]
-    fn config_conversion_roundtrip() {
-        let configs = vec![
-            MountConfig::Memory,
-            MountConfig::Local {
-                path: "/tmp/test".to_string(),
-            },
-            MountConfig::Http {
-                url: "https://api.example.com".to_string(),
-            },
-            MountConfig::HttpBroker,
-            MountConfig::AsyncHttpBroker,
-            MountConfig::Structfs {
-                url: "https://fs.example.com".to_string(),
-            },
-            MountConfig::Help,
-            MountConfig::Sys,
-            MountConfig::Repl,
-            MountConfig::Registers,
-        ];
-
-        for config in configs {
-            let value = config_to_value(&config);
-            let back = value_to_config(&value).unwrap();
-            assert_eq!(config, back);
-        }
-    }
-
-    #[test]
     fn mount_store_directly() {
         let mut store = MountStore::new(TestFactory);
 
         // Mount a store directly without using factory
-        let test_store = Box::new(TestStore::new());
-        store.mount_store("direct", test_store).unwrap();
+        store
+            .mount_store("direct", Box::new(MemoryStore::new()))
+            .unwrap();
 
         // Write to it
         store
@@ -590,29 +492,162 @@ mod tests {
         let record = store.read(&path!("direct/test")).unwrap().unwrap();
         let value = record.into_value(&NoCodec).unwrap();
         assert_eq!(value, Value::from("direct_value"));
+
+        // Tracked like any other mount: listed with a null config, and
+        // unmountable.
+        assert_eq!(store.list_mounts(), vec![("direct".to_string(), None)]);
+        assert_eq!(
+            store
+                .read(&path!("ctx/mounts/direct"))
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&Value::Null)
+        );
+        store.unmount("direct").unwrap();
+        assert!(store.list_mounts().is_empty());
+        assert!(matches!(
+            store.read(&path!("direct/test")),
+            Err(Error::NoRoute { .. })
+        ));
     }
 
     #[test]
-    fn unmount_nonexistent_fails() {
+    fn duplicate_mount_name_is_conflict() {
+        struct CountingFactory(std::sync::Mutex<usize>);
+        impl StoreFactory for CountingFactory {
+            test_config_codec!();
+            fn create(&self, _config: &TestConfig) -> Result<StoreBox, Error> {
+                *self.0.lock().unwrap() += 1;
+                Ok(Box::new(MemoryStore::new()))
+            }
+        }
+
+        let mut store = MountStore::new(CountingFactory(std::sync::Mutex::new(0)));
+        store.mount("data", memory()).unwrap();
+        store
+            .write(&path!("data/key"), Record::parsed(Value::Integer(1)))
+            .unwrap();
+
+        let err = store.mount("data", memory()).unwrap_err();
+        assert!(matches!(err, Error::Conflict { .. }));
+        // The factory was not consulted for the rejected mount, and the
+        // original store is untouched.
+        assert_eq!(*store.factory.0.lock().unwrap(), 1);
+        assert!(store.read(&path!("data/key")).unwrap().is_some());
+
+        assert!(matches!(
+            store.mount_store("data", Box::new(MemoryStore::new())),
+            Err(Error::Conflict { .. })
+        ));
+        assert!(matches!(
+            store.write(&path!("ctx/mounts/data"), Record::parsed(memory().0)),
+            Err(Error::Conflict { .. })
+        ));
+    }
+
+    #[test]
+    fn mount_does_not_read_the_mounted_store() {
+        /// A store that fails loudly if anything reads it.
+        struct Touchy;
+        impl Reader for Touchy {
+            fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+                panic!("mount must not read the store (read {from})")
+            }
+        }
+        impl Writer for Touchy {
+            fn write(&mut self, to: &Path, _: Record) -> Result<Path, Error> {
+                Ok(to.clone())
+            }
+        }
+        struct TouchyFactory;
+        impl StoreFactory for TouchyFactory {
+            test_config_codec!();
+            fn create(&self, _: &TestConfig) -> Result<StoreBox, Error> {
+                Ok(Box::new(Touchy))
+            }
+        }
+
+        let mut store = MountStore::new(TouchyFactory);
+        store.mount("quiet", memory()).unwrap();
+        store.mount_store("quieter", Box::new(Touchy)).unwrap();
+
+        // The docs redirect exists without having probed the store.
+        let redirects = store.list_redirects();
+        assert!(redirects.contains(&(
+            path!("ctx/help/quiet"),
+            path!("quiet/docs"),
+            RedirectMode::ReadOnly
+        )));
+        assert!(redirects.contains(&(
+            path!("ctx/help/quieter"),
+            path!("quieter/docs"),
+            RedirectMode::ReadOnly
+        )));
+        // Unmount cascades the redirect away.
+        store.unmount("quiet").unwrap();
+        assert_eq!(store.list_redirects().len(), 1);
+    }
+
+    #[test]
+    fn help_redirect_serves_docs_when_present() {
+        let mut store = MountStore::new(TestFactory);
+        store.mount("documented", memory()).unwrap();
+        store.mount("bare", memory()).unwrap();
+        store
+            .write(
+                &path!("documented/docs"),
+                Record::parsed(Value::from("manual")),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .read(&path!("ctx/help/documented"))
+                .unwrap()
+                .unwrap()
+                .as_value(),
+            Some(&Value::from("manual"))
+        );
+        // A store without docs reads as absent, not as an error.
+        assert!(store.read(&path!("ctx/help/bare")).unwrap().is_none());
+        // Writes through the help redirect are denied.
+        assert!(matches!(
+            store.write(&path!("ctx/help/bare"), Record::parsed(Value::Null)),
+            Err(Error::PermissionDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn mounting_the_help_tree_itself_adds_no_self_redirect() {
+        let mut store = MountStore::new(TestFactory);
+        store
+            .mount_store("ctx/help", Box::new(MemoryStore::new()))
+            .unwrap();
+        store
+            .mount_store("ctx", Box::new(MemoryStore::new()))
+            .unwrap();
+        assert!(store.list_redirects().is_empty());
+        store.unmount("ctx/help").unwrap();
+        store.unmount("ctx").unwrap();
+    }
+
+    #[test]
+    fn unmount_nonexistent_is_not_found() {
         let mut store = MountStore::new(TestFactory);
 
         let result = store.unmount("nonexistent");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No mount"));
+        assert!(matches!(
+            result,
+            Err(Error::NotFound { path }) if path == path!("nonexistent")
+        ));
     }
 
     #[test]
     fn read_specific_mount_config() {
         let mut store = MountStore::new(TestFactory);
 
-        store
-            .mount(
-                "mydata",
-                MountConfig::Local {
-                    path: "/my/path".to_string(),
-                },
-            )
-            .unwrap();
+        store.mount("mydata", local("/my/path")).unwrap();
 
         // Read /ctx/mounts/mydata
         let record = store.read(&path!("ctx/mounts/mydata")).unwrap().unwrap();
@@ -640,83 +675,20 @@ mod tests {
     }
 
     #[test]
-    fn write_directly_to_mounts_fails() {
+    fn write_directly_to_mounts_is_permission_denied() {
         let mut store = MountStore::new(TestFactory);
 
         // Try to write directly to /ctx/mounts (without specifying a name)
         let result = store.write(&path!("ctx/mounts"), Record::parsed(Value::Null));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Cannot write"));
-    }
-
-    #[test]
-    fn value_to_config_unknown_type_fails() {
-        let mut map = BTreeMap::new();
-        map.insert("type".to_string(), Value::String("unknown".to_string()));
-        let result = value_to_config(&Value::Map(map));
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unknown mount type"));
-    }
-
-    #[test]
-    fn value_to_config_non_map_fails() {
-        let result = value_to_config(&Value::String("not a map".to_string()));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a map"));
-    }
-
-    #[test]
-    fn value_to_config_missing_type_fails() {
-        let map = BTreeMap::new();
-        let result = value_to_config(&Value::Map(map));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing 'type'"));
-    }
-
-    #[test]
-    fn value_to_config_type_not_string_fails() {
-        let mut map = BTreeMap::new();
-        map.insert("type".to_string(), Value::Integer(123));
-        let result = value_to_config(&Value::Map(map));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing 'type'"));
-    }
-
-    #[test]
-    fn value_to_config_local_missing_path_fails() {
-        let mut map = BTreeMap::new();
-        map.insert("type".to_string(), Value::String("local".to_string()));
-        let result = value_to_config(&Value::Map(map));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing 'path'"));
-    }
-
-    #[test]
-    fn value_to_config_http_missing_url_fails() {
-        let mut map = BTreeMap::new();
-        map.insert("type".to_string(), Value::String("http".to_string()));
-        let result = value_to_config(&Value::Map(map));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing 'url'"));
-    }
-
-    #[test]
-    fn value_to_config_structfs_missing_url_fails() {
-        let mut map = BTreeMap::new();
-        map.insert("type".to_string(), Value::String("structfs".to_string()));
-        let result = value_to_config(&Value::Map(map));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing 'url'"));
+        assert!(matches!(result, Err(Error::PermissionDenied { .. })));
     }
 
     // Factory that fails
     struct FailingFactory;
 
     impl StoreFactory for FailingFactory {
-        fn create(&self, _config: &MountConfig) -> Result<StoreBox, Error> {
+        test_config_codec!();
+        fn create(&self, _config: &TestConfig) -> Result<StoreBox, Error> {
             Err(Error::store("factory", "create", "Factory failed"))
         }
     }
@@ -725,39 +697,12 @@ mod tests {
     fn mount_with_failing_factory() {
         let mut store = MountStore::new(FailingFactory);
 
-        let result = store.mount("data", MountConfig::Memory);
+        let result = store.mount("data", memory());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Factory failed"));
-    }
-
-    #[test]
-    fn mount_info_serialization() {
-        let info = MountInfo {
-            path: "/test".to_string(),
-            config: MountConfig::Memory,
-        };
-
-        // Test Debug impl
-        let debug = format!("{:?}", info);
-        assert!(debug.contains("/test"));
-        assert!(debug.contains("Memory"));
-
-        // Test Clone
-        let cloned = info.clone();
-        assert_eq!(cloned.path, "/test");
-    }
-
-    #[test]
-    fn mount_config_debug_clone() {
-        // Test Debug and Clone on MountConfig
-        let config = MountConfig::Http {
-            url: "https://test.com".to_string(),
-        };
-        let debug = format!("{:?}", config);
-        assert!(debug.contains("https://test.com"));
-
-        let cloned = config.clone();
-        assert_eq!(cloned, config);
+        // A failed mount leaves no registration behind.
+        assert!(store.list_mounts().is_empty());
+        assert!(store.list_redirects().is_empty());
     }
 
     #[test]
@@ -765,15 +710,14 @@ mod tests {
         let mut store = MountStore::new(TestFactory);
 
         // Mount via write to a nested path: /ctx/mounts/nested/path
-        let config = config_to_value(&MountConfig::Memory);
         store
-            .write(&path!("ctx/mounts/nested/path"), Record::parsed(config))
+            .write(&path!("ctx/mounts/nested/path"), Record::parsed(memory().0))
             .unwrap();
 
         // Verify mount exists with nested name
         let mounts = store.list_mounts();
         assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].path, "nested/path");
+        assert_eq!(mounts[0].0, "nested/path");
     }
 
     #[test]
@@ -783,8 +727,97 @@ mod tests {
         // Read from unmounted path (delegates to empty overlay)
         // Overlay returns an error when no route is found
         let result = store.read(&path!("unmounted/path"));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no route"));
+        assert!(matches!(result, Err(Error::NoRoute { .. })));
+    }
+
+    #[test]
+    fn discovery_verbs_route_to_mounted_store() {
+        let mut store = MountStore::new(TestFactory);
+        store.mount("data", memory()).unwrap();
+        store
+            .write(
+                &path!("data/users/alice"),
+                Record::parsed(Value::Integer(1)),
+            )
+            .unwrap();
+        store
+            .write(&path!("data/users/bob"), Record::parsed(Value::Integer(2)))
+            .unwrap();
+
+        assert_eq!(
+            store.read_children(&path!("data/users")).unwrap(),
+            Some(vec!["alice".to_string(), "bob".to_string()])
+        );
+        let page = store
+            .read_children_page(&path!("data/users"), 1, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.names, vec!["bob".to_string()]);
+        assert_eq!(page.next, None);
+        assert_eq!(store.read_children(&path!("data/missing")).unwrap(), None);
+        assert!(matches!(
+            store.read_children(&path!("unmounted")),
+            Err(Error::NoRoute { .. })
+        ));
+    }
+
+    #[test]
+    fn discovery_verbs_cover_the_mount_listing() {
+        let mut store = MountStore::new(TestFactory);
+        store.mount("a", memory()).unwrap();
+        store.mount("b", local("/x")).unwrap();
+
+        store
+            .mount_store("nested/name", Box::new(MemoryStore::new()))
+            .unwrap();
+
+        // The listing's children are mount names, not array indices.
+        assert_eq!(
+            store.read_children(&path!("ctx/mounts")).unwrap(),
+            Some(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "nested/name".to_string()
+            ])
+        );
+        let page = store
+            .read_children_page(&path!("ctx/mounts"), 1, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.names, vec!["b".to_string()]);
+        // A config map: children are its keys.
+        assert_eq!(
+            store.read_children(&path!("ctx/mounts/b")).unwrap(),
+            Some(vec!["path".to_string(), "type".to_string()])
+        );
+        assert_eq!(
+            store.read_children(&path!("ctx/mounts/missing")).unwrap(),
+            None
+        );
+        assert!(matches!(
+            store.read_children_page(&path!("ctx/mounts"), 0, 0),
+            Err(Error::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn mount_names_are_normalized_paths() {
+        let mut store = MountStore::new(TestFactory);
+        store.mount("a/", memory()).unwrap();
+        assert!(matches!(
+            store.mount("a", memory()),
+            Err(Error::Conflict { .. })
+        ));
+        assert!(matches!(
+            store.mount_store("/a", Box::new(MemoryStore::new())),
+            Err(Error::Conflict { .. })
+        ));
+        assert_eq!(store.list_mounts(), vec![("a".to_string(), Some(memory()))]);
+        assert!(store.read(&path!("ctx/mounts/a")).unwrap().is_some());
+        // Unmount by any spelling of the same path, redirect included.
+        store.unmount("a/").unwrap();
+        assert!(store.list_mounts().is_empty());
+        assert!(store.list_redirects().is_empty());
     }
 
     #[test]
@@ -830,7 +863,7 @@ mod tests {
     #[test]
     fn unmount_removes_from_overlay() {
         let mut store = MountStore::new(TestFactory);
-        store.mount("data", MountConfig::Memory).unwrap();
+        store.mount("data", memory()).unwrap();
 
         // Write something
         store
@@ -852,13 +885,13 @@ mod tests {
     #[test]
     fn unmount_allows_remount() {
         let mut store = MountStore::new(TestFactory);
-        store.mount("data", MountConfig::Memory).unwrap();
+        store.mount("data", memory()).unwrap();
         store
             .write(&path!("data/key"), Record::parsed(Value::Integer(1)))
             .unwrap();
 
         store.unmount("data").unwrap();
-        store.mount("data", MountConfig::Memory).unwrap();
+        store.mount("data", memory()).unwrap();
 
         // New mount should be empty
         let result = store.read(&path!("data/key")).unwrap();
@@ -870,8 +903,8 @@ mod tests {
         let mut store = MountStore::new(TestFactory);
 
         // Mount two stores at overlapping paths
-        store.mount("data", MountConfig::Memory).unwrap();
-        store.mount("data/nested", MountConfig::Memory).unwrap();
+        store.mount("data", memory()).unwrap();
+        store.mount("data/nested", memory()).unwrap();
 
         // Write to nested
         store

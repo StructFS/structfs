@@ -9,8 +9,11 @@ use std::fmt;
 /// `Value`, or when serializing `Value` back to bytes.
 ///
 /// This uses MIME-type-like strings for familiarity, but you can use
-/// any string that your codecs understand.
+/// any string that your codecs understand. Construct with the constants,
+/// [`Format::new`], [`Format::from_static`], or `From<&'static str>` /
+/// `From<String>`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Format(pub Cow<'static, str>);
 
 impl Format {
@@ -58,21 +61,6 @@ impl Format {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Check if this is JSON format.
-    pub fn is_json(&self) -> bool {
-        self == &Self::JSON
-    }
-
-    /// Check if this is protobuf format.
-    pub fn is_protobuf(&self) -> bool {
-        self == &Self::PROTOBUF
-    }
-
-    /// Check if this is the VALUE format (parsed, never serialized).
-    pub fn is_value(&self) -> bool {
-        self == &Self::VALUE
-    }
 }
 
 impl fmt::Display for Format {
@@ -106,8 +94,8 @@ mod tests {
     #[test]
     fn constants_work() {
         assert_eq!(Format::JSON.as_str(), "application/json");
-        assert!(Format::JSON.is_json());
-        assert!(!Format::JSON.is_protobuf());
+        assert_eq!(Format::JSON, Format::JSON);
+        assert_ne!(Format::JSON, Format::PROTOBUF);
     }
 
     #[test]
@@ -126,18 +114,6 @@ mod tests {
     fn from_static() {
         let f = Format::from_static("text/plain");
         assert_eq!(f.as_str(), "text/plain");
-    }
-
-    #[test]
-    fn is_protobuf() {
-        assert!(Format::PROTOBUF.is_protobuf());
-        assert!(!Format::JSON.is_protobuf());
-    }
-
-    #[test]
-    fn is_value() {
-        assert!(Format::VALUE.is_value());
-        assert!(!Format::JSON.is_value());
     }
 
     #[test]

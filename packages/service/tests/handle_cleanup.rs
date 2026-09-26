@@ -136,7 +136,7 @@ async fn release_waits_for_resources_and_repeated_release_and_abandonment_are_sa
         .write_detached(&handle, Record::parsed(Value::Null))
         .await
         .unwrap();
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
 }
 #[tokio::test]
 async fn final_store_drop_retains_cleanup_and_reports_producer_failure() {
@@ -161,9 +161,9 @@ async fn final_store_drop_retains_cleanup_and_reports_producer_failure() {
             .await
             .unwrap();
         drop(store);
-        assert!(!owner.close(Duration::ZERO).await.is_quiescent());
+        assert!(!owner.join(Duration::ZERO).await.is_quiescent());
         release.notify_one();
-        let report = owner.close(Duration::from_millis(50)).await;
+        let report = owner.join(Duration::from_millis(50)).await;
         assert_eq!(alive.load(Ordering::SeqCst), 0);
         assert_eq!(report.is_quiescent(), !fail);
         if fail {
@@ -174,7 +174,7 @@ async fn final_store_drop_retains_cleanup_and_reports_producer_failure() {
             }
         }
         assert!(supervisor
-            .close(Duration::from_secs(1))
+            .join(Duration::from_secs(1))
             .await
             .iter()
             .all(|r| r.is_quiescent()));
@@ -217,7 +217,7 @@ async fn shutdown_hook_panic_still_joins_and_publishes_terminal_state() {
         assert!(remaining.failed);
         owner.handle().acknowledge_failure(remaining.id).unwrap();
     }
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
 }
 
 #[tokio::test]
@@ -275,17 +275,21 @@ async fn owner_close_during_open_does_not_block_executor_and_joins_late_handle()
     });
     entered.notified().await;
     let start = std::time::Instant::now();
-    let report = owner.close(Duration::from_millis(20)).await;
+    let report = owner.join(Duration::from_millis(20)).await;
     // The old blocking handoff stalls this current-thread executor until the
     // opening watchdog expires. The async handoff leaves timers runnable.
     assert!(start.elapsed() < Duration::from_secs(1));
     assert!(!report.is_quiescent());
     proceed.send(()).unwrap();
-    let (store, delivery) = opening.await.unwrap();
-    drop(delivery); // caller abandons the late allocation result
+    let (mut store, delivery) = opening.await.unwrap();
+    let handle = delivery.await.unwrap(); // the late allocation still lands
+                                          // The owner closed during `open`, so the store must agree the handle is
+                                          // gone: not listed, and reads report absence rather than `Cancelled`.
+    assert_eq!(store.live_handles(), 0);
+    assert!(store.read_detached(&handle).await.unwrap().is_none());
     drop(store);
     assert!(!terminal.load(Ordering::SeqCst));
     release.notify_one();
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     assert!(terminal.load(Ordering::SeqCst));
 }

@@ -7,7 +7,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! structfs-core-store = { version = "0.1", features = ["async"] }
+//! structfs-core-store = { version = "0.4", features = ["async"] }
 //! ```
 
 use async_trait::async_trait;
@@ -114,9 +114,15 @@ impl<T: AsyncWriter + ?Sized> AsyncWriter for Box<T> {
 
 /// Adapter to wrap a sync store for async use.
 ///
-/// This wraps the store in a Mutex for thread-safe access. For high-performance
-/// use cases, consider implementing `AsyncReader`/`AsyncWriter` directly with
-/// proper async I/O.
+/// Each async operation takes the inner `Mutex` and runs the sync operation
+/// **inline on the calling task** — there is no `spawn_blocking` and no
+/// thread hop, so the future completes on first poll. That makes it right
+/// for stores whose operations are short (in-memory, cheap computation); a
+/// store that blocks on I/O will block the executor and deserves a
+/// purpose-built `AsyncReader`/`AsyncWriter` implementation.
+///
+/// Lock poisoning is recovered from, following the crate-wide policy
+/// documented on [`Shared`](crate::Shared).
 ///
 /// # Example
 ///
@@ -126,28 +132,38 @@ impl<T: AsyncWriter + ?Sized> AsyncWriter for Box<T> {
 /// let sync_store = MySyncStore::new();
 /// let async_store = SyncToAsync::new(sync_store);
 /// ```
+///
+/// A thin view over [`Shared`](crate::Shared): the same `Arc<Mutex<T>>`
+/// handle, implementing the async traits instead of the sync ones. Build one
+/// from an existing `Shared` with `From` to reach one store both ways.
 pub struct SyncToAsync<T> {
-    inner: std::sync::Arc<std::sync::Mutex<T>>,
+    shared: crate::Shared<T>,
 }
 
 impl<T> SyncToAsync<T> {
     /// Create a new adapter wrapping a sync store.
     pub fn new(inner: T) -> Self {
         Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(inner)),
+            shared: crate::Shared::new(inner),
         }
     }
 
     /// Get a reference to the inner mutex.
     pub fn inner(&self) -> &std::sync::Mutex<T> {
-        &self.inner
+        self.shared.mutex()
+    }
+}
+
+impl<T> From<crate::Shared<T>> for SyncToAsync<T> {
+    fn from(shared: crate::Shared<T>) -> Self {
+        Self { shared }
     }
 }
 
 impl<T> Clone for SyncToAsync<T> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            shared: self.shared.clone(),
         }
     }
 }
@@ -155,63 +171,57 @@ impl<T> Clone for SyncToAsync<T> {
 #[async_trait]
 impl<T: crate::Reader + Send + 'static> AsyncReader for SyncToAsync<T> {
     async fn read_async(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        let path = from.clone();
-        let inner = self.inner.clone();
-
-        let mut guard = inner
-            .lock()
-            .map_err(|_| Error::store("sync_to_async", "read", "lock poisoned"))?;
-
-        guard.read(&path)
+        self.shared.lock().read(from)
     }
 }
 
 #[async_trait]
 impl<T: crate::Writer + Send + 'static> AsyncWriter for SyncToAsync<T> {
     async fn write_async(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        let path = to.clone();
-        let inner = self.inner.clone();
-
-        let mut guard = inner
-            .lock()
-            .map_err(|_| Error::store("sync_to_async", "write", "lock poisoned"))?;
-
-        guard.write(&path, data)
+        self.shared.lock().write(to, data)
     }
 }
 
 /// Shared read capability. Construction must be prompt; acceptance and abandonment
 /// semantics belong to the provider. A detached future does not imply rollback.
+///
+/// The method is named `read_shared` (not `read`) so a type that is both a
+/// `Reader` and a `SharedReader` needs no fully-qualified calls.
 pub trait SharedReader: Send + Sync {
-    fn read(&self, path: Path) -> DetachedFuture<Option<Record>>;
+    /// Begin a read through a shared handle; the future owns its arguments.
+    fn read_shared(&self, path: Path) -> DetachedFuture<Option<Record>>;
 }
 
 /// Shared write capability with independent owned operations. Providers define
 /// acceptance, ordering and what dropping an unpolled or pending future does.
+///
+/// The method is named `write_shared` (not `write`) for the same reason as
+/// [`SharedReader::read_shared`].
 pub trait SharedWriter: Send + Sync {
-    fn write(&self, path: Path, record: Record) -> DetachedFuture<Path>;
+    /// Begin a write through a shared handle; the future owns its arguments.
+    fn write_shared(&self, path: Path, record: Record) -> DetachedFuture<Path>;
 }
 
 impl<T: SharedReader + ?Sized> SharedReader for std::sync::Arc<T> {
-    fn read(&self, path: Path) -> DetachedFuture<Option<Record>> {
-        (**self).read(path)
+    fn read_shared(&self, path: Path) -> DetachedFuture<Option<Record>> {
+        (**self).read_shared(path)
     }
 }
 impl<T: SharedWriter + ?Sized> SharedWriter for std::sync::Arc<T> {
-    fn write(&self, path: Path, record: Record) -> DetachedFuture<Path> {
-        (**self).write(path, record)
+    fn write_shared(&self, path: Path, record: Record) -> DetachedFuture<Path> {
+        (**self).write_shared(path, record)
     }
 }
 // Shared clients can be composed by every existing detached combinator without
 // another wrapper or a lock held over a parked request.
 impl<T: SharedReader + ?Sized> DetachedReader for std::sync::Arc<T> {
     fn read_detached(&mut self, path: &Path) -> DetachedFuture<Option<Record>> {
-        (**self).read(path.clone())
+        (**self).read_shared(path.clone())
     }
 }
 impl<T: SharedWriter + ?Sized> DetachedWriter for std::sync::Arc<T> {
     fn write_detached(&mut self, path: &Path, record: Record) -> DetachedFuture<Path> {
-        (**self).write(path.clone(), record)
+        (**self).write_shared(path.clone(), record)
     }
 }
 
@@ -295,40 +305,21 @@ impl<S: crate::Writer + 'static> DetachedWriter for crate::Shared<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::RawMapStore;
     use crate::{Format, Value};
     use bytes::Bytes;
-    use std::collections::HashMap;
 
-    struct TestAsyncStore {
-        data: HashMap<Path, Record>,
-    }
+    /// An async store that holds raw records verbatim: the raw-capable map
+    /// store behind the sync-to-async adapter.
+    type TestAsyncStore = SyncToAsync<RawMapStore>;
 
-    impl TestAsyncStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl AsyncReader for TestAsyncStore {
-        async fn read_async(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            Ok(self.data.get(from).cloned())
-        }
-    }
-
-    #[async_trait]
-    impl AsyncWriter for TestAsyncStore {
-        async fn write_async(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            self.data.insert(to.clone(), data);
-            Ok(to.clone())
-        }
+    fn test_async_store() -> TestAsyncStore {
+        SyncToAsync::new(RawMapStore::new())
     }
 
     #[tokio::test]
     async fn async_read_write_works() {
-        let mut store = TestAsyncStore::new();
+        let mut store = test_async_store();
 
         // Write
         let record = Record::raw(Bytes::from_static(b"hello"), Format::JSON);
@@ -348,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_with_parsed_values() {
-        let mut store = TestAsyncStore::new();
+        let mut store = test_async_store();
 
         // Write a parsed value
         let value = Value::from("hello world");
@@ -367,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn object_safety_works() {
-        let mut store = TestAsyncStore::new();
+        let mut store = test_async_store();
         let boxed: &mut dyn AsyncStore = &mut store;
 
         boxed
@@ -414,41 +405,45 @@ mod tests {
 
     #[tokio::test]
     async fn sync_to_async_adapter_works() {
-        use crate::{Reader, Writer};
+        use crate::MemoryStore;
 
-        // Create a sync store
-        struct SyncStore {
-            data: HashMap<Path, Record>,
-        }
-
-        impl Reader for SyncStore {
-            fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-                Ok(self.data.get(from).cloned())
-            }
-        }
-
-        impl Writer for SyncStore {
-            fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-                self.data.insert(to.clone(), data);
-                Ok(to.clone())
-            }
-        }
-
-        let sync_store = SyncStore {
-            data: HashMap::new(),
-        };
-        let mut async_store = SyncToAsync::new(sync_store);
+        let mut async_store = SyncToAsync::new(MemoryStore::new());
 
         // Use async interface
         async_store
-            .write_async(
-                &path!("key"),
-                Record::raw(Bytes::from_static(b"value"), Format::OCTET_STREAM),
-            )
+            .write_async(&path!("key"), Record::parsed(Value::from("value")))
             .await
             .unwrap();
 
         let result = async_store.read_async(&path!("key")).await.unwrap();
         assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_to_async_recovers_from_poisoned_lock() {
+        use crate::{MemoryStore, Writer};
+
+        let store = SyncToAsync::new(MemoryStore::new());
+        let poisoner = store.clone();
+        let _ = std::thread::spawn(move || {
+            let mut guard = poisoner.inner().lock().unwrap();
+            guard
+                .write(&path!("before_panic"), Record::parsed(Value::from(1i64)))
+                .unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(store.inner().is_poisoned());
+
+        let mut store = store;
+        assert!(store
+            .read_async(&path!("before_panic"))
+            .await
+            .unwrap()
+            .is_some());
+        store
+            .write_async(&path!("after"), Record::parsed(Value::from(2i64)))
+            .await
+            .unwrap();
     }
 }

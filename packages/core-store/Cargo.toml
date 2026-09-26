@@ -22,8 +22,6 @@ namecode = { workspace = true }
 bytes = "1.9"
 collection_literals = { workspace = true }
 serde.workspace = true
-thiserror.workspace = true
-unicode-ident = "1.0"
 async-trait = { workspace = true, optional = true }
 
 [dev-dependencies]

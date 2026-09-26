@@ -65,11 +65,13 @@ pub(crate) fn encode_digit(d: u32) -> Option<char> {
 
 /// Decode a character to its digit value (0-31).
 ///
-/// Returns `None` if the character is not in the alphabet.
+/// Returns `None` if the character is not in the alphabet. The alphabet is
+/// case-*sensitive*: the encoder only ever emits `a`-`z` and `0`-`5`, so
+/// accepting uppercase would admit non-canonical spellings of the same
+/// value and break the `decode(encode(s)) == s` bijection.
 pub(crate) fn decode_digit(c: char) -> Option<u32> {
     match c {
         'a'..='z' => Some(c as u32 - 'a' as u32),
-        'A'..='Z' => Some(c as u32 - 'A' as u32), // Case insensitive
         '0'..='5' => Some(c as u32 - '0' as u32 + 26),
         _ => None,
     }
@@ -110,9 +112,9 @@ mod tests {
         assert_eq!(decode_digit('a'), Some(0));
         assert_eq!(decode_digit('z'), Some(25));
 
-        // Case insensitive
-        assert_eq!(decode_digit('A'), Some(0));
-        assert_eq!(decode_digit('Z'), Some(25));
+        // Case sensitive: uppercase is not part of the alphabet
+        assert_eq!(decode_digit('A'), None);
+        assert_eq!(decode_digit('Z'), None);
 
         // 0-5 maps to 26-31
         assert_eq!(decode_digit('0'), Some(26));

@@ -1,6 +1,6 @@
 //! Fresh-session concurrency proof. Scale manually with FW_CAPACITY=10000.
 use featherweight_runtime::{
-    async_host_store, AssemblyDef, CallBudget, CallLimits, CoreWasmEngine, Runtime,
+    async_host_store, AssemblyDef, CallBudget, CallLimits, CoreWasmEngine, Runtime, RuntimeConfig,
 };
 use std::{
     collections::HashMap,
@@ -112,14 +112,12 @@ fn fresh_sessions_share_code_and_release_registrations() {
         // Reserve additional headroom for mailbox/response routing. At 10,000
         // sessions this workload deliberately exceeds the default call ceiling.
         let call_limit = count.checked_mul(4).expect("capacity call limit overflow");
-        let budget = CallBudget::new(CallLimits {
-            calls: call_limit,
-            ..Default::default()
-        });
-        let mut runtime = Runtime::new()
+        let budget = CallBudget::shared(CallLimits::default().with_calls(call_limit));
+        let mut config = RuntimeConfig::new(tokio::runtime::Handle::current())
             .with_call_budget(budget.clone())
             .with_timeout(Duration::from_secs(120));
-        runtime.register_core_artifact("prepared:capacity", code);
+        config.register_core_artifact("prepared:capacity", code);
+        let runtime = Runtime::new(config);
         let def = AssemblyDef::from_str(
             r#"{
           "assembly":"capacity", "blocks":{"server":"prepared:capacity"},
@@ -197,8 +195,9 @@ fn fresh_sessions_share_code_and_release_registrations() {
 async fn cancellation_releases_parked_guests_and_admission_waiters() {
     let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
     let code = Arc::new(engine.prepare(GUEST.as_bytes().to_vec()).await.unwrap());
-    let mut runtime = Runtime::new();
-    runtime.register_core_artifact("prepared:capacity", code);
+    let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+    config.register_core_artifact("prepared:capacity", code);
+    let runtime = Runtime::new(config);
     let def = AssemblyDef::from_str(
         r#"{
         "assembly":"cancel", "blocks":{"server":"prepared:capacity"},
@@ -240,10 +239,15 @@ async fn cancellation_releases_parked_guests_and_admission_waiters() {
             .is_err()
     );
     // Cancel the admission waiter first, then the indefinitely parked provider.
+    // Neither can stop gracefully; each is escalated at half its deadline.
     for session in sessions.into_iter().rev() {
-        tokio::time::timeout(Duration::from_secs(2), session.shutdown(Duration::ZERO))
-            .await
-            .unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(2),
+            session.shutdown(Duration::from_millis(500)),
+        )
+        .await
+        .unwrap();
+        assert!(report.complete(), "{report:?}");
     }
     while let Some(result) = requests.join_next().await {
         assert!(result.unwrap().is_err());
@@ -276,9 +280,10 @@ async fn whole_assembly_reservation_keeps_capacity_for_lazy_dependency() {
         .unwrap();
     let reservation = engine.reserve_session(2).unwrap();
     assert!(engine.reserve_session(1).is_err());
-    let mut runtime = Runtime::new();
-    runtime.register_core_artifact("gateway", gateway.in_session(reservation.clone()).unwrap());
-    runtime.register_core_artifact("worker", worker.in_session(reservation.clone()).unwrap());
+    let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+    config.register_core_artifact("gateway", gateway.in_session(reservation.clone()).unwrap());
+    config.register_core_artifact("worker", worker.in_session(reservation.clone()).unwrap());
+    let runtime = Runtime::new(config);
     drop(reservation);
     let def = AssemblyDef::from_str(
         r#"{"assembly":"reserved",
@@ -296,7 +301,7 @@ async fn whole_assembly_reservation_keeps_capacity_for_lazy_dependency() {
             .unwrap(),
         Some(Value::from(42i64))
     );
-    assembly.shutdown(Duration::ZERO).await;
+    assert!(assembly.shutdown(Duration::from_secs(2)).await.complete());
     assert_eq!(runtime.registered_blocks(), 0);
     drop(assembly);
     drop(runtime);

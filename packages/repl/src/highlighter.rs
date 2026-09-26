@@ -1,19 +1,14 @@
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
 
-/// Syntax highlighter for the REPL
-pub struct ReplHighlighter {
-    commands: Vec<&'static str>,
-}
+use crate::command_table::{self, ArgKind};
+
+/// Syntax highlighter for the REPL, driven by the command table.
+pub struct ReplHighlighter;
 
 impl ReplHighlighter {
     pub fn new() -> Self {
-        Self {
-            commands: vec![
-                "help", "exit", "quit", "q", "read", "write", "get", "set", "r", "w", "cd", "pwd",
-                "mounts", "ls",
-            ],
-        }
+        Self
     }
 }
 
@@ -38,8 +33,8 @@ impl Highlighter for ReplHighlighter {
         };
 
         // Highlight the command
-        let cmd_lower = command.to_lowercase();
-        let cmd_style = if self.commands.contains(&cmd_lower.as_str()) {
+        let spec = command_table::lookup(command);
+        let cmd_style = if spec.is_some() {
             Style::new().bold().fg(Color::Cyan)
         } else {
             Style::new().fg(Color::Red)
@@ -50,9 +45,8 @@ impl Highlighter for ReplHighlighter {
             return styled;
         }
 
-        // For write commands, try to highlight path vs JSON simply
-        match cmd_lower.as_str() {
-            "write" | "set" | "w" => {
+        match spec.map_or(ArgKind::Text, |spec| spec.args) {
+            ArgKind::PathAndValue => {
                 // Find first JSON-starting character
                 if let Some(json_pos) = rest.find(['{', '[', '"']) {
                     // Everything before JSON start is path (with leading whitespace)
@@ -66,10 +60,10 @@ impl Highlighter for ReplHighlighter {
                     styled.push((Style::new().fg(Color::Yellow), rest.to_string()));
                 }
             }
-            "read" | "get" | "r" | "cd" => {
+            ArgKind::Path => {
                 styled.push((Style::new().fg(Color::Yellow), rest.to_string()));
             }
-            _ => {
+            ArgKind::Text => {
                 styled.push((Style::new(), rest.to_string()));
             }
         }
@@ -83,29 +77,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_creates_highlighter_with_commands() {
-        let highlighter = ReplHighlighter::new();
-        assert!(highlighter.commands.contains(&"help"));
-        assert!(highlighter.commands.contains(&"exit"));
-        assert!(highlighter.commands.contains(&"quit"));
-        assert!(highlighter.commands.contains(&"q"));
-        assert!(highlighter.commands.contains(&"read"));
-        assert!(highlighter.commands.contains(&"write"));
-        assert!(highlighter.commands.contains(&"get"));
-        assert!(highlighter.commands.contains(&"set"));
-        assert!(highlighter.commands.contains(&"r"));
-        assert!(highlighter.commands.contains(&"w"));
-        assert!(highlighter.commands.contains(&"cd"));
-        assert!(highlighter.commands.contains(&"pwd"));
-        assert!(highlighter.commands.contains(&"mounts"));
-        assert!(highlighter.commands.contains(&"ls"));
+    fn every_table_spelling_is_highlighted_as_a_command() {
+        let highlighter = ReplHighlighter;
+        for spec in crate::command_table::COMMANDS {
+            for spelling in spec.spellings() {
+                let styled = highlighter.highlight(spelling, 0);
+                assert_eq!(
+                    styled.buffer[0].0.foreground,
+                    Some(Color::Cyan),
+                    "{spelling}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn default_creates_same_as_new() {
-        let default: ReplHighlighter = Default::default();
-        let new = ReplHighlighter::new();
-        assert_eq!(default.commands, new.commands);
+    fn ls_path_is_highlighted_as_a_path() {
+        let styled = ReplHighlighter::new().highlight("ls /ctx", 0);
+        assert_eq!(styled.buffer[1].0.foreground, Some(Color::Yellow));
     }
 
     #[test]

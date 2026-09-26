@@ -82,7 +82,7 @@ async fn prepared_sync_reuses_code_recovers_nonclone_state_and_fresh_memory() {
         assert_eq!(host.effects.len(), count);
     }
     assert!(supervisor
-        .close(Duration::from_secs(1))
+        .join(Duration::from_secs(1))
         .await
         .iter()
         .all(|r| r.is_quiescent()));
@@ -136,7 +136,7 @@ async fn cancellation_keeps_blocking_effect_owned_until_joined() {
         .unwrap();
     entered.notified().await;
     assert!(run.wait(Duration::ZERO).await.unwrap().is_none());
-    run.cancel();
+    run.close();
     assert!(run.wait(Duration::from_millis(1)).await.unwrap().is_none());
     assert!(!run.report().is_quiescent());
     let rejected = code
@@ -179,13 +179,13 @@ async fn dropped_owner_transfers_work_to_supervisor() {
     entered.notified().await;
     drop(run);
     assert!(supervisor
-        .close(Duration::ZERO)
+        .join(Duration::ZERO)
         .await
         .iter()
         .any(|r| !r.is_quiescent()));
     send.send(()).unwrap();
     assert!(supervisor
-        .close(Duration::from_secs(2))
+        .join(Duration::from_secs(2))
         .await
         .iter()
         .all(|r| r.is_quiescent()));
@@ -204,10 +204,7 @@ async fn growth_policy_fuel_deadline_and_independent_cancellation() {
                 Host::default(),
                 JsonCodec,
                 Format::JSON,
-                ExecutionPolicy {
-                    growth_failure,
-                    ..Default::default()
-                },
+                ExecutionPolicy::default().with_growth_failure(growth_failure),
             )
             .unwrap();
         assert_eq!(
@@ -233,24 +230,15 @@ async fn growth_policy_fuel_deadline_and_independent_cancellation() {
             ExecutionPolicy::default(),
         )
         .unwrap();
-    a.cancel();
+    a.close();
     assert!(a.join().await.unwrap().result.is_err());
     assert!(b.wait(Duration::from_millis(20)).await.unwrap().is_none());
-    b.cancel();
+    b.close();
     assert!(b.join().await.unwrap().result.is_err());
     for policy in [
-        ExecutionPolicy {
-            fuel: Some(10),
-            ..Default::default()
-        },
-        ExecutionPolicy {
-            deadline: Some(tokio::time::Instant::now()),
-            ..Default::default()
-        },
-        ExecutionPolicy {
-            memory_bytes: Some(131072),
-            ..Default::default()
-        },
+        ExecutionPolicy::default().with_fuel(10),
+        ExecutionPolicy::default().with_deadline(tokio::time::Instant::now()),
+        ExecutionPolicy::default().with_memory_bytes(131072),
     ] {
         let mut run = spin
             .start_sync(
@@ -344,7 +332,7 @@ async fn async_cancellation_joins_an_accepted_host_future() {
         )
         .unwrap();
     entered.notified().await;
-    run.cancel();
+    run.close();
     assert!(run.wait(Duration::from_millis(1)).await.unwrap().is_none());
     release.notify_one();
     let outcome = run.join().await.unwrap();
@@ -368,10 +356,7 @@ async fn tighter_limit_can_fail_instantiation_without_losing_host() {
             Host::default(),
             JsonCodec,
             Format::JSON,
-            ExecutionPolicy {
-                memory_bytes: Some(1),
-                ..Default::default()
-            },
+            ExecutionPolicy::default().with_memory_bytes(1),
         )
         .unwrap();
     let outcome = run.join().await.unwrap();
@@ -419,7 +404,7 @@ async fn queued_cancellation_storm_recovers_hosts_and_reuses_capacity() {
         // Give every admitted task an opportunity to wait for the engine slot.
         tokio::task::yield_now().await;
         for run in &queued {
-            run.cancel();
+            run.close();
         }
         for mut run in queued {
             let outcome = run.join().await.unwrap();
@@ -434,17 +419,15 @@ async fn queued_cancellation_storm_recovers_hosts_and_reuses_capacity() {
                 Host::default(),
                 JsonCodec,
                 Format::JSON,
-                ExecutionPolicy {
-                    deadline: Some(tokio::time::Instant::now() + Duration::from_millis(10)),
-                    ..Default::default()
-                },
+                ExecutionPolicy::default()
+                    .with_deadline(tokio::time::Instant::now() + Duration::from_millis(10)),
             )
             .unwrap();
         let outcome = expired.join().await.unwrap();
         assert!(outcome.result.is_err());
         assert!(outcome.host.effects.is_empty());
         assert!(!active.report().is_quiescent());
-        active.cancel();
+        active.close();
         send.send(()).unwrap();
         let outcome = active.join().await.unwrap();
         assert!(outcome.result.is_err());
@@ -498,4 +481,41 @@ async fn async_host_panic_recovers_effect_and_releases_admission() {
         )
         .unwrap();
     assert_eq!(next.join().await.unwrap().result.unwrap(), 0);
+}
+
+/// A supervisor whose executor is gone never runs the execution task; the
+/// host is still recoverable, and the loss is typed, not a host panic.
+#[tokio::test]
+async fn a_run_whose_supervised_task_never_starts_returns_the_host() {
+    let engine = CoreWasmEngine::new(1).unwrap();
+    let code = prepare(&engine, &format!("{WRITE} i32.const 0")).await;
+    let gone = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let supervisor = CleanupSupervisor::with_handle(4, gone.handle().clone());
+    gone.shutdown_background();
+    let mut run = code
+        .start_sync(
+            &supervisor,
+            Host::default(),
+            JsonCodec,
+            Format::JSON,
+            ExecutionPolicy::default(),
+        )
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), run.join())
+        .await
+        .expect("join does not wait for a task that never ran")
+        .unwrap();
+    assert!(matches!(
+        outcome.result,
+        Err(featherweight_runtime::RuntimeError::ExecutionLost(_))
+    ));
+    assert!(!outcome.host_panicked);
+    assert!(outcome.host.effects.is_empty());
+    assert!(matches!(
+        run.join().await,
+        Err(featherweight_runtime::RuntimeError::AlreadyJoined)
+    ));
 }

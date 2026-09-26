@@ -124,7 +124,7 @@ impl NativeBlock for KvBlock {
                 Ok(result) => ok_path(&result),
                 Err(e) => error_to_response(&e),
             },
-            _ => error_to_response(&Error::store("kv", "serve", "unknown op")),
+            _ => error_to_response(&Error::invalid_argument("kv: unknown op")),
         })
     }
 }
@@ -143,7 +143,7 @@ impl NativeBlock for EchoBlock {
                 ok_value(Value::Map(map))
             }
             "write" => ok_path(&request.path),
-            _ => error_to_response(&Error::store("echo", "serve", "unknown op")),
+            _ => error_to_response(&Error::invalid_argument("echo: unknown op")),
         })
     }
 }
@@ -360,7 +360,8 @@ impl NativeBlock for ShellBlock {
 }
 
 /// Register the builtin blocks (`kv`, `echo`, `logger`, `shell`).
-pub fn register_builtins(runtime: &mut crate::runtime::Runtime) {
+pub fn register_builtins(config: &mut crate::runtime::RuntimeConfig) {
+    let runtime = config;
     runtime.register_builtin(
         "kv",
         Arc::new(|| Box::new(KvBlock::new()) as Box<dyn NativeBlock>),

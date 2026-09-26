@@ -13,17 +13,13 @@ categories = ["os"]
 [dependencies]
 structfs-core-store = { workspace = true }
 
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-lazy_static = { workspace = true }
 collection_literals = { workspace = true }
 
 # Time
 chrono = "0.4"
 
 # Random
-rand = "0.8"
+rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 

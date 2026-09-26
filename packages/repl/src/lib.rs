@@ -15,11 +15,12 @@
 //!
 //! ## Features
 //!
-//! - Connect to local JSON stores or remote HTTP endpoints
-//! - Read and write JSON data at any path
+//! - Mount in-memory, JSON-file, HTTP, log and recording stores
+//! - Read and write JSON data at any path, and list children with `ls`
 //! - Tab completion for commands
 //! - Syntax highlighting for JSON input
-//! - Vi mode support (detected from EDITOR, .inputrc, or STRUCTFS_EDIT_MODE)
+//! - Vi mode support (`--vi`/`--emacs`, else STRUCTFS_EDIT_MODE, EDITOR, or
+//!   the inputrc's `set editing-mode`)
 //! - Command history
 //!
 //! ## Usage
@@ -35,35 +36,33 @@
 //! > read /data/users/1
 //! ```
 
+pub mod command_table;
 pub mod commands;
 pub mod completer;
+pub mod help_format;
 pub mod help_store;
 pub mod highlighter;
 pub mod host;
 pub mod io;
+pub mod mounts;
 pub mod recording_store;
 pub mod repl;
 pub mod repl_docs_store;
 pub mod store_context;
 
 // Re-exports
-pub use host::TerminalHost;
-pub use io::{ExitReason, IoHost, Output, PromptConfig, Signal};
+pub use host::{EditMode, TerminalHost};
+pub use io::{ExitReason, IoError, IoHost, Output, PromptConfig, Signal};
+pub use mounts::{CoreReplStoreFactory, MountConfig};
 pub use repl::ReplCore;
 pub use store_context::StoreContext;
 
-/// Run the REPL with the terminal host.
+/// Run the REPL with the terminal host until the user exits.
 ///
-/// This is the main entry point for the CLI application.
-pub fn run() -> std::io::Result<()> {
+/// `edit_mode` overrides edit-mode detection (see
+/// [`TerminalHost::with_edit_mode`]). This is the entry point for the CLI.
+pub fn run(edit_mode: Option<EditMode>) -> Result<ExitReason, IoError> {
     let mut core = ReplCore::new();
-    let mut host = TerminalHost::new()?;
-
-    match core.run(&mut host) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    }
+    let mut host = TerminalHost::with_edit_mode(edit_mode)?;
+    core.run(&mut host)
 }

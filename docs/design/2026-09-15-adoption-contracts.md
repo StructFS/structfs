@@ -65,7 +65,12 @@ accidental tail concatenation while preserving evidence of ambiguous writes.
 
 ## Streaming HTTP and event framing
 
-Enable `structfs-http/streaming` (or `structfs/http-streaming`).
+> **Note for 0.5:** `ByteStream` below is `structfs_http::streaming::ByteStream`.
+> The unrelated `structfs_handles::ByteStream` of the same name was removed in
+> 0.5.
+
+Enable `structfs-http/streaming` (or `structfs/http-streaming`; in 0.5 the
+facade feature is `structfs/net-streaming`).
 AsyncHttpExecutor exposes status and headers before consuming the body;
 ByteStream pulls fallible byte chunks. AsyncReqwestExecutor forwards method,
 query, headers and optional JSON body and owns no extra per-response producer

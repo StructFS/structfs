@@ -1,0 +1,15 @@
+[
+{"canonical":true,"kind":"NotFound","label":"not_found","retryable":false,"status":-1,"wire":"not_found"},
+{"canonical":false,"kind":"NoRoute","label":"no_route","retryable":false,"status":-1,"wire":"no_route"},
+{"canonical":true,"kind":"PermissionDenied","label":"permission_denied","retryable":false,"status":-2,"wire":"forbidden"},
+{"canonical":true,"kind":"Conflict","label":"conflict","retryable":false,"status":-3,"wire":"conflict"},
+{"canonical":true,"kind":"InvalidArgument","label":"invalid_argument","retryable":false,"status":-10,"wire":"invalid_argument"},
+{"canonical":true,"kind":"Overloaded","label":"overloaded","retryable":true,"status":-4,"wire":"unavailable"},
+{"canonical":true,"kind":"DeadlineExceeded","label":"deadline_exceeded","retryable":true,"status":-5,"wire":"timeout"},
+{"canonical":true,"kind":"ResourceLimit","label":"resource_limit","retryable":false,"status":-8,"wire":"resource_limit"},
+{"canonical":true,"kind":"Cancelled","label":"cancelled","retryable":false,"status":-6,"wire":"cancelled"},
+{"canonical":true,"kind":"InvalidPath","label":"invalid_path","retryable":false,"status":-7,"wire":"invalid_path"},
+{"canonical":false,"kind":"Codec","label":"codec","retryable":false,"status":-9,"wire":"store_error"},
+{"canonical":false,"kind":"CodecResourceLimit","label":"codec","retryable":false,"status":-8,"wire":"resource_limit"},
+{"canonical":true,"kind":"Other","label":"other","retryable":false,"status":-9,"wire":"store_error"}
+]

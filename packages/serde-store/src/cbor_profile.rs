@@ -44,8 +44,9 @@ impl<'a> Decoder<'a, '_> {
             .into())
     }
     fn value(&mut self, depth: usize) -> Result<Value> {
+        // `Budget::node` already enforces both the caller's `max_depth` and
+        // the hard `DEPTH_CEILING` that keeps this recursion off a deep stack.
         self.budget.node(depth)?;
-        ensure(depth <= 256, K::ResourceLimit)?;
         let (major, ai, n) = self.head()?;
         Ok(match major {
             0 => Value::from(n),

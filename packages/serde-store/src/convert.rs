@@ -1,14 +1,74 @@
 //! Checked conversion to/from a plain JSON DOM. Original token spellings and
 //! duplicate keys are already lost in a DOM; use JsonCodec on untrusted wire input.
+use crate::limits::DEPTH_CEILING;
 pub use crate::value_serde::{from_value, to_value};
-use crate::{Codec, JsonCodec};
-use structfs_core_store::{Error, Format, Value};
+use crate::Limits;
+use structfs_core_store::{CodecErrorKind, CodecOperation, Error, Format, Value};
+
+fn json_error(kind: CodecErrorKind, message: String) -> Error {
+    Error::Codec {
+        kind,
+        operation: CodecOperation::Encode,
+        format: Format::JSON,
+        message,
+    }
+}
+
+fn unsupported(what: &str) -> Error {
+    json_error(
+        CodecErrorKind::UnsupportedValue,
+        format!("plain JSON cannot represent {what}"),
+    )
+}
 
 /// Convert to plain JSON, rejecting bytes and non-finite floats.
+///
+/// This walks the two DOMs directly rather than encoding to bytes and
+/// reparsing: the answer is the same and the cost is a fraction of it.
+/// Nesting is still bounded by [`Limits::default`]'s `max_depth`, since the
+/// walk recurses on the native stack.
 pub fn value_to_json(value: Value) -> Result<serde_json::Value, Error> {
-    let bytes = JsonCodec.encode(&value, &Format::JSON)?;
-    serde_json::from_slice(&bytes).map_err(|e| Error::decode(Format::JSON, e.to_string()))
+    let max_depth = Limits::default().max_depth.min(DEPTH_CEILING);
+    value_to_json_at(value, 0, max_depth)
 }
+
+fn value_to_json_at(
+    value: Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<serde_json::Value, Error> {
+    if depth > max_depth {
+        return Err(json_error(
+            CodecErrorKind::ResourceLimit,
+            format!("value nests deeper than {max_depth} levels"),
+        ));
+    }
+    Ok(match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(v) => serde_json::Value::Bool(v),
+        Value::Integer(v) => serde_json::Value::Number(v.into()),
+        Value::Unsigned(v) => serde_json::Value::Number(v.into()),
+        Value::Float(v) => serde_json::Number::from_f64(v)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| unsupported("a non-finite float"))?,
+        Value::String(v) => serde_json::Value::String(v),
+        Value::Bytes(_) => return Err(unsupported("a byte string")),
+        Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(|v| value_to_json_at(v, depth + 1, max_depth))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Map(entries) => serde_json::Value::Object(
+            entries
+                .into_iter()
+                .map(|(k, v)| value_to_json_at(v, depth + 1, max_depth).map(|v| (k, v)))
+                .collect::<Result<_, _>>()?,
+        ),
+        other => return Err(unsupported(&format!("{other:?}"))),
+    })
+}
+
 /// Import an already parsed JSON DOM, preserving its exact supported numbers.
 pub fn json_to_value(json: serde_json::Value) -> Value {
     match json {
@@ -20,8 +80,21 @@ pub fn json_to_value(json: serde_json::Value) -> Value {
                 Value::Integer(i)
             } else if let Some(u) = n.as_u64() {
                 Value::from(u)
+            } else if let Some(f) = n.as_f64() {
+                Value::from(f)
             } else {
-                Value::from(n.as_f64().expect("finite JSON number"))
+                // Only reachable if serde_json's `arbitrary_precision` feature
+                // is turned on somewhere in the dependency graph, where a
+                // Number holds an unparsed literal that is none of the three
+                // (e.g. `1e400`). Use the nearest f64 only if it is finite —
+                // an overflow to infinity would invent a value the document
+                // never held — and otherwise keep the literal's digits as a
+                // string rather than panicking.
+                let literal = n.to_string();
+                match literal.parse::<f64>() {
+                    Ok(f) if f.is_finite() => Value::from(f),
+                    _ => Value::String(literal),
+                }
             }
         }
         serde_json::Value::Array(a) => Value::Array(a.into_iter().map(json_to_value).collect()),
@@ -57,155 +130,114 @@ mod tests {
         assert_eq!(original, recovered);
     }
 
-    #[test]
-    fn json_to_value_numbers() {
-        let json = serde_json::json!({
-            "integer": 42,
-            "float": 2.75,
-            "negative": -100
-        });
+    /// Pairs that must convert to each other in both directions. One table
+    /// replaces a dozen one-assertion tests that each covered a single
+    /// variant.
+    fn equivalent_pairs() -> Vec<(Value, serde_json::Value)> {
+        use std::collections::BTreeMap;
+        vec![
+            (Value::Null, serde_json::Value::Null),
+            (Value::Bool(true), serde_json::json!(true)),
+            (Value::Bool(false), serde_json::json!(false)),
+            (Value::Integer(12345), serde_json::json!(12345)),
+            (Value::Integer(-100), serde_json::json!(-100)),
+            (Value::Integer(0), serde_json::json!(0)),
+            (
+                Value::String("hello world".to_string()),
+                serde_json::json!("hello world"),
+            ),
+            (Value::String(String::new()), serde_json::json!("")),
+            (Value::Array(vec![]), serde_json::json!([])),
+            (
+                Value::Array(vec![
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                ]),
+                serde_json::json!([1, 2, 3]),
+            ),
+            (
+                Value::Array(vec![
+                    Value::Integer(1),
+                    Value::String("two".to_string()),
+                    Value::Bool(true),
+                ]),
+                serde_json::json!([1, "two", true]),
+            ),
+            (Value::Map(BTreeMap::new()), serde_json::json!({})),
+            (
+                Value::Map(
+                    [
+                        ("key".to_string(), Value::String("value".to_string())),
+                        ("num".to_string(), Value::Integer(42)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                serde_json::json!({"key": "value", "num": 42}),
+            ),
+            (
+                Value::Map(
+                    [(
+                        "nested".to_string(),
+                        Value::Array(vec![Value::Map(
+                            [("deep".to_string(), Value::Null)].into_iter().collect(),
+                        )]),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                serde_json::json!({"nested": [{"deep": null}]}),
+            ),
+        ]
+    }
 
-        let value = json_to_value(json);
-        match value {
-            Value::Map(map) => {
-                assert_eq!(map.get("integer"), Some(&Value::Integer(42)));
-                assert_eq!(map.get("negative"), Some(&Value::Integer(-100)));
-                // Float comparison
-                if let Some(Value::Float(f)) = map.get("float") {
-                    assert!((f - 2.75).abs() < 0.001);
-                } else {
-                    panic!("expected float");
+    #[test]
+    fn value_and_json_doms_agree() {
+        for (value, json) in equivalent_pairs() {
+            assert_eq!(
+                value_to_json(value.clone()).unwrap(),
+                json,
+                "value_to_json({value:?})"
+            );
+            assert_eq!(json_to_value(json.clone()), value, "json_to_value({json})");
+        }
+    }
+
+    #[test]
+    fn floats_convert_approximately() {
+        for f in [1.23456f64, 2.75, -0.5, 0.0, 1e300] {
+            match value_to_json(Value::Float(f)).unwrap() {
+                serde_json::Value::Number(n) => {
+                    assert!((n.as_f64().unwrap() - f).abs() <= f.abs() * 1e-12)
                 }
+                other => panic!("expected number, got {other}"),
             }
-            _ => panic!("expected map"),
         }
-    }
-
-    #[test]
-    fn value_to_json_arrays() {
-        let value = Value::Array(vec![
-            Value::Integer(1),
-            Value::Integer(2),
-            Value::Integer(3),
-        ]);
-
-        let json = value_to_json(value).unwrap();
-        assert_eq!(json, serde_json::json!([1, 2, 3]));
-    }
-
-    #[test]
-    fn value_to_json_null() {
-        let value = Value::Null;
-        let json = value_to_json(value).unwrap();
-        assert_eq!(json, serde_json::Value::Null);
-    }
-
-    #[test]
-    fn value_to_json_bool() {
-        assert_eq!(
-            value_to_json(Value::Bool(true)).unwrap(),
-            serde_json::Value::Bool(true)
-        );
-        assert_eq!(
-            value_to_json(Value::Bool(false)).unwrap(),
-            serde_json::Value::Bool(false)
-        );
-    }
-
-    #[test]
-    fn value_to_json_string() {
-        let value = Value::String("hello world".to_string());
-        let json = value_to_json(value).unwrap();
-        assert_eq!(json, serde_json::Value::String("hello world".to_string()));
-    }
-
-    #[test]
-    fn value_to_json_integer() {
-        let value = Value::Integer(12345);
-        let json = value_to_json(value).unwrap();
-        assert_eq!(json, serde_json::json!(12345));
-    }
-
-    #[test]
-    fn value_to_json_float() {
-        let value = Value::Float(1.23456);
-        let json = value_to_json(value).unwrap();
-        if let serde_json::Value::Number(n) = json {
-            assert!((n.as_f64().unwrap() - 1.23456).abs() < 0.00001);
-        } else {
-            panic!("expected number");
-        }
+        assert_eq!(json_to_value(serde_json::json!(2.75)), Value::Float(2.75));
     }
 
     #[test]
     fn value_to_json_rejects_lossy_values() {
         assert!(value_to_json(Value::Float(f64::NAN)).is_err());
+        assert!(value_to_json(Value::Float(f64::INFINITY)).is_err());
         assert!(value_to_json(Value::Bytes(vec![1, 2, 3])).is_err());
     }
 
     #[test]
-    fn value_to_json_map() {
-        use std::collections::BTreeMap;
-        let mut map = BTreeMap::new();
-        map.insert("key".to_string(), Value::String("value".to_string()));
-        map.insert("num".to_string(), Value::Integer(42));
-
-        let json = value_to_json(Value::Map(map)).unwrap();
-        assert_eq!(json, serde_json::json!({"key": "value", "num": 42}));
-    }
-
-    #[test]
-    fn json_to_value_null() {
-        let json = serde_json::Value::Null;
-        let value = json_to_value(json);
-        assert_eq!(value, Value::Null);
-    }
-
-    #[test]
-    fn json_to_value_bool() {
-        assert_eq!(
-            json_to_value(serde_json::Value::Bool(true)),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            json_to_value(serde_json::Value::Bool(false)),
-            Value::Bool(false)
-        );
-    }
-
-    #[test]
-    fn json_to_value_string() {
-        let json = serde_json::Value::String("test".to_string());
-        let value = json_to_value(json);
-        assert_eq!(value, Value::String("test".to_string()));
-    }
-
-    #[test]
-    fn json_to_value_array() {
-        let json = serde_json::json!([1, "two", true]);
-        let value = json_to_value(json);
-        match value {
-            Value::Array(arr) => {
-                assert_eq!(arr.len(), 3);
-                assert_eq!(arr[0], Value::Integer(1));
-                assert_eq!(arr[1], Value::String("two".to_string()));
-                assert_eq!(arr[2], Value::Bool(true));
-            }
-            _ => panic!("expected array"),
+    fn value_to_json_bounds_nesting() {
+        let mut deep = Value::Null;
+        for _ in 0..200 {
+            deep = Value::Array(vec![deep]);
         }
+        assert!(value_to_json(deep).is_err());
     }
 
     #[test]
-    fn json_to_value_object() {
-        let json = serde_json::json!({"a": 1, "b": "two"});
-        let value = json_to_value(json);
-        match value {
-            Value::Map(map) => {
-                assert_eq!(map.get("a"), Some(&Value::Integer(1)));
-                assert_eq!(map.get("b"), Some(&Value::String("two".to_string())));
-            }
-            _ => panic!("expected map"),
-        }
+    fn unsigned_beyond_i64_survives() {
+        let json = value_to_json(Value::Unsigned(u64::MAX)).unwrap();
+        assert_eq!(json, serde_json::json!(u64::MAX));
+        assert_eq!(json_to_value(json), Value::Unsigned(u64::MAX));
     }
 
     #[test]

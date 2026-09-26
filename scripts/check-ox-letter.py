@@ -21,6 +21,8 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     source = args.ox.resolve() / "crates/horns-core/src"
+    # local/ is gitignored and absent on a fresh clone; create it on demand.
+    (root / "local").mkdir(exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="ox-letter-", dir=root / "local"))
     (output / "src").mkdir()
     hashes = {}

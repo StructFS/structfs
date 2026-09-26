@@ -12,7 +12,8 @@
 // thread is the witness, and cross-worker order is the order it saw,
 // exactly the honest claim a shared capture handle can make.
 
-import { StoreError, type HostStore, type StoreValue } from "./structfs-host.ts";
+import { type HostStore, type StoreValue } from "./structfs-host.ts";
+import { kindOf } from "./transcript.ts";
 
 /// One boundary operation, as the session witnessed it.
 export interface SessionEntry {
@@ -27,28 +28,6 @@ export interface SessionEntry {
 
 /// A witnessed operation before the session assigns its place.
 export type SessionEvent = Omit<SessionEntry, "seq">;
-
-const kindOf = (error: unknown): string => {
-  if (!(error instanceof StoreError)) return "other";
-  switch (error.code) {
-    case -1:
-      return "not_found";
-    case -2:
-      return "permission_denied";
-    case -3:
-      return "conflict";
-    case -4:
-      return "overloaded";
-    case -5:
-      return "deadline_exceeded";
-    case -6:
-      return "cancelled";
-    case -8:
-      return "resource_limit";
-    default:
-      return "other";
-  }
-};
 
 /// A transcript-shaped position source: both RecordingStore and
 /// ReplayingStore satisfy it.

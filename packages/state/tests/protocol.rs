@@ -1,5 +1,5 @@
 use structfs_core_store::{Codec, Value};
-use structfs_serde_store::{from_value, to_value, Profile, ValueCodec};
+use structfs_serde_store::{from_value, to_value, CodecProfile, ValueCodec};
 use structfs_state::*;
 #[test]
 fn portable_protocol_preserves_values_and_typed_expiry_across_profiles() {
@@ -17,16 +17,17 @@ fn portable_protocol_preserves_values_and_typed_expiry_across_profiles() {
         ],
     });
     let value = to_value(&request).unwrap();
-    for profile in [Profile::ValueJson, Profile::Cbor, Profile::Flexbuffers] {
+    for profile in [
+        CodecProfile::ValueJson,
+        CodecProfile::Cbor,
+        CodecProfile::Flexbuffers,
+    ] {
         let codec = ValueCodec::new(profile);
         let data = codec.encode(&value, &profile.format()).unwrap();
         let decoded: Request = from_value(codec.decode(&data, &profile.format()).unwrap()).unwrap();
         assert_eq!(to_value(&decoded).unwrap(), value);
         let reply: Reply<ChangePage> = Reply::Error(Fault::CursorExpired {
-            earliest: Token {
-                epoch: "test".into(),
-                revision: u64::MAX,
-            },
+            earliest: Token::new("test", u64::MAX),
         });
         let decoded: Reply<ChangePage> = from_value(
             codec

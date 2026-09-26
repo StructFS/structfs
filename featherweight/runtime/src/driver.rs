@@ -12,11 +12,15 @@ use structfs_handles::CancelToken;
 /// A measurement with a stable, explicit unit. Driver counters must not be
 /// interpreted as host-enforced limits (e.g. x86 instructions are not Wasm fuel).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DriverCounter {
     pub unit: String,
     pub value: u64,
 }
+/// Measured execution usage. Snapshots are observations; limits are
+/// enforced separately by the driver/engine and admission budgets.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExecutionUsage {
     /// None means this driver does not report the measurement.
     pub wasm_fuel_consumed: Option<u64>,
@@ -33,9 +37,6 @@ pub struct ExecutionUsage {
 #[derive(Clone, Default)]
 pub struct ExecutionMeter(Arc<Mutex<ExecutionUsage>>);
 impl ExecutionMeter {
-    pub(crate) fn replace(&self, usage: ExecutionUsage) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = usage;
-    }
     pub fn snapshot(&self) -> ExecutionUsage {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -101,6 +102,7 @@ impl ExecutionMeter {
 /// Drivers own their execution resources until this run returns. Async drivers
 /// must release parked operations on cancellation and join child tasks before
 /// returning. A blocking driver must cooperate; it cannot be forcibly stopped.
+#[non_exhaustive]
 pub struct DriverContext {
     pub id: BlockId,
     pub namespace: Namespace,
@@ -111,15 +113,3 @@ pub struct DriverContext {
     pub calls: Arc<CallBudget>,
     pub usage: ExecutionMeter,
 }
-
-/// Optional adapter-owned control surface. Only the adapter can establish its
-/// safe points. Advertising support does not make arbitrary Wasm suspendable.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DriverCapabilities {
-    pub resumable: bool,
-    pub checkpoints: bool,
-}
-/// Host-only controls, never implicitly granted to guest namespaces. Operations
-/// are adapter-defined paths with documented schemas; unsupported operations
-/// must fail explicitly. Checkpoints must include/validate provider state.
-pub type DriverControl = crate::HostStore;

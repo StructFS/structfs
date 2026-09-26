@@ -12,25 +12,33 @@ grant and the client scope. Unwired paths return permission denied.
 `ImmediateStore` explicitly opts into short synchronous work on the caller's
 thread. `BlockingStore` uses Tokio's blocking executor and retains admission
 leases until running work finishes, even if the caller cancels. Its `close()`
-closes admission and waits for that work; cancellation is not rollback.
+closes admission and `join(timeout)` waits for that work; cancellation is not
+rollback.
 
 `CallContext` propagates request identity, cancellation, and deadlines. Providers
 that start work outside their returned future must retain its lease and own and
 join that work. Use `CleanupSupervisor`, a unique `Owner`, and cloneable `OwnerHandle`s to
 register cleanup before exposing a handle and supervise work with `spawn`.
-`close(timeout)` reports remaining work; cancellation is not completion.
+`close()` requests cleanup without blocking; `join(timeout)` waits and reports
+remaining work. Cancellation is not completion.
+
+Constructors return `Self`; wrap values in `Arc` yourself. `Router` and
+`CallBudget` also offer `shared()`, exactly `Arc::new(new(..))`.
+`structfs_state::State::shared` is the exception: it is the only `State`
+constructor because it also registers the state's teardown with its owner.
 
 `CallBudget` is shared with Featherweight and supports immutable budget ancestry
-and live limit changes. The `calls_per_block` and `bytes_per_block` field names
-are retained for compatibility; in this generic API they bound each admission
-key, which may identify a native provider or client partition instead of a block.
-Bytes measure request weight, not RSS or retained response buffers.
+and live limit changes. `calls_per_block` and `bytes_per_block` bound each
+admission key, which may identify a native provider or client partition as well
+as a block. Bytes measure request weight, not RSS or retained response buffers.
+`CallLimits` is `#[non_exhaustive]`: build it from `default()` and the `with_*`
+setters.
 
 `Router::register` adds owned mounts with immediate revocation. `Client::owned_by`
 binds calls to a request lifetime without revoking the shared service. Owner
 constraints survive client cloning, scoping, and metadata changes.
 
-`RetainedBytes` bounds owned result storage. `OwnedTail` bounds items and bytes,
+`OwnedTail` bounds items and bytes,
 rejects full writes, pages terminal state atomically, and reclaims acknowledged
 entries. Owner close releases retained storage and wakes readers.
 

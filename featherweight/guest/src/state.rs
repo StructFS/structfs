@@ -1,11 +1,12 @@
 //! Same versioned protocol as native clients. Handle cleanup is owned by the
 //! host's request/instance, even when a guest traps before explicit release.
 use crate::sdk::{self, ValueError};
-use structfs_serde_store::{from_value, to_value, Path, Value, ValueCodec};
+use structfs_serde_store::{from_value, path, to_value, Path, Value, ValueCodec};
 pub use structfs_state::{
     ChangePage, Command, Descriptor, Fault, Mutation, ReadLimits, Request, SnapshotPage, Token,
 };
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Transport(ValueError),
     State(Fault),
@@ -32,10 +33,7 @@ impl Client {
     pub fn open(&self, command: Command) -> Result<Handle<'_>, Error> {
         let v = to_value(&Request::new(command)).map_err(ValueError::Codec)?;
         let returned = sdk::write_value(
-            &self
-                .root
-                .join(&Path::parse("operations").unwrap())
-                .to_string(),
+            &self.root.join(&path!("operations")).to_string(),
             &v,
             &self.codec,
         )?;
@@ -49,7 +47,7 @@ impl Client {
         }
         let h = Handle { client: self, path };
         if let Err(e) = h.describe() {
-            let _ = h.release();
+            let _ = h.close();
             return Err(e);
         }
         Ok(h)
@@ -60,7 +58,7 @@ impl Client {
             mutations,
         })?;
         let token = h.describe()?.token;
-        let _ = h.release();
+        let _ = h.close();
         Ok(token)
     }
 }
@@ -90,9 +88,12 @@ impl Handle<'_> {
         }
         self.read(&format!("changes/{}", after.revision))
     }
-    pub fn release(&self) -> Result<(), Error> {
+    /// Request release of the handle, like the native `StateHandle::close`.
+    /// Idempotent; the host also reclaims it when the owning request or
+    /// instance ends. There is no `join`: cleanup finishes inside this write.
+    pub fn close(&self) -> Result<(), Error> {
         sdk::write_value(
-            &self.path.join(&Path::parse("release").unwrap()).to_string(),
+            &self.path.join(&path!("release")).to_string(),
             &Value::Null,
             &self.client.codec,
         )?;

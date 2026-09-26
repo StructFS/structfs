@@ -7,12 +7,10 @@ publish = false
 [workspace]
 
 [features]
-native = ["structfs-http/blocking", "structfs-handles/sync-bridge"]
+native = ["structfs/net-blocking"]
 
 [dependencies]
-structfs = { version = "0.4.0", path = "../../packages/structfs", default-features = false, features = ["serde", "async"] }
+# The facade's portable profile: core, async, typed, net (schema only), handles.
+structfs = { version = "0.4.0", path = "../../packages/structfs", default-features = false, features = ["typed", "async", "net", "handles"] }
 store_core = { package = "structfs-core-store", version = "0.4.0", path = "../../packages/core-store", features = ["async"] }
-structfs-serde-store = { version = "0.4.0", path = "../../packages/serde-store", features = ["async"] }
-structfs-handles = { version = "0.4.0", path = "../../packages/handles", default-features = false }
-structfs-http = { version = "0.4.0", path = "../../packages/http", default-features = false }
 serde = { version = "1", features = ["derive"] }

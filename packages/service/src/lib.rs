@@ -1,6 +1,36 @@
 //! Native async services and scoped routing, independent of a Wasm engine.
 //! Provider futures must be detached and dispatch must return promptly. Use
 //! `BlockingStore` for blocking I/O and `ImmediateStore` only for short local work.
+//!
+//! # Conventions
+//!
+//! **Constructors return `Self`.** [`Router::new`], [`CallBudget::new`],
+//! [`CleanupSupervisor::new`] and the rest all yield an owned value; callers
+//! that need shared ownership wrap it in `Arc` themselves. [`Router`] and
+//! [`CallBudget`], whose own methods require shared ownership, additionally
+//! offer `shared()`, which is exactly `Arc::new(Self::new(..))` and nothing
+//! more. The one exception is `structfs_state::State`, whose only
+//! constructor `State::shared` returns an `Arc` because it registers the
+//! state's teardown with its owner.
+//!
+//! **Stop verbs.** `close()` requests cleanup and never blocks;
+//! `join(timeout)` waits at most `timeout` for that cleanup:
+//!
+//! - [`Owner`], [`OwnerHandle`], [`Registration`], [`OwnedResource`] and
+//!   [`OwnedTail`] have both; `join` returns the owner's [`CloseReport`].
+//! - [`CleanupSupervisor`] has both; `join` returns every owner's report.
+//! - [`BlockingStore`] has both; `join` returns whether in-flight work
+//!   finished within the timeout.
+//! - `structfs_handles::DuplexStream` has only `close()`: closing discards
+//!   its buffers synchronously, so there is nothing left to wait for.
+//!
+//! `cancel` is reserved for [`CancelToken`], which signals rather than
+//! reclaims.
+//!
+//! **Error taxonomy.** A caller mistake — a malformed cursor, a zero-sized
+//! page, an unsupported record kind — is `Error::InvalidArgument`.
+//! `Overloaded` and `ResourceLimit` mean capacity, and `PermissionDenied`
+//! means authority. None of the three doubles as an argument check.
 mod adapters;
 mod admission;
 mod handle_protocol;
@@ -13,7 +43,7 @@ pub use owner::{
     CleanupSupervisor, CloseReport, OwnedResource, Owner, OwnerHandle, OwnerLimits, Registration,
     RemainingResource, Reservation, ResourceId, ResourceKind,
 };
-pub use retained::{OwnedTail, RetainedBytes, TailRead};
+pub use retained::{OwnedTail, TailRead};
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -22,20 +52,19 @@ use std::{
     time::Duration,
 };
 use structfs_core_store::{DetachedFuture, Error, Path, Record};
-pub use structfs_handles::CancelToken;
+use structfs_handles::CancelToken;
 use tokio::time::Instant;
 use tracing::Instrument;
 
 /// A shared reservation. Work that outlives the caller must retain a clone.
+///
+/// The payload is never read: the whole point is that the reservation's
+/// `Drop` does not run while any clone of this lease is alive.
 #[derive(Clone)]
-pub struct Lease(Arc<dyn Send + Sync>);
+pub struct Lease(#[allow(dead_code)] Arc<dyn Send + Sync>);
 impl Lease {
     pub fn new<T: Send + Sync + 'static>(reservation: T) -> Self {
         Self(Arc::new(reservation))
-    }
-    /// Keep this reservation alive while another owner retains the lease.
-    pub fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.0)
     }
 }
 impl Default for Lease {
@@ -43,14 +72,60 @@ impl Default for Lease {
         Self::new(())
     }
 }
+/// Diagnostic identities for calls and for owner resources.
+///
+/// One counter serves both spaces deliberately: ids are never compared across
+/// spaces, and a single sequence makes a call id and the resource ids it
+/// created sort together in a log. Neither is authority.
 static NEXT: AtomicU64 = AtomicU64::new(1);
 fn next_id() -> u64 {
-    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-        .expect("service identity space exhausted")
+    // Saturating rather than panicking: an exhausted diagnostic counter is not
+    // a reason to kill a running host. At 2^64 ids the only consequence is
+    // that later ids repeat the last value in traces.
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_add(1))
+    })
+    .unwrap_or(u64::MAX)
+}
+
+/// Cancel a call's token unless the guard is defused first.
+///
+/// Dropping a pending call must signal cancellation so the provider can stop.
+/// Completing one must not: a provider that hands back a handle whose
+/// lifetime outlives the call would see it revoked the instant the call
+/// returned.
+struct CancelOnDrop {
+    token: CancelToken,
+    armed: bool,
+}
+impl CancelOnDrop {
+    fn new(token: CancelToken) -> Self {
+        Self { token, armed: true }
+    }
+    /// The call produced a result; cancellation is no longer warranted.
+    fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+/// A future that resolves when `deadline` passes, or never if there is none.
+async fn expire_at(deadline: Option<Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Metadata and cancellation for one request. Identity is diagnostic, not authority.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct CallContext {
     pub request_id: u64,
     pub cancellation: CancelToken,
@@ -97,6 +172,7 @@ impl CallContext {
     }
 }
 /// Providers receive paths in their own namespace.
+#[non_exhaustive]
 pub enum Operation {
     Read(Path),
     Write(Path, Record),
@@ -114,6 +190,7 @@ impl Operation {
         }
     }
 }
+#[non_exhaustive]
 pub enum Response {
     Read(Option<Record>),
     Written(Path),
@@ -126,9 +203,19 @@ pub trait Service: Send + Sync + 'static {
 pub trait Admission: Send + Sync + 'static {
     fn acquire(&self, path: &Path, data: Option<&Record>) -> Result<Lease, Error>;
 }
+/// Charge every call on a mount to one key of a shared [`CallBudget`].
+#[non_exhaustive]
 pub struct BudgetAdmission<I: Clone + Eq + std::hash::Hash + Send + Sync + 'static = String> {
     pub budget: Arc<CallBudget<I>>,
     pub key: I,
+}
+impl<I: Clone + Eq + std::hash::Hash + Send + Sync + 'static> BudgetAdmission<I> {
+    pub fn new(budget: Arc<CallBudget<I>>, key: impl Into<I>) -> Self {
+        Self {
+            budget,
+            key: key.into(),
+        }
+    }
 }
 impl<I: Clone + Eq + std::hash::Hash + Send + Sync + 'static> Admission for BudgetAdmission<I> {
     fn acquire(&self, p: &Path, d: Option<&Record>) -> Result<Lease, Error> {
@@ -136,6 +223,7 @@ impl<I: Clone + Eq + std::hash::Hash + Send + Sync + 'static> Admission for Budg
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Permissions {
     pub read: bool,
     pub write: bool,
@@ -179,6 +267,7 @@ impl<T> RouteTable<T> {
     }
 }
 /// One grant from a caller-visible prefix into a provider subtree.
+#[non_exhaustive]
 pub struct Mount {
     pub prefix: Path,
     pub base: Path,
@@ -206,26 +295,31 @@ pub struct Router {
     routes: std::sync::RwLock<RouteTable<Arc<Mount>>>,
 }
 impl Router {
-    pub fn new(mounts: Vec<Mount>) -> Result<Arc<Self>, Error> {
+    /// Wrap the result in `Arc` to obtain clients or register owned mounts.
+    pub fn new(mounts: Vec<Mount>) -> Result<Self, Error> {
         let mut seen = std::collections::BTreeSet::new();
         for m in &mounts {
             if !seen.insert(m.prefix.clone()) {
                 return Err(Error::conflict("duplicate service mount"));
             }
         }
-        Ok(Arc::new(Self {
+        Ok(Self {
             routes: std::sync::RwLock::new(RouteTable::new(
                 mounts
                     .into_iter()
                     .map(|m| (m.prefix.clone(), Arc::new(m)))
                     .collect(),
             )),
-        }))
+        })
+    }
+    /// [`Router::new`], already shared — the usual next step.
+    pub fn shared(mounts: Vec<Mount>) -> Result<Arc<Self>, Error> {
+        Self::new(mounts).map(Arc::new)
     }
     pub fn client(self: &Arc<Self>) -> Client {
         Client {
             router: self.clone(),
-            base: Path::parse("").unwrap(),
+            base: structfs_core_store::path!(""),
             permissions: Permissions::READ_WRITE,
             context: None,
             owners: Vec::new(),
@@ -326,12 +420,9 @@ impl Client {
             )),
         }
     }
-    async fn call(&self, operation: Operation) -> Result<Response, Error> {
-        let parent = self.context.clone().unwrap_or_default();
-        parent.ensure_active()?;
-        for owner in &self.owners {
-            owner.ensure_open()?;
-        }
+    /// Resolve the route, check permissions and acquire admission. Everything
+    /// before the provider sees the call.
+    fn admit(&self, operation: &Operation) -> Result<Admitted, Error> {
         let is_read = matches!(operation, Operation::Read(_));
         let absolute = self.base.join(operation.path());
         let resolved = self
@@ -357,46 +448,75 @@ impl Client {
         }
         let mapped = mount.base.join(&relative);
         let lease = mount.admission.acquire(&mapped, operation.data())?;
+        Ok(Admitted {
+            mount,
+            prefix,
+            mapped,
+            lease,
+            is_read,
+        })
+    }
+
+    /// Translate a provider's write result back into this client's namespace,
+    /// refusing anything that escaped either the grant or the client scope.
+    fn project(&self, admitted: &Admitted, path: Path) -> Result<Path, Error> {
+        let relative = path
+            .strip_prefix(&admitted.mount.base)
+            .ok_or_else(|| Error::permission_denied("provider result escaped grant"))?;
+        admitted
+            .prefix
+            .join(&relative)
+            .strip_prefix(&self.base)
+            .ok_or_else(|| Error::permission_denied("provider result escaped client scope"))
+    }
+
+    async fn call(&self, operation: Operation) -> Result<Response, Error> {
+        let parent = self.context.clone().unwrap_or_default();
+        parent.ensure_active()?;
+        for owner in &self.owners {
+            owner.ensure_open()?;
+        }
+        let admitted = self.admit(&operation)?;
         parent.ensure_active()?;
         let cancellation = CancelToken::new();
-        struct CancelOnDrop(CancelToken);
-        impl Drop for CancelOnDrop {
-            fn drop(&mut self) {
-                self.0.cancel();
-            }
-        }
-        let _guard = CancelOnDrop(cancellation.clone());
-        let _reservation = lease.clone();
+        // Armed while the call is pending; defused once it produces a result,
+        // so a handle the provider returns is not revoked on the way out.
+        let guard = CancelOnDrop::new(cancellation.clone());
+        let _reservation = admitted.lease.clone();
         let context = CallContext {
             cancellation,
-            lease,
+            lease: admitted.lease.clone(),
             ..parent.clone()
         };
         let op = match operation {
-            Operation::Read(_) => Operation::Read(mapped),
-            Operation::Write(_, data) => Operation::Write(mapped, data),
+            Operation::Read(_) => Operation::Read(admitted.mapped.clone()),
+            Operation::Write(_, data) => Operation::Write(admitted.mapped.clone(), data),
         };
-        let mut service = mount.service.clone();
+        let mut service = admitted.mount.service.clone();
         for owner in self.owners.iter().rev() {
             service = owner.service(service);
         }
         let future = service.call(context, op);
-        let deadline = async {
-            match parent.deadline {
-                Some(d) => tokio::time::sleep_until(d).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        let span = tracing::info_span!("structfs.call",request_id=parent.request_id,mount=%prefix,operation=if is_read{"read"}else{"write"});
+        let is_read = admitted.is_read;
+        let span = tracing::info_span!(
+            "structfs.call",
+            request_id = parent.request_id,
+            mount = %admitted.prefix,
+            operation = if is_read { "read" } else { "write" },
+        );
+        // One timer for the whole call. `OwnedService` re-races the same
+        // deadline for the owner's own reasons; this is the client's copy and
+        // there is exactly one of it.
         let result = async {
-            tokio::select! {biased;
-                _=parent.cancellation.cancelled()=>Err(Error::cancelled("service call cancelled")),
-                _=deadline=>Err(Error::deadline_exceeded("service call deadline")),
-                result=future=>result,
+            tokio::select! { biased;
+                _ = parent.cancellation.cancelled() => Err(Error::cancelled("service call cancelled")),
+                _ = expire_at(parent.deadline) => Err(Error::deadline_exceeded("service call deadline")),
+                result = future => result,
             }
         }
         .instrument(span)
         .await?;
+        guard.defuse();
         match result {
             Response::Read(_) if !is_read => Err(Error::store(
                 "service",
@@ -408,47 +528,18 @@ impl Client {
                 "read",
                 "provider response kind mismatch",
             )),
-            Response::Written(path) => {
-                let relative = path
-                    .strip_prefix(&mount.base)
-                    .ok_or_else(|| Error::permission_denied("provider result escaped grant"))?;
-                let path = prefix
-                    .join(&relative)
-                    .strip_prefix(&self.base)
-                    .ok_or_else(|| {
-                        Error::permission_denied("provider result escaped client scope")
-                    })?;
-                Ok(Response::Written(path))
-            }
+            Response::Written(path) => Ok(Response::Written(self.project(&admitted, path)?)),
             response => Ok(response),
         }
     }
 }
-#[async_trait::async_trait]
-impl structfs_core_store::AsyncReader for Client {
-    async fn read_async(&mut self, p: &Path) -> Result<Option<Record>, Error> {
-        self.read(p).await
-    }
-}
-#[async_trait::async_trait]
-impl structfs_core_store::AsyncWriter for Client {
-    async fn write_async(&mut self, p: &Path, d: Record) -> Result<Path, Error> {
-        self.write(p, d).await
-    }
-}
-impl structfs_core_store::DetachedReader for Client {
-    fn read_detached(&mut self, p: &Path) -> DetachedFuture<Option<Record>> {
-        let this = self.clone();
-        let p = p.clone();
-        Box::pin(async move { this.read(&p).await })
-    }
-}
-impl structfs_core_store::DetachedWriter for Client {
-    fn write_detached(&mut self, p: &Path, d: Record) -> DetachedFuture<Path> {
-        let this = self.clone();
-        let p = p.clone();
-        Box::pin(async move { this.write(&p, d).await })
-    }
+/// A routed, permitted, admitted call, one step before dispatch.
+struct Admitted {
+    mount: Arc<Mount>,
+    prefix: Path,
+    mapped: Path,
+    lease: Lease,
+    is_read: bool,
 }
 
 /// Apply an explicit lifetime to a provider, including Featherweight imports
@@ -489,40 +580,36 @@ impl Service for OwnedService {
             let call_cancel = CancelToken::new();
             context.cancellation = call_cancel.clone();
             let deadline = context.deadline;
-            struct CancelOnDrop(CancelToken);
-            impl Drop for CancelOnDrop {
-                fn drop(&mut self) {
-                    self.0.cancel();
-                }
-            }
-            let _cancel = CancelOnDrop(call_cancel);
+            let guard = CancelOnDrop::new(call_cancel);
             owner.ensure_open()?;
             let future = service.call(context, operation);
-            let expiry = async move {
-                match deadline {
-                    Some(d) => tokio::time::sleep_until(d).await,
-                    None => std::future::pending().await,
-                }
-            };
-            tokio::select! { biased;
+            let result = tokio::select! { biased;
                 _ = revoked.cancelled() => Err(Error::cancelled("registration revoked")),
                 _ = cancellation.cancelled() => Err(Error::cancelled("owner closed")),
                 _ = parent_cancel.cancelled() => Err(Error::cancelled("service call cancelled")),
-                _ = expiry => Err(Error::deadline_exceeded("service call deadline")),
+                _ = expire_at(deadline) => Err(Error::deadline_exceeded("service call deadline")),
                 result = future => result,
+            };
+            if result.is_ok() {
+                guard.defuse();
             }
+            result
         })
     }
 }
 
 impl structfs_core_store::SharedReader for Client {
-    fn read(&self, path: Path) -> structfs_core_store::DetachedFuture<Option<Record>> {
+    fn read_shared(&self, path: Path) -> structfs_core_store::DetachedFuture<Option<Record>> {
         let client = self.clone();
         Box::pin(async move { Client::read(&client, &path).await })
     }
 }
 impl structfs_core_store::SharedWriter for Client {
-    fn write(&self, path: Path, record: Record) -> structfs_core_store::DetachedFuture<Path> {
+    fn write_shared(
+        &self,
+        path: Path,
+        record: Record,
+    ) -> structfs_core_store::DetachedFuture<Path> {
         let client = self.clone();
         Box::pin(async move { Client::write(&client, &path, record).await })
     }

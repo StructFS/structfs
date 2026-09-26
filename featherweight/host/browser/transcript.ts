@@ -22,20 +22,30 @@
 // sides have one — degraded gracefully rather than falsely divergent.
 
 import {
+  knownLabel,
+  labelOfStatus,
+  statusOfLabel as statusOf,
+} from "./errors.ts";
+import {
   RawJson,
   status,
   StoreError,
   valueText,
+  type ErrorDetail,
   type HostStore,
-  type Status,
   type StoreValue,
 } from "./structfs-host.ts";
 
-/// An error as the transcript holds it (the native runtime's shape).
+/// An error as the transcript holds it (the native runtime's shape):
+/// the kind label (errors.ts), the message, and the structured detail
+/// typed reconstruction needs.
 export interface TranscriptError {
   kind: string;
   message: string;
   path?: string;
+  component?: string;
+  position?: number;
+  codec?: { kind: string; [field: string]: unknown };
 }
 
 /// The native runtime's Record envelope: parsed values or raw bytes.
@@ -58,53 +68,42 @@ export interface TranscriptEntry {
   wrote?: string;
 }
 
-const statusOf: Record<string, Status> = {
-  not_found: status.NOT_FOUND,
-  no_route: status.NOT_FOUND,
-  permission_denied: status.PERMISSION_DENIED,
-  conflict: status.CONFLICT,
-  overloaded: status.OVERLOADED,
-  deadline_exceeded: status.DEADLINE_EXCEEDED,
-  resource_limit: status.RESOURCE_LIMIT,
-  cancelled: status.CANCELLED,
-};
-
-const kindOf = (code: Status): string => {
-  switch (code) {
-    case status.NOT_FOUND:
-      return "not_found";
-    case status.PERMISSION_DENIED:
-      return "permission_denied";
-    case status.CONFLICT:
-      return "conflict";
-    case status.OVERLOADED:
-      return "overloaded";
-    case status.DEADLINE_EXCEEDED:
-      return "deadline_exceeded";
-    case status.RESOURCE_LIMIT:
-      return "resource_limit";
-    case status.CANCELLED:
-      return "cancelled";
-    default:
-      return "other";
-  }
-};
+/// The kind label of any thrown error: a StoreError's own kind when it
+/// carries one, else what its status denotes alone.
+export const kindOf = (error: unknown): string =>
+  error instanceof StoreError
+    ? (error.detail.kind ?? labelOfStatus(error.code))
+    : "other";
 
 const toTranscriptError = (error: unknown): TranscriptError => {
-  if (error instanceof StoreError) {
-    return { kind: kindOf(error.code), message: error.message };
-  }
   const message = error instanceof Error ? error.message : String(error);
-  return { kind: "other", message };
+  const failed: TranscriptError = { kind: kindOf(error), message };
+  if (error instanceof StoreError) {
+    const { path, component, position, codec } = error.detail;
+    if (path !== undefined) failed.path = path;
+    if (component !== undefined) failed.component = component;
+    if (position !== undefined) failed.position = position;
+    if (codec !== undefined) failed.codec = codec;
+  }
+  return failed;
 };
 
 const toStoreError = (failed: TranscriptError): StoreError => {
-  const code = statusOf[failed.kind] ?? status.OTHER;
+  const code = statusOf(failed.kind, failed.codec?.kind);
   // Typed errors carry their path where the message would be empty
   // (the native runtime renders NotFound that way).
   const message =
     failed.message !== "" ? failed.message : (failed.path ?? failed.kind);
-  return new StoreError(code, message);
+  // Keep the kind (and its detail) so a re-recording writes the same
+  // entry; a kind this host does not know replays as `other`.
+  const detail: ErrorDetail = {
+    kind: knownLabel(failed.kind) ? failed.kind : "other",
+  };
+  if (failed.path !== undefined) detail.path = failed.path;
+  if (failed.component !== undefined) detail.component = failed.component;
+  if (failed.position !== undefined) detail.position = failed.position;
+  if (failed.codec !== undefined) detail.codec = failed.codec;
+  return new StoreError(code, message, detail);
 };
 
 /// fnv1a-64 over UTF-8, hex — the digest the native runtime computes.

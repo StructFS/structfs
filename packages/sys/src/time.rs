@@ -1,57 +1,50 @@
 //! Time and clock store.
 
-use collection_literals::btree;
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
 
-lazy_static::lazy_static! {
-    static ref MONOTONIC_START: Instant = Instant::now();
-}
+/// The epoch of `time/monotonic`: first use of any `TimeStore`.
+static MONOTONIC_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// The readable clocks, in listing order.
+const CLOCKS: [&str; 4] = ["now", "now_unix", "now_unix_ms", "monotonic"];
 
 /// Store for time operations.
 pub struct TimeStore;
 
 impl TimeStore {
     pub fn new() -> Self {
-        // Touch the lazy static to initialize it
-        let _ = *MONOTONIC_START;
+        LazyLock::force(&MONOTONIC_START);
         Self
     }
 
-    fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
-        if path.is_empty() {
-            return Ok(Some(Value::Map(btree! {
-                "now".into() => Value::String("ISO 8601 timestamp".into()),
-                "now_unix".into() => Value::String("Unix timestamp (seconds)".into()),
-                "now_unix_ms".into() => Value::String("Unix timestamp (milliseconds)".into()),
-                "monotonic".into() => Value::String("Monotonic clock (nanoseconds since start)".into()),
-                "sleep".into() => Value::String("Write {\"ms\": N} or {\"secs\": N} to sleep".into()),
-            })));
-        }
+    fn clock(name: &str) -> Option<Value> {
+        Some(match name {
+            "now" => Value::String(chrono::Utc::now().to_rfc3339()),
+            "now_unix" => Value::Integer(chrono::Utc::now().timestamp()),
+            "now_unix_ms" => Value::Integer(chrono::Utc::now().timestamp_millis()),
+            "monotonic" => Value::Unsigned(
+                u64::try_from(MONOTONIC_START.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            ),
+            _ => return None,
+        })
+    }
 
-        if path.len() != 1 {
-            return Ok(None);
-        }
-
-        match &path[0] {
-            "now" => {
-                let now = chrono::Utc::now();
-                Ok(Some(Value::String(now.to_rfc3339())))
-            }
-            "now_unix" => {
-                let now = chrono::Utc::now();
-                Ok(Some(Value::Integer(now.timestamp())))
-            }
-            "now_unix_ms" => {
-                let now = chrono::Utc::now();
-                Ok(Some(Value::Integer(now.timestamp_millis())))
-            }
-            "monotonic" => {
-                let elapsed = MONOTONIC_START.elapsed();
-                Ok(Some(Value::Integer(elapsed.as_nanos() as i64)))
-            }
-            _ => Ok(None),
+    fn read_value(path: &Path) -> Option<Value> {
+        match path.len() {
+            // The root is the map of every clock's current value; `sleep`
+            // is write-only and so not a child.
+            0 => Some(Value::Map(
+                CLOCKS
+                    .iter()
+                    .filter_map(|name| Some((name.to_string(), Self::clock(name)?)))
+                    .collect::<BTreeMap<_, _>>(),
+            )),
+            1 => Self::clock(&path[0]),
+            _ => None,
         }
     }
 }
@@ -62,205 +55,143 @@ impl Default for TimeStore {
     }
 }
 
+/// The longest sleep `time/sleep` accepts (one hour); longer requests are
+/// `InvalidArgument`.
+pub const MAX_SLEEP: Duration = Duration::from_secs(60 * 60);
+
+/// A non-negative integer field of a sleep request.
+fn amount(value: &Value, field: &str) -> Result<u64, Error> {
+    match value {
+        Value::Integer(n) => u64::try_from(*n)
+            .map_err(|_| Error::invalid_argument(format!("sleep '{field}' must not be negative"))),
+        Value::Unsigned(n) => Ok(*n),
+        _ => Err(Error::invalid_argument(format!(
+            "sleep '{field}' must be an integer"
+        ))),
+    }
+}
+
 impl Reader for TimeStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        Ok(self.read_value(from)?.map(Record::parsed))
+        Ok(Self::read_value(from).map(Record::parsed))
     }
 }
 
 impl Writer for TimeStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        if to.len() != 1 {
-            return Err(Error::store("time", "write", "Invalid time path"));
+        if to.len() != 1 || &to[0] != "sleep" {
+            return Err(Error::permission_denied(format!(
+                "time/{to} is not writable; only time/sleep accepts writes"
+            )));
         }
-
-        match &to[0] {
-            "sleep" => {
-                let value = data.into_value(&NoCodec)?;
-
-                let duration = match &value {
-                    Value::Map(map) => {
-                        if let Some(Value::Integer(ms)) = map.get("ms") {
-                            Duration::from_millis(*ms as u64)
-                        } else if let Some(Value::Integer(secs)) = map.get("secs") {
-                            Duration::from_secs(*secs as u64)
-                        } else {
-                            return Err(Error::store(
-                                "time",
-                                "sleep",
-                                "Sleep requires 'ms' or 'secs' field",
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(Error::store(
-                            "time",
-                            "sleep",
-                            "Sleep requires a map with 'ms' or 'secs' field",
-                        ));
-                    }
-                };
-
-                std::thread::sleep(duration);
-                Ok(to.clone())
+        let duration = match data.into_value(&NoCodec)? {
+            Value::Map(map) => match (map.get("ms"), map.get("secs")) {
+                (Some(ms), _) => Duration::from_millis(amount(ms, "ms")?),
+                (None, Some(secs)) => Duration::from_secs(amount(secs, "secs")?),
+                (None, None) => {
+                    return Err(Error::invalid_argument(
+                        "sleep requires an 'ms' or 'secs' field",
+                    ))
+                }
+            },
+            _ => {
+                return Err(Error::invalid_argument(
+                    "sleep requires a map with an 'ms' or 'secs' field",
+                ))
             }
-            _ => Err(Error::store(
-                "time",
-                "write",
-                format!("Cannot write to time/{}", &to[0]),
-            )),
+        };
+        if duration > MAX_SLEEP {
+            return Err(Error::invalid_argument(format!(
+                "sleep of {duration:?} exceeds the {MAX_SLEEP:?} maximum"
+            )));
         }
+        std::thread::sleep(duration);
+        Ok(to.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use collection_literals::btree;
     use structfs_core_store::path;
 
-    #[test]
-    fn read_now() {
-        let mut store = TimeStore::new();
-        let record = store.read(&path!("now")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::String(s) => assert!(s.contains("T")),
-            _ => panic!("Expected string"),
-        }
+    fn read(at: &Path) -> Option<Value> {
+        TimeStore::new()
+            .read(at)
+            .unwrap()
+            .map(|r| r.into_value(&NoCodec).unwrap())
     }
 
     #[test]
-    fn read_now_unix() {
-        let mut store = TimeStore::new();
-        let record = store.read(&path!("now_unix")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Integer(ts) => assert!(ts > 0),
-            _ => panic!("Expected integer"),
-        }
-    }
-
-    #[test]
-    fn read_now_unix_ms() {
-        let mut store = TimeStore::new();
-        let record = store.read(&path!("now_unix_ms")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Integer(ts) => assert!(ts > 0),
-            _ => panic!("Expected integer"),
-        }
-    }
-
-    #[test]
-    fn read_monotonic() {
-        let mut store = TimeStore::new();
-        let r1 = store.read(&path!("monotonic")).unwrap().unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        let r2 = store.read(&path!("monotonic")).unwrap().unwrap();
-
-        let v1 = match r1.into_value(&NoCodec).unwrap() {
-            Value::Integer(i) => i,
-            _ => panic!("Expected integer"),
+    fn clocks() {
+        assert!(matches!(read(&path!("now")), Some(Value::String(s)) if s.contains('T')));
+        assert!(matches!(read(&path!("now_unix")), Some(Value::Integer(t)) if t > 0));
+        assert!(matches!(read(&path!("now_unix_ms")), Some(Value::Integer(t)) if t > 0));
+        let Some(Value::Unsigned(a)) = read(&path!("monotonic")) else {
+            panic!("expected unsigned")
         };
-        let v2 = match r2.into_value(&NoCodec).unwrap() {
-            Value::Integer(i) => i,
-            _ => panic!("Expected integer"),
+        std::thread::sleep(Duration::from_millis(2));
+        let Some(Value::Unsigned(b)) = read(&path!("monotonic")) else {
+            panic!("expected unsigned")
         };
-        assert!(v2 > v1);
+        assert!(b > a);
+        assert_eq!(read(&path!("nonexistent")), None);
+        assert_eq!(read(&path!("now/extra")), None);
     }
 
     #[test]
-    fn read_root() {
-        let mut store = TimeStore::new();
-        let record = store.read(&path!("")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("now"));
-                assert!(map.contains_key("now_unix"));
-                assert!(map.contains_key("monotonic"));
-                assert!(map.contains_key("sleep"));
-            }
-            _ => panic!("Expected map"),
-        }
+    fn root_is_a_map_of_clock_values() {
+        let Some(Value::Map(root)) = read(&path!("")) else {
+            panic!("expected map")
+        };
+        assert_eq!(root.keys().count(), CLOCKS.len());
+        assert!(matches!(root.get("now"), Some(Value::String(s)) if s.contains('T')));
+        assert!(matches!(root.get("now_unix"), Some(Value::Integer(_))));
+        assert!(!root.contains_key("sleep"));
     }
 
     #[test]
-    fn read_nonexistent() {
+    fn sleep() {
         let mut store = TimeStore::new();
-        let result = store.read(&path!("nonexistent")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn read_nested_path_returns_none() {
-        let mut store = TimeStore::new();
-        let result = store.read(&path!("now/extra")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn write_sleep_ms() {
-        let mut store = TimeStore::new();
-        let map = btree! { "ms".into() => Value::Integer(1) };
-
-        let before = std::time::Instant::now();
+        let before = Instant::now();
         store
-            .write(&path!("sleep"), Record::parsed(Value::Map(map)))
+            .write(
+                &path!("sleep"),
+                Record::parsed(Value::Map(btree! { "ms".into() => Value::Integer(1) })),
+            )
             .unwrap();
-        let elapsed = before.elapsed();
-
-        assert!(elapsed.as_millis() >= 1);
-    }
-
-    #[test]
-    fn write_sleep_secs() {
-        let mut store = TimeStore::new();
-        let map = btree! { "secs".into() => Value::Integer(0) };
-
-        // Just test that it doesn't error
+        assert!(before.elapsed() >= Duration::from_millis(1));
         store
-            .write(&path!("sleep"), Record::parsed(Value::Map(map)))
+            .write(
+                &path!("sleep"),
+                Record::parsed(Value::Map(btree! { "secs".into() => Value::Unsigned(0) })),
+            )
             .unwrap();
     }
 
     #[test]
-    fn write_sleep_missing_field_error() {
+    fn invalid_sleeps_are_rejected() {
         let mut store = TimeStore::new();
-        let map = btree! { "invalid".into() => Value::Integer(100) };
-
-        let result = store.write(&path!("sleep"), Record::parsed(Value::Map(map)));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_sleep_invalid_type_error() {
-        let mut store = TimeStore::new();
-        let result = store.write(
-            &path!("sleep"),
-            Record::parsed(Value::String("100".to_string())),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_to_now_error() {
-        let mut store = TimeStore::new();
-        let result = store.write(&path!("now"), Record::parsed(Value::Null));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_invalid_path_length_error() {
-        let mut store = TimeStore::new();
-        let result = store.write(&path!(""), Record::parsed(Value::Null));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn default_impl() {
-        let store: TimeStore = Default::default();
-        assert!(std::ptr::eq(&store as *const _, &store as *const _)); // Just verify it works
+        for bad in [
+            Value::Map(btree! { "ms".into() => Value::Integer(-1) }),
+            Value::Map(btree! { "secs".into() => Value::Integer(-5) }),
+            Value::Map(btree! { "ms".into() => Value::String("1".into()) }),
+            Value::Map(btree! { "invalid".into() => Value::Integer(100) }),
+            Value::String("100".into()),
+            Value::Map(btree! { "secs".into() => Value::Integer(3601) }),
+            Value::Map(btree! { "ms".into() => Value::Unsigned(u64::MAX) }),
+        ] {
+            let err = store
+                .write(&path!("sleep"), Record::parsed(bad))
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidArgument { .. }), "{err}");
+        }
+        for bad in [path!("now"), path!("")] {
+            assert!(matches!(
+                store.write(&bad, Record::parsed(Value::Null)),
+                Err(Error::PermissionDenied { .. })
+            ));
+        }
     }
 }

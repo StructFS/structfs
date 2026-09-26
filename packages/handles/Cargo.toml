@@ -5,14 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Handle-store and streaming primitives for StructFS: outstanding/{id} scaffolding, atomic tail reads, cancellable parked reads"
+description = "Handle-store and streaming primitives for StructFS: outstanding/{id} scaffolding, bounded duplex byte streams, cancellable parked reads"
 readme = "README.md"
 keywords = ["store", "handle", "streaming", "async"]
 categories = ["asynchronous", "data-structures"]
-
-[features]
-default = ["sync-bridge"]
-sync-bridge = ["tokio/rt"]
 
 [dependencies]
 structfs-core-store = { workspace = true, features = ["async"] }

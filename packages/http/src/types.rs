@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// HTTP method for requests
+/// HTTP method for requests.
+///
+/// Covers every method [`http::Method`] names as a constant. Extension
+/// methods are not representable — [`Method::try_from`] rejects them rather
+/// than silently substituting `GET`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "UPPERCASE")]
+#[non_exhaustive]
 pub enum Method {
     #[default]
     GET,
@@ -13,6 +18,8 @@ pub enum Method {
     PATCH,
     HEAD,
     OPTIONS,
+    CONNECT,
+    TRACE,
 }
 
 impl From<Method> for http::Method {
@@ -25,13 +32,22 @@ impl From<Method> for http::Method {
             Method::PATCH => http::Method::PATCH,
             Method::HEAD => http::Method::HEAD,
             Method::OPTIONS => http::Method::OPTIONS,
+            Method::CONNECT => http::Method::CONNECT,
+            Method::TRACE => http::Method::TRACE,
         }
     }
 }
 
-impl From<http::Method> for Method {
-    fn from(method: http::Method) -> Self {
-        match method {
+impl TryFrom<http::Method> for Method {
+    type Error = crate::Error;
+
+    /// Convert a [`http::Method`], rejecting extension methods.
+    ///
+    /// Returns [`crate::Error::InvalidMethod`] for anything outside the
+    /// nine methods this enum names; silently mapping unknown verbs to
+    /// `GET` would turn a typo into a different request.
+    fn try_from(method: http::Method) -> Result<Self, Self::Error> {
+        Ok(match method {
             http::Method::GET => Method::GET,
             http::Method::POST => Method::POST,
             http::Method::PUT => Method::PUT,
@@ -39,8 +55,14 @@ impl From<http::Method> for Method {
             http::Method::PATCH => Method::PATCH,
             http::Method::HEAD => Method::HEAD,
             http::Method::OPTIONS => Method::OPTIONS,
-            _ => Method::GET, // Default fallback
-        }
+            http::Method::CONNECT => Method::CONNECT,
+            http::Method::TRACE => Method::TRACE,
+            other => {
+                return Err(crate::Error::InvalidMethod {
+                    method: other.to_string(),
+                })
+            }
+        })
     }
 }
 
@@ -48,7 +70,14 @@ impl From<http::Method> for Method {
 ///
 /// Write this struct to an HttpStore to execute the request.
 /// The response will be available at the returned path.
+///
+/// Deserialization is strict (`deny_unknown_fields`): a map that is *not* a
+/// request — `{"name": "Bob"}`, say — fails to parse instead of quietly
+/// becoming `GET ""`. Stores that accept either a request or an arbitrary
+/// body (see `HttpClientStore`) rely on that to tell the two apart.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct HttpRequest {
     /// HTTP method (GET, POST, PUT, DELETE, etc.)
     #[serde(default)]
@@ -73,6 +102,44 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// A request with an explicit method and path.
+    ///
+    /// The constructor to use from outside this crate: [`HttpRequest`] is
+    /// `#[non_exhaustive]`, so struct literals and `..Default::default()`
+    /// are not available to downstream callers.
+    pub fn new(method: Method, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The request's absolute URL, validated for sending.
+    ///
+    /// `path` must be an absolute `http` or `https` URL by the time a
+    /// request reaches an executor (`HttpClientStore` resolves relative
+    /// paths against its base URL first; the brokers have no base). Errors:
+    ///
+    /// - [`crate::Error::UrlParse`] when `path` is not a URL at all —
+    ///   `"not a url"`, or a relative `"/x"`;
+    /// - [`crate::Error::InvalidUrl`] for any scheme other than http/https
+    ///   (`ftp://…`, `file://…`).
+    ///
+    /// Both map to `InvalidArgument` at the store boundary.
+    pub fn url(&self) -> Result<url::Url, crate::Error> {
+        let url = url::Url::parse(&self.path)?;
+        match url.scheme() {
+            "http" | "https" => Ok(url),
+            other => Err(crate::Error::InvalidUrl {
+                message: format!(
+                    "unsupported scheme '{other}' in '{}'; only http and https are allowed",
+                    self.path
+                ),
+            }),
+        }
+    }
+
     pub fn get(path: impl Into<String>) -> Self {
         Self {
             method: Method::GET,
@@ -127,7 +194,8 @@ impl HttpRequest {
 }
 
 /// HTTP response from a request
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct HttpResponse {
     /// HTTP status code
     pub status: u16,
@@ -135,7 +203,11 @@ pub struct HttpResponse {
     /// Status text (e.g., "OK", "Not Found")
     pub status_text: String,
 
-    /// Response headers
+    /// Response headers.
+    ///
+    /// A single-valued map: a header repeated in the response
+    /// (`Set-Cookie`, `Via`, …) collapses to the **last** value received,
+    /// and values that are not valid UTF-8 are dropped.
     pub headers: HashMap<String, String>,
 
     /// Response body as JSON value
@@ -148,6 +220,60 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
+    /// A response with the given status and the canonical reason phrase.
+    ///
+    /// The constructor to use from outside this crate: [`HttpResponse`] is
+    /// `#[non_exhaustive]`, so struct literals are not available to
+    /// downstream callers. Combine with the `with_*` builders.
+    pub fn new(status: u16) -> Self {
+        let status_text = http::StatusCode::from_u16(status)
+            .ok()
+            .and_then(|code| code.canonical_reason())
+            .unwrap_or("Unknown")
+            .to_string();
+        Self {
+            status,
+            status_text,
+            ..Default::default()
+        }
+    }
+
+    /// Override the status text (reason phrase).
+    #[must_use]
+    pub fn with_status_text(mut self, status_text: impl Into<String>) -> Self {
+        self.status_text = status_text.into();
+        self
+    }
+
+    /// Add a response header.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replace the whole header map.
+    #[must_use]
+    pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// Set the parsed JSON body, and the raw text to its JSON rendering.
+    #[must_use]
+    pub fn with_json_body(mut self, body: serde_json::Value) -> Self {
+        self.body_text = Some(body.to_string());
+        self.body = body;
+        self
+    }
+
+    /// Set the raw body text without touching the parsed body.
+    #[must_use]
+    pub fn with_body_text(mut self, body_text: impl Into<String>) -> Self {
+        self.body_text = Some(body_text.into());
+        self
+    }
+
     /// Check if the response status indicates success (2xx)
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
@@ -188,19 +314,58 @@ mod tests {
         assert_eq!(http::Method::from(Method::PATCH), http::Method::PATCH);
         assert_eq!(http::Method::from(Method::HEAD), http::Method::HEAD);
         assert_eq!(http::Method::from(Method::OPTIONS), http::Method::OPTIONS);
+        assert_eq!(http::Method::from(Method::CONNECT), http::Method::CONNECT);
+        assert_eq!(http::Method::from(Method::TRACE), http::Method::TRACE);
     }
 
     #[test]
     fn http_method_to_method() {
-        assert_eq!(Method::from(http::Method::GET), Method::GET);
-        assert_eq!(Method::from(http::Method::POST), Method::POST);
-        assert_eq!(Method::from(http::Method::PUT), Method::PUT);
-        assert_eq!(Method::from(http::Method::DELETE), Method::DELETE);
-        assert_eq!(Method::from(http::Method::PATCH), Method::PATCH);
-        assert_eq!(Method::from(http::Method::HEAD), Method::HEAD);
-        assert_eq!(Method::from(http::Method::OPTIONS), Method::OPTIONS);
-        // Unknown methods fall back to GET
-        assert_eq!(Method::from(http::Method::CONNECT), Method::GET);
+        for method in [
+            http::Method::GET,
+            http::Method::POST,
+            http::Method::PUT,
+            http::Method::DELETE,
+            http::Method::PATCH,
+            http::Method::HEAD,
+            http::Method::OPTIONS,
+            http::Method::CONNECT,
+            http::Method::TRACE,
+        ] {
+            let converted = Method::try_from(method.clone()).unwrap();
+            assert_eq!(http::Method::from(converted), method);
+        }
+    }
+
+    #[test]
+    fn extension_methods_are_rejected_not_mapped_to_get() {
+        let extension = http::Method::from_bytes(b"PURGE").unwrap();
+        let error = Method::try_from(extension).unwrap_err();
+        assert!(error.to_string().contains("PURGE"), "{error}");
+    }
+
+    #[test]
+    fn request_urls_must_be_absolute_http_or_https() {
+        assert!(HttpRequest::get("https://api.test/x").url().is_ok());
+        assert!(HttpRequest::get("http://api.test/x").url().is_ok());
+
+        for bad in ["not a url", "/x"] {
+            let error = HttpRequest::get(bad).url().unwrap_err();
+            assert!(matches!(error, crate::Error::UrlParse(_)), "{bad}: {error}");
+        }
+        for bad in ["ftp://api.test/f", "file:///etc/passwd"] {
+            let error = HttpRequest::get(bad).url().unwrap_err();
+            assert!(
+                matches!(error, crate::Error::InvalidUrl { .. }),
+                "{bad}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_request_new_sets_method_and_path() {
+        let req = HttpRequest::new(Method::PATCH, "/items/1");
+        assert_eq!(req.method, Method::PATCH);
+        assert_eq!(req.path, "/items/1");
     }
 
     #[test]
@@ -347,19 +512,8 @@ mod tests {
 
     #[test]
     fn http_response_json_error() {
-        let resp = HttpResponse {
-            status: 200,
-            status_text: "OK".to_string(),
-            headers: HashMap::new(),
-            body: serde_json::json!("not an object"),
-            body_text: None,
-        };
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct Data {
-            field: String,
-        }
-        assert!(resp.json::<Data>().is_err());
+        let resp = HttpResponse::new(200).with_json_body(serde_json::json!("not an object"));
+        assert!(resp.json::<HashMap<String, String>>().is_err());
     }
 
     #[test]
@@ -389,5 +543,49 @@ mod tests {
         );
         assert_eq!(parsed.query.get("version"), Some(&"2".to_string()));
         assert_eq!(parsed.body, Some(serde_json::json!({"data": 123})));
+    }
+
+    #[test]
+    fn http_request_rejects_unknown_fields() {
+        // The bug this guards: with every field defaulted and unknown keys
+        // accepted, *any* map parsed as a request and `{"name": "Bob"}`
+        // silently became `GET ""`.
+        let err = serde_json::from_str::<HttpRequest>(r#"{"name":"Bob"}"#).unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
+
+        let request: HttpRequest = serde_json::from_str(r#"{"method":"GET","path":"/x"}"#).unwrap();
+        assert_eq!(request.method, Method::GET);
+        assert_eq!(request.path, "/x");
+    }
+
+    #[test]
+    fn http_response_new_uses_canonical_reason() {
+        let ok = HttpResponse::new(200);
+        assert_eq!(ok.status, 200);
+        assert_eq!(ok.status_text, "OK");
+        assert!(ok.body.is_null());
+        assert!(ok.body_text.is_none());
+
+        assert_eq!(HttpResponse::new(299).status_text, "Unknown");
+    }
+
+    #[test]
+    fn http_response_builders() {
+        let response = HttpResponse::new(201)
+            .with_status_text("Created")
+            .with_header("Location", "/users/1")
+            .with_json_body(serde_json::json!({"id": 1}));
+
+        assert_eq!(response.status_text, "Created");
+        assert_eq!(
+            response.headers.get("Location"),
+            Some(&"/users/1".to_string())
+        );
+        assert_eq!(response.body, serde_json::json!({"id": 1}));
+        assert_eq!(response.body_text.as_deref(), Some(r#"{"id":1}"#));
+
+        let text_only = HttpResponse::new(200).with_body_text("plain");
+        assert!(text_only.body.is_null());
+        assert_eq!(text_only.body_text.as_deref(), Some("plain"));
     }
 }

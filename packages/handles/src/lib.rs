@@ -10,33 +10,36 @@
 //! - [`HandleStore`] + [`HandleProtocol`]: generic `outstanding/{id}`
 //!   scaffolding — id minting, routing, the no-overwrite rule, Null-write
 //!   release with cancellation, listing.
-//! - [`TailLog`] / [`TailPage`]: append-only event streams with **atomic
-//!   tail reads** — items and terminal status in one operation, so the
-//!   "close-out drain" race cannot exist.
+//! - [`DuplexStream`]: a bounded, consuming byte transport with independent
+//!   per-direction capacity and EOF state.
 //! - [`Gate`] / [`CancelToken`]: park-until-predicate with the
 //!   enable-before-check ordering baked in (no lost wakeups), and
 //!   cancellation that fails parked reads while leaving writes open.
-//! - `SyncBridge` (feature `sync-bridge`): run a detached async store from synchronous code on a
-//!   blocking thread.
 //! - [`conformance`]: certify any handle store against the protocol rules.
+//!
+//! ## Conventions
+//!
+//! **Constructors return `Self`.** Every constructor in this crate (and in
+//! `structfs-service`, `structfs-state` and `structfs-profiles`) yields an
+//! owned value; callers that need shared ownership wrap it in `Arc`
+//! themselves. No constructor hides an `Arc` allocation.
+//!
+//! **Stop verbs.** `close()` requests cleanup and never blocks; where there
+//! is cleanup to wait for, `join(timeout)` waits for it. [`DuplexStream`] has
+//! only `close()`: its buffers are discarded synchronously.
+//! [`HandleProtocol::close`] / [`HandleProtocol::close_wait`] /
+//! [`HandleProtocol::close_complete`] are the protocol-level spellings of
+//! the same three steps.
 
 mod duplex;
 pub use duplex::{DuplexStream, StreamReadiness, StreamStore};
-mod byte_stream;
 mod gate;
 mod handle_store;
-#[cfg(feature = "sync-bridge")]
-mod sync_bridge;
-mod tail;
 
 pub mod conformance;
 
-pub use byte_stream::{ByteChunk, ByteStream};
 pub use gate::{CancelToken, Cancelled, Gate};
 pub use handle_store::{HandleCx, HandleProtocol, HandleStore};
-#[cfg(feature = "sync-bridge")]
-pub use sync_bridge::SyncBridge;
-pub use tail::{TailLog, TailPage};
 
 // Re-export the async trait surface these types implement.
 pub use structfs_core_store::{

@@ -3,6 +3,7 @@ use structfs_core_store::{path, Error, Path, Record};
 use structfs_serde_store::{from_value, to_value};
 use structfs_service::Client;
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ClientError {
     Transport(Error),
     State(Fault),
@@ -30,7 +31,8 @@ impl StateClient {
     pub fn new(client: Client) -> Self {
         Self { client }
     }
-    pub async fn open(&self, command: Command) -> Result<StateHandle, ClientError> {
+    /// Submit a command and return its handle without reading the reply.
+    async fn submit(&self, command: Command) -> Result<StateHandle, ClientError> {
         let path = self
             .client
             .write(
@@ -38,35 +40,50 @@ impl StateClient {
                 Record::parsed(to_value(&Request::new(command))?),
             )
             .await?;
-        let handle = StateHandle {
-            client: self.client.clone(),
-            path,
-        };
         // Validate the provider path before the second operation; no global paths.
-        if handle.path.len() != 2 || &handle.path[0] != "outstanding" {
+        if path.len() != 2 || &path[0] != "outstanding" {
             return Err(Error::permission_denied("invalid state handle").into());
         }
-        if let Err(e) = handle.describe().await {
-            let _ = handle.release().await;
-            return Err(e);
+        Ok(StateHandle {
+            client: self.client.clone(),
+            path,
+            granted: None,
+        })
+    }
+    /// Submit a command and surface a rejection before returning the handle.
+    /// The descriptor read here also pins the handle's epoch, which
+    /// [`StateHandle::changes`] checks every caller-supplied token against.
+    pub async fn open(&self, command: Command) -> Result<StateHandle, ClientError> {
+        let mut handle = self.submit(command).await?;
+        match handle.describe().await {
+            Ok(descriptor) => {
+                handle.granted = Some(descriptor.token);
+                Ok(handle)
+            }
+            Err(e) => {
+                let _ = handle.close().await;
+                Err(e)
+            }
         }
-        Ok(handle)
     }
     /// No automatic retry: a transport failure may follow a successful commit.
+    ///
+    /// Three operations, not four: the receipt is described exactly once,
+    /// rather than once by `open` for validation and again for its token.
     pub async fn batch(
         &self,
         expected: Option<Token>,
         mutations: Vec<Mutation>,
     ) -> Result<Token, ClientError> {
         let h = self
-            .open(Command::Batch {
+            .submit(Command::Batch {
                 expected,
                 mutations,
             })
             .await?;
-        let descriptor = h.describe().await?;
-        let _ = h.release().await;
-        Ok(descriptor.token)
+        let described = h.describe().await;
+        let _ = h.close().await;
+        Ok(described?.token)
     }
     /// Conventional store assignment. Null deletes; non-Null values replace the
     /// subtree. The internal batch API can still explicitly store Null. Paths
@@ -100,6 +117,8 @@ impl StateClient {
 pub struct StateHandle {
     client: Client,
     path: Path,
+    /// The descriptor token read when the handle was opened, if it was.
+    granted: Option<Token>,
 }
 impl StateHandle {
     async fn read<T: serde::de::DeserializeOwned>(&self, suffix: &Path) -> Result<T, ClientError> {
@@ -115,20 +134,29 @@ impl StateHandle {
         self.read(&path!("")).await
     }
     pub async fn snapshot(&self, offset: u64) -> Result<SnapshotPage, ClientError> {
-        self.read(&Path::parse(&format!("snapshot/{offset}")).expect("numeric cursor"))
-            .await
+        self.read(&cursor_path("snapshot", offset)).await
     }
+    /// The next page of changes after `after`.
+    ///
+    /// Only `after.revision` travels on the wire, so the provider cannot see
+    /// which epoch the caller's token came from. The epoch is therefore
+    /// checked here, locally, against the epoch this handle was granted at
+    /// [`StateClient::open`] — no extra round trip per page.
     pub async fn changes(&self, after: &Token) -> Result<ChangePage, ClientError> {
-        let descriptor = self.describe().await?;
-        if after.epoch != descriptor.token.epoch {
+        let granted = match &self.granted {
+            Some(granted) => granted.clone(),
+            None => self.describe().await?.token,
+        };
+        if after.epoch != granted.epoch {
             return Err(ClientError::State(Fault::EpochMismatch {
-                current: descriptor.token,
+                current: granted,
             }));
         }
-        self.read(&Path::parse(&format!("changes/{}", after.revision)).expect("numeric cursor"))
-            .await
+        self.read(&cursor_path("changes", after.revision)).await
     }
-    pub async fn release(&self) -> Result<(), ClientError> {
+    /// Request release of the handle. Idempotent; the provider also reclaims
+    /// it when the handle ages out or its owner closes.
+    pub async fn close(&self) -> Result<(), ClientError> {
         self.client
             .write(
                 &self.path.join(&path!("release")),
@@ -137,6 +165,12 @@ impl StateHandle {
             .await?;
         Ok(())
     }
+}
+
+/// `{kind}/{cursor}` built from components: a decimal cursor is always a valid
+/// component, so there is nothing here that can fail at runtime.
+fn cursor_path(kind: &str, cursor: u64) -> Path {
+    Path::from_components(vec![kind.to_string(), cursor.to_string()])
 }
 impl StateHandle {
     /// Materialize a synchronous projection under explicit client-side bounds.
@@ -150,8 +184,9 @@ impl StateHandle {
         let mut nodes = vec![];
         let mut cursor = 0;
         let mut bytes = 0usize;
-        let codec = structfs_serde_store::ValueCodec::new(structfs_serde_store::Profile::ValueJson)
-            .canonical();
+        let codec =
+            structfs_serde_store::ValueCodec::new(structfs_serde_store::CodecProfile::ValueJson)
+                .canonical()?;
         loop {
             let page = self.snapshot(cursor).await?;
             if page.token != descriptor.token

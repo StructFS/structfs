@@ -3,7 +3,8 @@
 //! retention to their minimum cursor. Disconnect removes a reader explicitly;
 //! it must not silently evict unread items from another reader's history.
 use std::{collections::BTreeMap, io::Write, time::Duration};
-use structfs_service::{CancelToken, CleanupSupervisor, OwnedTail, OwnerLimits};
+use structfs_handles::CancelToken;
+use structfs_service::{CleanupSupervisor, OwnedTail, OwnerLimits};
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Event {
     text: String,
@@ -52,6 +53,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         acknowledgements.insert(reader, page.next);
         tail.acknowledge(*acknowledgements.values().min().unwrap())?;
     }
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     Ok(())
 }

@@ -83,7 +83,9 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
     # lookup failure during built-in batch verification on Cargo 1.96.
     run(["cargo", "check", "--offline", "--workspace", "--all-targets"], stage, env=env)
     run(["cargo", "run", "--locked", "--offline", "-p", "structfs",
-         "--features", "json", "--example", "quickstart"], stage, env=env)
+         "--example", "quickstart"], stage, env=env)
+    run(["cargo", "run", "--locked", "--offline", "-p", "structfs",
+         "--features", "persist", "--example", "typed_persist"], stage, env=env)
     run(["cargo", "test", "--offline", "-p", "featherweight", "-p", "featherweight-runtime", "-p", "structfs-handles",
          "-p", "structfs-core-store", "-p", "structfs-serde-store", "-p", "structfs-service", "-p", "structfs-json-store", "-p", "featherweight-guest", "-p", "structfs-state", "-p", "structfs-profiles", *consumer_args], stage, env=env)
     run(["cargo", "test", "--locked", "--offline", "-p", "structfs-http", "--all-features"], stage, env=env)
@@ -107,7 +109,7 @@ with tempfile.TemporaryDirectory(prefix="featherweight-packages-") as temporary:
          "--no-default-features"], stage, env=env)
     run(["cargo", "build", "--locked", "--offline", "-p", "structfs-profiles",
          "--no-default-features", "--target", "wasm32-unknown-unknown"], stage, env=env)
-    for features in [[], ["--no-default-features"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"], ["--no-default-features", "--features", "profiles"]]:
+    for features in [[], ["--features", "reference-guest"], ["--no-default-features", "--features", "value-codecs"], ["--no-default-features", "--features", "state"], ["--no-default-features", "--features", "profiles"]]:
         run(["cargo", "build", "--locked", "--offline", "-p", "featherweight-guest",
              "--target", "wasm32-unknown-unknown", *features], stage, env=env)
     run(["cargo", "doc", "--locked", "--offline", "--no-deps", "--workspace",

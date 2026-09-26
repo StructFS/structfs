@@ -97,8 +97,14 @@ struct CancelInner {
 /// A cloneable cancellation token.
 ///
 /// Cancelling wakes every parked [`Gate::wait_until_cancellable`] carrying
-/// the token. By the handle-store protocol rule, cancellation fails parked
-/// *reads*; writes are not cancelled, so teardown writes can still land.
+/// the token.
+///
+/// By the handle-store protocol rule, cancellation fails parked *reads* and
+/// leaves *writes* alone. That asymmetry is deliberate: releasing a handle
+/// asks its producer to shut down, and the shutdown itself is expressed as
+/// writes — a final "done" marker, an acknowledgement, a flush. Those must
+/// still land after the token fires, so protocol writes never park on this
+/// token; only reads do.
 #[derive(Clone, Default)]
 pub struct CancelToken {
     inner: Arc<CancelInner>,

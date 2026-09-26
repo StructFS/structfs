@@ -1,7 +1,7 @@
-use structfs::{path, InMemoryStore, Reader, Record, Value, Writer};
+use structfs::{path, MemoryStore, Reader, Record, Value, Writer};
 
 fn main() -> Result<(), structfs::Error> {
-    let mut store = InMemoryStore::new();
+    let mut store = MemoryStore::new();
     store.write(
         &path!("greeting"),
         Record::parsed(Value::String("hello".into())),

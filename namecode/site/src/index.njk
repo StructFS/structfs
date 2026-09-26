@@ -34,15 +34,15 @@ layout: base.njk
   <div class="feature-grid">
     <div class="feature-card">
       <h3>Identity</h3>
-      <p>Valid identifiers pass through unchanged. <code><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span> <span class="token operator">==</span> s</code> when <code>s</code> is already UAX&nbsp;31.</p>
+      <p>Valid identifiers pass through unchanged. <code><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span> <span class="token operator">==</span> s</code> when <code>s</code> is already UAX&nbsp;31 and does not start with <code>_N_</code>.</p>
     </div>
     <div class="feature-card">
       <h3>Roundtrip</h3>
-      <p><code><span class="token function">decode</span><span class="token punctuation">(</span><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> s</code> for all strings. <code><span class="token function">encode</span><span class="token punctuation">(</span><span class="token function">decode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> s</code> for all valid encodings.</p>
+      <p><code><span class="token function">decode</span><span class="token punctuation">(</span><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> s</code> whenever <code>s</code> was encoded; a passthrough stands for itself. <code><span class="token function">encode_forced</span><span class="token punctuation">(</span><span class="token function">decode</span><span class="token punctuation">(</span>t<span class="token punctuation">))</span> <span class="token operator">==</span> t</code> for every canonical encoding <code>t</code>.</p>
     </div>
     <div class="feature-card">
-      <h3>Idempotent</h3>
-      <p><code><span class="token function">encode</span><span class="token punctuation">(</span><span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">))</span> <span class="token operator">==</span> <span class="token function">encode</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span></code>. Encoding an already-encoded string is a no-op.</p>
+      <h3>Injective</h3>
+      <p>Distinct strings get distinct encodings, so nothing is ever lost. Encoding an already-encoded string encodes it again rather than passing it through.</p>
     </div>
     <div class="feature-card">
       <h3>Cross-language</h3>

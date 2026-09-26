@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
-use structfs_core_store::mount_store::{MountConfig, MountStore, StoreFactory};
+use structfs_core_store::mount_store::{MountStore, StoreFactory};
 use structfs_core_store::overlay_store::StoreBox;
-use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
-use structfs_json_store::InMemoryStore;
+use structfs_core_store::{Error, MemoryStore, Path, Reader, Record, Value, Writer};
 use structfs_serde_store::{json_to_value, value_to_json};
 
 #[cfg(target_arch = "wasm32")]
@@ -30,16 +29,33 @@ macro_rules! wasm_export {
 /// Minimal factory for WASM — only creates memory stores.
 struct WasmStoreFactory;
 
+/// The playground's only mount config: `{"type": "memory"}`.
+#[derive(Clone)]
+struct Memory;
+
 impl StoreFactory for WasmStoreFactory {
-    fn create(&self, config: &MountConfig) -> Result<StoreBox, Error> {
-        match config {
-            MountConfig::Memory => Ok(Box::new(InMemoryStore::new())),
-            other => Err(Error::store(
-                "wasm",
-                "create",
-                format!("{:?} stores are not available in the playground", other),
-            )),
+    type Config = Memory;
+
+    fn create(&self, _config: &Memory) -> Result<StoreBox, Error> {
+        Ok(Box::new(MemoryStore::new()))
+    }
+
+    fn config_from_value(&self, value: Value) -> Result<Memory, Error> {
+        match &value {
+            Value::Map(map) if map.get("type") == Some(&Value::from("memory")) => Ok(Memory),
+            Value::Map(map) => Err(Error::invalid_argument(format!(
+                "{:?} stores are not available in the playground",
+                map.get("type").cloned().unwrap_or(Value::Null)
+            ))),
+            _ => Err(Error::invalid_argument("mount config must be a map")),
         }
+    }
+
+    fn config_to_value(&self, _config: &Memory) -> Result<Value, Error> {
+        Ok(Value::Map(BTreeMap::from([(
+            "type".to_string(),
+            Value::from("memory"),
+        )])))
     }
 }
 
@@ -54,7 +70,7 @@ impl Session {
         let mut store = MountStore::new(WasmStoreFactory);
 
         // Pre-mount a memory store at /data for convenience
-        let _ = store.mount("data", MountConfig::Memory);
+        let _ = store.mount("data", Memory);
 
         Self {
             store,
@@ -208,27 +224,8 @@ fn cmd_write(args: &str, session: &mut Session) -> String {
 
     let value = json_to_value(json_val);
 
-    // Ensure intermediate parent maps exist for deep paths.
-    // InMemoryStore requires parents to be present, so we create
-    // empty maps for any missing ancestors.
-    // Skip this for ctx/mounts/* paths — MountStore handles those internally.
-    let is_mount_path = path.len() >= 3 && &path[0] == "ctx" && &path[1] == "mounts";
-
-    if !is_mount_path && path.len() > 1 {
-        for i in 1..path.len() {
-            let ancestor = path.slice(0, i);
-            match session.store.read(&ancestor) {
-                Ok(Some(_)) => {} // already exists
-                _ => {
-                    let empty_map = Record::from(Value::Map(BTreeMap::new()));
-                    if let Err(e) = session.store.write(&ancestor, empty_map) {
-                        return format!("Error: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
+    // No need to create missing ancestors first: the mounted MemoryStore
+    // creates intermediate maps on a deep write.
     let record = Record::from(value);
 
     match session.store.write(&path, record) {

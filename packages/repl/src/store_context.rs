@@ -4,105 +4,32 @@
 
 use collection_literals::btree;
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use structfs_core_store::{
-    mount_store::{MountConfig, MountStore, StoreFactory},
-    overlay_store::StoreBox,
-    Error as CoreError, NoCodec, Path, Reader, Record, Value, Writer,
+    mount_store::{MountStore, StoreFactory},
+    path, Error as CoreError, NoCodec, Path, Reader, Record, Value, Writer,
 };
 
-use structfs_serde_store::{json_to_value, value_to_json};
-
-// Import store implementations
 use crate::help_store::{HelpStore, HelpStoreHandle, HelpStoreState};
-use crate::recording_store::RecordingStore;
-use crate::repl_docs_store::ReplDocsStore;
-use structfs_http::{AsyncHttpBrokerStore, HttpBrokerStore};
-use structfs_json_store::{InMemoryStore, JsonlFileBacking, LogStore};
-use structfs_sys::SysStore;
+use crate::mounts::{CoreReplStoreFactory, DefaultMountKind, MountConfig, DEFAULT_MOUNTS};
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum ContextError {
     #[error("Store error: {0}")]
     Store(#[from] CoreError),
-
-    #[error("HTTP error: {0}")]
-    Http(#[from] structfs_http::Error),
 
     #[error("Invalid path: {0}")]
     InvalidPath(String),
 }
 
-/// Factory for creating stores from mount configurations.
+/// Session-local named values, mounted at `/ctx/registers`.
 ///
-/// This is the default factory used by StoreContext. It creates stores for
-/// all standard mount configurations (memory, HTTP, sys, help, etc.).
-pub struct CoreReplStoreFactory;
-
-impl StoreFactory for CoreReplStoreFactory {
-    fn create(&self, config: &MountConfig) -> Result<StoreBox, CoreError> {
-        match config {
-            MountConfig::Memory => Ok(Box::new(InMemoryStore::new())),
-            MountConfig::Local { path: _ } => {
-                // Local disk store not yet migrated to new architecture
-                Err(CoreError::store(
-                    "factory",
-                    "create",
-                    "Local disk store not yet available in new architecture",
-                ))
-            }
-            MountConfig::Http { url: _ } => {
-                // HTTP client not using direct mode in REPL context
-                Err(CoreError::store(
-                    "factory",
-                    "create",
-                    "HTTP client store not yet available in new architecture",
-                ))
-            }
-            MountConfig::HttpBroker => {
-                let store = HttpBrokerStore::with_default_timeout().map_err(|e| {
-                    CoreError::store(
-                        "factory",
-                        "create",
-                        format!("Failed to create HTTP broker: {}", e),
-                    )
-                })?;
-                Ok(Box::new(store))
-            }
-            MountConfig::AsyncHttpBroker => {
-                let store = AsyncHttpBrokerStore::with_default_timeout().map_err(|e| {
-                    CoreError::store(
-                        "factory",
-                        "create",
-                        format!("Failed to create async HTTP broker: {}", e),
-                    )
-                })?;
-                Ok(Box::new(store))
-            }
-            MountConfig::Structfs { url: _ } => Err(CoreError::store(
-                "factory",
-                "create",
-                "Remote StructFS not yet available in new architecture",
-            )),
-            MountConfig::Help => Ok(Box::new(HelpStore::new())),
-            MountConfig::Sys => Ok(Box::new(SysStore::new())),
-            MountConfig::Repl => Ok(Box::new(ReplDocsStore::new())),
-            MountConfig::Registers => Ok(Box::new(RegisterStore::new())),
-            MountConfig::Log { path } => Ok(Box::new(LogStore::open(JsonlFileBacking::new(path))?)),
-            MountConfig::Recording { path } => Ok(Box::new(RecordingStore::open(path)?)),
-            // MountConfig is #[non_exhaustive]; report unknown variants so the
-            // factory can be extended in lockstep with new variant additions.
-            _ => Err(CoreError::store(
-                "factory",
-                "create",
-                "unsupported MountConfig variant",
-            )),
-        }
-    }
-}
-
-/// Register store using Value instead of JsonValue (new architecture)
+/// Reading the root lists register names; `name/sub/path` reads into a
+/// register's value. Writing `name` replaces a register; writing
+/// `name/sub/path` sets that child inside the register's value (creating
+/// the register as a map, and intermediate maps, as needed).
 pub struct RegisterStore {
     registers: BTreeMap<String, Value>,
 }
@@ -154,22 +81,6 @@ impl RegisterStore {
             ]),
         })
     }
-
-    /// Navigate into a Value by path.
-    fn navigate<'a>(value: &'a Value, path: &Path) -> Option<&'a Value> {
-        let mut current = value;
-        for component in path.iter() {
-            current = match current {
-                Value::Map(map) => map.get(component)?,
-                Value::Array(arr) => {
-                    let index: usize = component.parse().ok()?;
-                    arr.get(index)?
-                }
-                _ => return None,
-            };
-        }
-        Some(current)
-    }
 }
 
 impl Default for RegisterStore {
@@ -203,65 +114,89 @@ impl Reader for RegisterStore {
             None => return Ok(None),
         };
 
-        let value = if sub_path.is_empty() {
-            register_value.clone()
-        } else {
-            match Self::navigate(register_value, &sub_path) {
-                Some(v) => v.clone(),
-                None => return Ok(None),
-            }
+        let value = match register_value.get(&sub_path) {
+            Some(v) => v.clone(),
+            None => return Ok(None),
         };
 
         Ok(Some(Record::parsed(value)))
+    }
+
+    /// The root's children are the register names (the root reads as an
+    /// array of them, whose default children would be indices).
+    fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, CoreError> {
+        if from.is_empty() {
+            return Ok(Some(self.registers.keys().cloned().collect()));
+        }
+        Ok(self
+            .read(from)?
+            .and_then(|record| record.into_value(&NoCodec).ok())
+            .map(|value| match value {
+                Value::Map(map) => map.into_keys().collect(),
+                Value::Array(items) => (0..items.len()).map(|i| i.to_string()).collect(),
+                _ => Vec::new(),
+            }))
     }
 }
 
 impl Writer for RegisterStore {
     fn write(&mut self, to: &Path, data: Record) -> Result<Path, CoreError> {
         if to.is_empty() {
-            return Err(CoreError::store(
-                "register",
-                "write",
+            return Err(CoreError::invalid_argument(
                 "Cannot write to register root. Use @name to specify a register.",
             ));
         }
 
         let value = data.into_value(&NoCodec)?;
         let register_name = &to[0];
+        let sub_path = to.slice(1, to.len());
 
-        // For simplicity, we only support writing to the register itself (not sub-paths)
-        // Full sub-path support could be added later
-        self.registers.insert(register_name.to_string(), value);
+        if sub_path.is_empty() {
+            self.registers.insert(register_name.to_string(), value);
+        } else {
+            let register = self
+                .registers
+                .entry(register_name.to_string())
+                .or_insert_with(Value::map);
+            register.set(&sub_path, value)?;
+        }
         Ok(to.clone())
     }
 }
 
-/// Store context using the new architecture.
+/// The REPL's view of the store tree: mounts, registers, and the current
+/// path.
 ///
 /// The context is generic over a `StoreFactory` implementation, allowing
 /// different factories to be used for testing or alternative configurations.
 /// By default, it uses `CoreReplStoreFactory` which creates all standard stores.
 ///
-/// Registers are now mounted at `/ctx/registers/` rather than embedded.
-/// Use `@name` syntax as sugar for `/ctx/registers/name`.
+/// Registers live in the store mounted at `/ctx/registers/`; `@name` is
+/// sugar for `/ctx/registers/name`.
 pub struct StoreContext<F: StoreFactory = CoreReplStoreFactory> {
     store: MountStore<F>,
     current_path: Path,
     /// Handle to HelpStore state for dynamic updates on mount/unmount
     help_state: Option<HelpStoreHandle>,
+    /// Problems met while setting up, for the caller to report.
+    warnings: Vec<String>,
 }
 
 impl StoreContext<CoreReplStoreFactory> {
-    /// Create a new context with the default factory and standard mounts.
+    /// Create a new context with the default factory and the
+    /// [`DEFAULT_MOUNTS`].
     ///
-    /// This creates a context with the following mounts:
-    /// - `/ctx/http` - Async HTTP broker (background execution)
-    /// - `/ctx/http_sync` - Sync HTTP broker (blocking execution)
-    /// - `/ctx/sys` - System utilities (time, env, proc, fs, random)
-    /// - `/ctx/help` - Help system
+    /// A default mount that fails to come up is skipped and recorded as a
+    /// warning; see [`take_warnings`](Self::take_warnings).
     pub fn new() -> Self {
         Self::with_factory_and_mounts(CoreReplStoreFactory, true)
     }
+}
+
+const REGISTERS: [&str; 2] = ["ctx", "registers"];
+
+fn registers_root() -> Path {
+    path!("ctx/registers")
 }
 
 /// Check if a path string refers to a register (starts with @)
@@ -276,242 +211,197 @@ pub fn parse_register_path(path_str: &str) -> Option<(String, Path)> {
     }
 
     let without_at = &path_str[1..];
-    if without_at.is_empty() {
-        return Some(("".to_string(), Path::parse("").unwrap()));
+    match without_at.split_once('/') {
+        Some((name, sub_path)) => Some((name.to_string(), Path::parse(sub_path).ok()?)),
+        None => Some((without_at.to_string(), path!(""))),
     }
+}
 
-    if let Some(slash_pos) = without_at.find('/') {
-        let name = &without_at[..slash_pos];
-        let sub_path_str = &without_at[slash_pos + 1..];
-        let sub_path = Path::parse(sub_path_str).ok()?;
-        Some((name.to_string(), sub_path))
-    } else {
-        Some((without_at.to_string(), Path::parse("").unwrap()))
+/// The store path a register reference (`@`, `@name`, `@name/sub`) names.
+pub fn register_store_path(path_str: &str) -> Result<Path, ContextError> {
+    let (name, sub_path) = parse_register_path(path_str)
+        .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
+    if name.is_empty() {
+        return Ok(registers_root());
+    }
+    let name_path = Path::parse(&name)
+        .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
+    Ok(registers_root().join(&name_path).join(&sub_path))
+}
+
+impl<F: StoreFactory<Config = MountConfig>> StoreContext<F> {
+    /// Create a context with a custom factory and optionally the
+    /// [`DEFAULT_MOUNTS`].
+    ///
+    /// If `mount_defaults` is false, the context starts with no mounts. A
+    /// default mount that fails is skipped and recorded as a warning.
+    pub fn with_factory_and_mounts(factory: F, mount_defaults: bool) -> Self {
+        let mut ctx = Self::with_factory(factory);
+        if !mount_defaults {
+            return ctx;
+        }
+
+        for mount in DEFAULT_MOUNTS {
+            let result = match mount.kind {
+                DefaultMountKind::Config(config) => ctx.store.mount(mount.name, config()),
+                DefaultMountKind::Help => {
+                    let state = Arc::new(RwLock::new(HelpStoreState::new()));
+                    ctx.help_state = Some(Arc::clone(&state));
+                    ctx.store
+                        .mount_store(mount.name, Box::new(HelpStore::with_shared_state(state)))
+                }
+            };
+            if let Err(e) = result {
+                ctx.warnings
+                    .push(format!("failed to mount /{}: {}", mount.name, e));
+            }
+        }
+        // The help store is mounted last, so index everything before it.
+        for mount in DEFAULT_MOUNTS {
+            ctx.index_mount(mount.name);
+        }
+        ctx
     }
 }
 
 impl<F: StoreFactory> StoreContext<F> {
-    /// Create a context with a custom factory and optionally mount defaults.
-    ///
-    /// If `mount_defaults` is true, the standard mounts (http, sys, help, repl) are added.
-    /// If false, the context starts with no mounts.
-    pub fn with_factory_and_mounts(factory: F, mount_defaults: bool) -> Self {
-        let mut store = MountStore::new(factory);
-        let mut help_state: Option<HelpStoreHandle> = None;
-
-        if mount_defaults {
-            // Mount stores with docs FIRST (they create redirects)
-            // Mount REPL docs store (REPL's own documentation)
-            if let Err(e) = store.mount("ctx/repl", MountConfig::Repl) {
-                eprintln!("Warning: Failed to mount REPL docs store: {}", e);
-            }
-
-            // Mount async HTTP broker (background execution)
-            if let Err(e) = store.mount("ctx/http", MountConfig::AsyncHttpBroker) {
-                eprintln!("Warning: Failed to mount async HTTP broker: {}", e);
-            }
-
-            // Mount sync HTTP broker (blocking execution)
-            if let Err(e) = store.mount("ctx/http_sync", MountConfig::HttpBroker) {
-                eprintln!("Warning: Failed to mount HTTP broker: {}", e);
-            }
-
-            // Mount sys store
-            if let Err(e) = store.mount("ctx/sys", MountConfig::Sys) {
-                eprintln!("Warning: Failed to mount sys store: {}", e);
-            }
-
-            // Mount register store (session-local named values)
-            if let Err(e) = store.mount("ctx/registers", MountConfig::Registers) {
-                eprintln!("Warning: Failed to mount register store: {}", e);
-            }
-
-            // Create shared state for HelpStore
-            let state = Arc::new(RwLock::new(HelpStoreState::new()));
-            help_state = Some(Arc::clone(&state));
-
-            // Populate from existing redirects
-            Self::populate_help_state(&mut store, &state);
-
-            // Create HelpStore with shared state and mount it
-            let help_store = HelpStore::with_shared_state(state);
-            if let Err(e) = store.mount_store("ctx/help", Box::new(help_store)) {
-                eprintln!("Warning: Failed to mount help store: {}", e);
-            }
-        }
-
-        Self {
-            store,
-            current_path: Path::parse("").unwrap(),
-            help_state,
-        }
-    }
-
-    /// Populate HelpStore state from existing redirects.
-    fn populate_help_state(store: &mut MountStore<F>, state: &HelpStoreHandle) {
-        use structfs_core_store::path;
-
-        let help_prefix = path!("ctx/help");
-        let mut state_guard = state.write().unwrap();
-
-        for (from, to, mode) in store.list_redirects() {
-            // Only process redirects under /ctx/help
-            if !from.has_prefix(&help_prefix) || from.len() <= 2 {
-                continue;
-            }
-
-            // Extract topic name: /ctx/help/ctx/sys -> "ctx/sys"
-            let topic = from.slice(2, from.len()).to_string();
-
-            // Try to read the docs manifest to get metadata for search
-            let manifest = store
-                .read(&to)
-                .ok()
-                .flatten()
-                .and_then(|record| record.into_value(&structfs_core_store::NoCodec).ok());
-
-            // Index the topic
-            state_guard.index_docs(&topic, manifest);
-
-            // Register redirect info for /ctx/help/meta
-            state_guard.register_redirect(&topic, &format!("/{}", from), &format!("/{}", to), mode);
-        }
-    }
-
-    /// Update HelpStore state after a mount/unmount operation.
-    fn refresh_help_state(&mut self) {
-        if let Some(ref state) = self.help_state {
-            use structfs_core_store::path;
-
-            let help_prefix = path!("ctx/help");
-            let mut state_guard = state.write().unwrap();
-
-            // Clear existing state
-            state_guard.index = crate::help_store::DocsIndex::new();
-            state_guard.redirects.clear();
-
-            // Repopulate from current redirects
-            for (from, to, mode) in self.store.list_redirects() {
-                if !from.has_prefix(&help_prefix) || from.len() <= 2 {
-                    continue;
-                }
-
-                let topic = from.slice(2, from.len()).to_string();
-                let manifest = self
-                    .store
-                    .read(&to)
-                    .ok()
-                    .flatten()
-                    .and_then(|record| record.into_value(&structfs_core_store::NoCodec).ok());
-
-                state_guard.index_docs(&topic, manifest);
-                state_guard.register_redirect(
-                    &topic,
-                    &format!("/{}", from),
-                    &format!("/{}", to),
-                    mode,
-                );
-            }
-        }
-    }
-
-    /// Create a minimal context with a custom factory and no default mounts.
+    /// Create a context with a custom factory and no mounts.
     ///
     /// This is useful for testing when you want full control over what stores
     /// are mounted.
     pub fn with_factory(factory: F) -> Self {
-        Self::with_factory_and_mounts(factory, false)
+        Self {
+            store: MountStore::new(factory),
+            current_path: path!(""),
+            help_state: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Take the warnings recorded since the last call (for example, default
+    /// mounts that failed to come up).
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Number of mounts, including ones made by writing `ctx/mounts/<name>`.
+    pub fn mount_count(&self) -> usize {
+        self.store.list_mounts().len()
+    }
+
+    /// The shared help state, if the help store is mounted. The state is
+    /// plain data updated one topic at a time, so a writer that panicked
+    /// mid-update cannot leave anything worth refusing over.
+    fn help_guard(&self) -> Option<std::sync::RwLockWriteGuard<'_, HelpStoreState>> {
+        self.help_state
+            .as_ref()
+            .map(|state| state.write().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Index one newly mounted store's docs as a help topic.
+    ///
+    /// Only the new mount's `docs` is read — the index is a cache, and other
+    /// mounts are never re-read. A store that serves no docs is no topic.
+    fn index_mount(&mut self, name: &str) {
+        if self.help_state.is_none() {
+            return;
+        }
+        let Ok(mount_path) = Path::parse(name) else {
+            return;
+        };
+        let from = path!("ctx/help").join(&mount_path);
+        let Some((from, to, mode)) = self
+            .store
+            .list_redirects()
+            .into_iter()
+            .find(|(redirect, _, _)| *redirect == from)
+        else {
+            return;
+        };
+        let Some(manifest) = self
+            .store
+            .read(&to)
+            .ok()
+            .flatten()
+            .and_then(|record| record.into_value(&NoCodec).ok())
+        else {
+            return;
+        };
+        // Topic name: /ctx/help/ctx/sys -> "ctx/sys"
+        let topic = mount_path.to_string();
+        if let Some(mut guard) = self.help_guard() {
+            guard.index_docs(&topic, Some(manifest));
+            guard.register_redirect(&topic, &format!("/{from}"), &format!("/{to}"), mode);
+        }
+    }
+
+    /// Drop an unmounted store's help topic.
+    fn unindex_mount(&mut self, name: &str) {
+        let Ok(mount_path) = Path::parse(name) else {
+            return;
+        };
+        if let Some(mut guard) = self.help_guard() {
+            guard.unindex_docs(&mount_path.to_string());
+        }
     }
 
     /// Mount a store at a path.
     ///
-    /// This allows tests to add specific stores as needed.
-    /// After mounting, the help index is refreshed to include any new docs.
-    pub fn mount(&mut self, path: &str, config: MountConfig) -> Result<(), ContextError> {
+    /// After mounting, the new store's docs (if any) join the help index.
+    pub fn mount(&mut self, path: &str, config: F::Config) -> Result<(), ContextError> {
         self.store.mount(path, config)?;
-        self.refresh_help_state();
+        self.index_mount(path);
         Ok(())
     }
 
-    /// Unmount a store at a path.
-    ///
-    /// After unmounting, the help index is refreshed to remove the store's docs.
+    /// Unmount a store at a path, removing its help topic.
     pub fn unmount(&mut self, path: &str) -> Result<(), ContextError> {
         self.store.unmount(path)?;
-        self.refresh_help_state();
+        self.unindex_mount(path);
         Ok(())
     }
 
-    /// Read from a register path.
+    /// Read from a register path (`@`, `@name`, `@name/sub/path`).
     ///
     /// Reads from the mounted RegisterStore at `/ctx/registers/`.
     pub fn read_register(&mut self, path_str: &str) -> Result<Option<Value>, ContextError> {
-        let (name, sub_path) = parse_register_path(path_str)
-            .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
-
-        // Build path under /ctx/registers/
-        let register_path = if name.is_empty() {
-            Path::parse("ctx/registers").unwrap()
-        } else {
-            let name_path = Path::parse(&name)
-                .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
-            Path::parse("ctx/registers")
-                .unwrap()
-                .join(&name_path)
-                .join(&sub_path)
-        };
-
+        let register_path = register_store_path(path_str)?;
         self.read(&register_path)
     }
 
-    /// Write to a register path.
+    /// Write to a register path. `@name` replaces the register;
+    /// `@name/sub/path` sets a child inside its value.
     ///
     /// Writes to the mounted RegisterStore at `/ctx/registers/`.
     pub fn write_register(&mut self, path_str: &str, value: Value) -> Result<Path, ContextError> {
-        let (name, sub_path) = parse_register_path(path_str)
-            .ok_or_else(|| ContextError::InvalidPath("Invalid register path".to_string()))?;
-
-        if name.is_empty() {
+        let register_path = register_store_path(path_str)?;
+        if register_path.len() == REGISTERS.len() {
             return Err(ContextError::InvalidPath(
                 "Cannot write to register root. Use @name to specify a register.".to_string(),
             ));
         }
-
-        let name_path = Path::parse(&name)
-            .map_err(|e| ContextError::InvalidPath(format!("Invalid register name: {}", e)))?;
-        let register_path = Path::parse("ctx/registers")
-            .unwrap()
-            .join(&name_path)
-            .join(&sub_path);
         self.write(&register_path, value)
     }
 
     /// Store a value directly in a register by name.
     ///
     /// Convenience method that writes to `/ctx/registers/{name}`.
-    pub fn set_register(&mut self, name: &str, value: Value) {
-        let path = Path::parse(&format!("ctx/registers/{}", name)).unwrap();
-        let _ = self.store.write(&path, Record::parsed(value));
+    pub fn set_register(&mut self, name: &str, value: Value) -> Result<(), ContextError> {
+        self.write_register(&format!("@{name}"), value).map(|_| ())
     }
 
     /// Get a value from a register by name.
     ///
     /// Convenience method that reads from `/ctx/registers/{name}`.
-    pub fn get_register(&mut self, name: &str) -> Option<Value> {
-        let path = Path::parse(&format!("ctx/registers/{}", name)).unwrap();
-        self.store
-            .read(&path)
-            .ok()
-            .flatten()
-            .and_then(|r| r.into_value(&NoCodec).ok())
+    pub fn get_register(&mut self, name: &str) -> Result<Option<Value>, ContextError> {
+        self.read_register(&format!("@{name}"))
     }
 
     /// List all register names.
     ///
     /// Reads from `/ctx/registers/` which returns an array of names.
     pub fn list_registers(&mut self) -> Vec<String> {
-        let path = Path::parse("ctx/registers").unwrap();
-        match self.store.read(&path) {
+        match self.store.read(&registers_root()) {
             Ok(Some(record)) => match record.into_value(&NoCodec) {
                 Ok(Value::Array(arr)) => arr
                     .into_iter()
@@ -543,7 +433,7 @@ impl<F: StoreFactory> StoreContext<F> {
         }
 
         if path_str == "/" {
-            return Ok(Path::parse("").unwrap());
+            return Ok(path!(""));
         }
 
         if let Some(stripped) = path_str.strip_prefix('/') {
@@ -583,27 +473,51 @@ impl<F: StoreFactory> StoreContext<F> {
         }
     }
 
-    /// Write Value to a path
+    /// Write Value to a path.
+    ///
+    /// Writes to `ctx/mounts/<name>` mount or unmount a store, so they also
+    /// add or drop its help topic.
     pub fn write(&mut self, path: &Path, value: Value) -> Result<Path, ContextError> {
-        Ok(self.store.write(path, Record::parsed(value))?)
-    }
-
-    /// Read and convert to JsonValue for display compatibility
-    pub fn read_as_json(&mut self, path: &Path) -> Result<Option<serde_json::Value>, ContextError> {
-        match self.read(path)? {
-            Some(value) => Ok(Some(value_to_json(value)?)),
-            None => Ok(None),
+        let unmounting = value.is_null();
+        let written = self.store.write(path, Record::parsed(value))?;
+        if path.len() > 2 && path.has_prefix(&path!("ctx/mounts")) {
+            let name = path.slice(2, path.len()).to_string();
+            if unmounting {
+                self.unindex_mount(&name);
+            } else {
+                self.index_mount(&name);
+            }
         }
+        Ok(written)
     }
 
-    /// Write JsonValue (converts to Value internally)
-    pub fn write_json(
-        &mut self,
-        path: &Path,
-        json: &serde_json::Value,
-    ) -> Result<Path, ContextError> {
-        let value = json_to_value(json.clone());
-        self.write(path, value)
+    /// The child names at a path.
+    ///
+    /// Paths between mounts (`/`, `/ctx`) are not routed to any store; there
+    /// the children are the next components of the mount names.
+    pub fn read_children(&mut self, path: &Path) -> Result<Option<Vec<String>>, ContextError> {
+        match self.store.read_children(path) {
+            Err(CoreError::NoRoute { .. }) => {
+                let mut names: Vec<String> = self
+                    .store
+                    .list_mounts()
+                    .into_iter()
+                    .filter_map(|(name, _)| Path::parse(&name).ok())
+                    .chain(std::iter::once(path!("ctx/mounts")))
+                    .filter(|mount| mount.len() > path.len() && mount.has_prefix(path))
+                    .map(|mount| mount[path.len()].to_string())
+                    .collect();
+                names.sort();
+                names.dedup();
+                if names.is_empty() {
+                    // Nothing mounted below either: report the routing error.
+                    Ok(self.store.read_children(path)?)
+                } else {
+                    Ok(Some(names))
+                }
+            }
+            other => Ok(other?),
+        }
     }
 }
 
@@ -772,18 +686,227 @@ mod tests {
     #[test]
     fn test_register_write_read() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("foo", Value::String("bar".to_string()));
-        let value = ctx.get_register("foo").unwrap();
+        ctx.set_register("foo", Value::String("bar".to_string()))
+            .unwrap();
+        let value = ctx.get_register("foo").unwrap().unwrap();
         assert_eq!(value, Value::String("bar".to_string()));
     }
 
     #[test]
     fn test_register_list() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("a", Value::Integer(1));
-        ctx.set_register("b", Value::Integer(2));
+        ctx.set_register("a", Value::Integer(1)).unwrap();
+        ctx.set_register("b", Value::Integer(2)).unwrap();
         let list = ctx.list_registers();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn set_register_reports_failures() {
+        // Without a register store mounted the write has nowhere to go.
+        let mut ctx = StoreContext::with_factory(CoreReplStoreFactory);
+        assert!(ctx.set_register("a", Value::Integer(1)).is_err());
+        assert!(ctx.get_register("a").is_err());
+        let mut ctx = StoreContext::new();
+        assert!(ctx.set_register("", Value::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn nested_register_write_sets_a_child() {
+        let mut ctx = StoreContext::new();
+        ctx.write_register(
+            "@foo",
+            Value::Map(btree! {"keep".into() => Value::Integer(1)}),
+        )
+        .unwrap();
+        ctx.write_register("@foo/bar", Value::Integer(2)).unwrap();
+        assert_eq!(
+            ctx.get_register("foo").unwrap(),
+            Some(Value::Map(btree! {
+                "keep".into() => Value::Integer(1),
+                "bar".into() => Value::Integer(2),
+            }))
+        );
+        // A missing register is created as a map.
+        ctx.write_register("@fresh/a/b", Value::Bool(true)).unwrap();
+        assert_eq!(
+            ctx.read_register("@fresh/a/b").unwrap(),
+            Some(Value::Bool(true))
+        );
+        // Setting a child of a scalar is an error, and leaves it intact.
+        ctx.write_register("@n", Value::Integer(7)).unwrap();
+        let err = ctx.write_register("@n/x", Value::Integer(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            ContextError::Store(CoreError::InvalidArgument { .. })
+        ));
+        assert_eq!(ctx.get_register("n").unwrap(), Some(Value::Integer(7)));
+    }
+
+    #[test]
+    fn default_context_has_no_warnings_and_counts_its_mounts() {
+        let mut ctx = StoreContext::new();
+        assert!(ctx.take_warnings().is_empty());
+        assert_eq!(ctx.mount_count(), DEFAULT_MOUNTS.len());
+        ctx.mount("extra", MountConfig::Memory).unwrap();
+        assert_eq!(ctx.mount_count(), DEFAULT_MOUNTS.len() + 1);
+        ctx.write(
+            &path!("ctx/mounts/other"),
+            MountConfig::Memory.to_value().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ctx.mount_count(), DEFAULT_MOUNTS.len() + 2);
+        ctx.unmount("extra").unwrap();
+        assert_eq!(ctx.mount_count(), DEFAULT_MOUNTS.len() + 1);
+    }
+
+    #[test]
+    fn failed_default_mount_is_a_warning_not_a_print() {
+        struct NoSys;
+        impl StoreFactory for NoSys {
+            type Config = MountConfig;
+            fn create(
+                &self,
+                config: &MountConfig,
+            ) -> Result<structfs_core_store::overlay_store::StoreBox, CoreError> {
+                if *config == MountConfig::Sys {
+                    return Err(CoreError::invalid_argument("no sys here"));
+                }
+                CoreReplStoreFactory.create(config)
+            }
+            fn config_from_value(&self, value: Value) -> Result<MountConfig, CoreError> {
+                MountConfig::from_value(value)
+            }
+            fn config_to_value(&self, config: &MountConfig) -> Result<Value, CoreError> {
+                config.to_value()
+            }
+        }
+        let mut ctx = StoreContext::with_factory_and_mounts(NoSys, true);
+        let warnings = ctx.take_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("/ctx/sys") && warnings[0].contains("no sys here"));
+        assert!(ctx.take_warnings().is_empty());
+        assert_eq!(ctx.mount_count(), DEFAULT_MOUNTS.len() - 1);
+    }
+
+    #[test]
+    fn mount_changes_read_only_the_changed_mounts_docs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A store whose `docs` reads are counted.
+        struct Documented(Arc<AtomicUsize>);
+        impl Reader for Documented {
+            fn read(&mut self, from: &Path) -> Result<Option<Record>, CoreError> {
+                if from.len() == 1 && &from[0] == "docs" {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    return Ok(Some(Record::parsed(Value::Map(btree! {
+                        "title".into() => Value::from("Counted"),
+                    }))));
+                }
+                Ok(None)
+            }
+        }
+        impl Writer for Documented {
+            fn write(&mut self, to: &Path, _: Record) -> Result<Path, CoreError> {
+                Ok(to.clone())
+            }
+        }
+        /// Memory mounts become counted stores sharing one counter.
+        struct Counting(Arc<AtomicUsize>);
+        impl StoreFactory for Counting {
+            type Config = MountConfig;
+            fn create(
+                &self,
+                config: &MountConfig,
+            ) -> Result<structfs_core_store::overlay_store::StoreBox, CoreError> {
+                match config {
+                    MountConfig::Memory => Ok(Box::new(Documented(Arc::clone(&self.0)))),
+                    other => CoreReplStoreFactory.create(other),
+                }
+            }
+            fn config_from_value(&self, value: Value) -> Result<MountConfig, CoreError> {
+                MountConfig::from_value(value)
+            }
+            fn config_to_value(&self, config: &MountConfig) -> Result<Value, CoreError> {
+                config.to_value()
+            }
+        }
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut ctx = StoreContext::with_factory_and_mounts(Counting(Arc::clone(&reads)), true);
+        ctx.mount("a", MountConfig::Memory).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        // Mounting and unmounting others never re-reads `a`.
+        ctx.mount("b", MountConfig::Memory).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        ctx.write(&path!("ctx/mounts/c"), MountConfig::Sys.to_value().unwrap())
+            .unwrap();
+        ctx.unmount("b").unwrap();
+        ctx.write(&path!("ctx/mounts/c"), Value::Null).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+
+        let topics = ctx.read(&path!("ctx/help")).unwrap().unwrap();
+        let Value::Array(topics) = topics else {
+            panic!("topic list")
+        };
+        assert!(topics.contains(&Value::from("a")));
+        assert!(!topics.contains(&Value::from("b")));
+        assert!(!topics.contains(&Value::from("c")));
+        assert!(topics.contains(&Value::from("ctx/sys")));
+    }
+
+    #[test]
+    fn mounting_by_write_updates_help_topics() {
+        let mut ctx = StoreContext::new();
+        ctx.write(&path!("ctx/mounts/ctx/sys"), Value::Null)
+            .unwrap();
+        let topics = ctx.read(&path!("ctx/help")).unwrap().unwrap();
+        assert!(!matches!(&topics, Value::Array(a) if a.contains(&Value::from("ctx/sys"))));
+        ctx.write(
+            &path!("ctx/mounts/ctx/sys"),
+            MountConfig::Sys.to_value().unwrap(),
+        )
+        .unwrap();
+        let topics = ctx.read(&path!("ctx/help")).unwrap().unwrap();
+        assert!(
+            matches!(&topics, Value::Array(a) if a.contains(&Value::from("ctx/sys"))),
+            "{topics:?}"
+        );
+    }
+
+    #[test]
+    fn read_children_lists_between_mounts() {
+        let mut ctx = StoreContext::new();
+        assert_eq!(
+            ctx.read_children(&path!("")).unwrap(),
+            Some(vec!["ctx".to_string()])
+        );
+        let ctx_children = ctx.read_children(&path!("ctx")).unwrap().unwrap();
+        for name in [
+            "help",
+            "http",
+            "http_sync",
+            "mounts",
+            "registers",
+            "repl",
+            "sys",
+        ] {
+            assert!(ctx_children.contains(&name.to_string()), "{ctx_children:?}");
+        }
+        // Inside a mount, the store answers.
+        ctx.mount("data", MountConfig::Memory).unwrap();
+        ctx.write(&path!("data/a/x"), Value::Integer(1)).unwrap();
+        ctx.write(&path!("data/b"), Value::Integer(2)).unwrap();
+        assert_eq!(
+            ctx.read_children(&path!("data")).unwrap(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(ctx.read_children(&path!("data/zzz")).unwrap(), None);
+        // Nowhere near a mount is still a routing error.
+        assert!(matches!(
+            ctx.read_children(&path!("nowhere")),
+            Err(ContextError::Store(CoreError::NoRoute { .. }))
+        ));
     }
 
     #[test]
@@ -824,7 +947,7 @@ mod tests {
     #[test]
     fn test_resolve_relative_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo").unwrap());
+        ctx.set_current_path(path!("foo"));
         let path = ctx.resolve_path("bar").unwrap();
         assert_eq!(path.to_string(), "foo/bar");
     }
@@ -832,7 +955,7 @@ mod tests {
     #[test]
     fn test_resolve_empty_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo").unwrap());
+        ctx.set_current_path(path!("foo"));
         let path = ctx.resolve_path("").unwrap();
         assert_eq!(path.to_string(), "foo");
     }
@@ -840,7 +963,7 @@ mod tests {
     #[test]
     fn test_resolve_dot_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo").unwrap());
+        ctx.set_current_path(path!("foo"));
         let path = ctx.resolve_path(".").unwrap();
         assert_eq!(path.to_string(), "foo");
     }
@@ -848,7 +971,7 @@ mod tests {
     #[test]
     fn test_resolve_root_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        ctx.set_current_path(path!("foo/bar"));
         let path = ctx.resolve_path("/").unwrap();
         assert_eq!(path.to_string(), "");
     }
@@ -856,7 +979,7 @@ mod tests {
     #[test]
     fn test_resolve_parent_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        ctx.set_current_path(path!("foo/bar"));
         let path = ctx.resolve_path("..").unwrap();
         assert_eq!(path.to_string(), "foo");
     }
@@ -864,7 +987,7 @@ mod tests {
     #[test]
     fn test_resolve_parent_relative_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo/bar/baz").unwrap());
+        ctx.set_current_path(path!("foo/bar/baz"));
         let path = ctx.resolve_path("../qux").unwrap();
         assert_eq!(path.to_string(), "foo/bar/qux");
     }
@@ -872,7 +995,7 @@ mod tests {
     #[test]
     fn test_resolve_multiple_parent_path() {
         let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("a/b/c/d").unwrap());
+        ctx.set_current_path(path!("a/b/c/d"));
         let path = ctx.resolve_path("../../x").unwrap();
         assert_eq!(path.to_string(), "a/b/x");
     }
@@ -881,7 +1004,7 @@ mod tests {
     fn test_current_path() {
         let mut ctx = StoreContext::new();
         assert_eq!(ctx.current_path().to_string(), "");
-        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        ctx.set_current_path(path!("foo/bar"));
         assert_eq!(ctx.current_path().to_string(), "foo/bar");
     }
 
@@ -923,7 +1046,7 @@ mod tests {
     #[test]
     fn test_read_register() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("test", Value::Integer(42));
+        ctx.set_register("test", Value::Integer(42)).unwrap();
         let value = ctx.read_register("@test").unwrap().unwrap();
         assert_eq!(value, Value::Integer(42));
     }
@@ -938,7 +1061,7 @@ mod tests {
     #[test]
     fn test_read_register_root() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("a", Value::Integer(1));
+        ctx.set_register("a", Value::Integer(1)).unwrap();
         let value = ctx.read_register("@").unwrap().unwrap();
         match value {
             Value::Array(arr) => assert_eq!(arr.len(), 1),
@@ -955,7 +1078,7 @@ mod tests {
         // Path returned includes ctx/registers/ prefix now
         assert!(path.to_string().contains("myvar"));
         assert_eq!(
-            ctx.get_register("myvar"),
+            ctx.get_register("myvar").unwrap(),
             Some(Value::String("value".to_string()))
         );
     }
@@ -1167,36 +1290,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_as_json() {
-        let mut ctx = StoreContext::new();
-        let json = ctx
-            .read_as_json(&path!("ctx/sys/time/now_unix"))
-            .unwrap()
-            .unwrap();
-        assert!(json.is_number());
-    }
-
-    #[test]
-    fn test_read_as_json_not_found() {
-        let mut ctx = StoreContext::new();
-        // Use a path under a valid mount but that doesn't exist
-        let json = ctx
-            .read_as_json(&path!("ctx/sys/env/NONEXISTENT_ENV_VAR_12345"))
-            .unwrap();
-        assert!(json.is_none());
-    }
-
-    #[test]
-    fn test_write_json() {
-        let mut ctx = StoreContext::new();
-        ctx.mount("test", MountConfig::Memory).unwrap();
-        let json = serde_json::json!({"key": "value"});
-        ctx.write_json(&path!("test/data"), &json).unwrap();
-        let result = ctx.read_as_json(&path!("test/data")).unwrap().unwrap();
-        assert_eq!(result, json);
-    }
-
-    #[test]
     fn test_with_factory_no_mounts() {
         let ctx = StoreContext::with_factory(CoreReplStoreFactory);
         // Should not have default mounts
@@ -1234,55 +1327,36 @@ mod tests {
         assert!(err.to_string().contains("test error"));
     }
 
-    // Factory error path tests
     #[test]
-    fn factory_local_not_available() {
-        let factory = CoreReplStoreFactory;
-        let result = factory.create(&MountConfig::Local {
-            path: "/tmp".to_string(),
+    fn local_and_http_mount_through_the_mount_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.json");
+        let mut ctx = StoreContext::new();
+        let local = Value::Map(btree! {
+            "type".to_string() => Value::from("local"),
+            "path".to_string() => Value::from(file.to_string_lossy().into_owned()),
         });
-        match result {
-            Err(e) => assert!(e.to_string().contains("not yet available")),
-            Ok(_) => panic!("Expected error for Local config"),
-        }
-    }
+        ctx.write(&path!("ctx/mounts/disk"), local.clone()).unwrap();
+        ctx.write(&path!("disk/greeting"), Value::from("hi"))
+            .unwrap();
+        assert!(file.exists());
+        assert_eq!(ctx.read(&path!("ctx/mounts/disk")).unwrap(), Some(local));
 
-    #[test]
-    fn factory_http_not_available() {
-        let factory = CoreReplStoreFactory;
-        let result = factory.create(&MountConfig::Http {
-            url: "https://example.com".to_string(),
+        let http = Value::Map(btree! {
+            "type".to_string() => Value::from("http"),
+            "url".to_string() => Value::from("https://api.example.com"),
         });
-        match result {
-            Err(e) => assert!(e.to_string().contains("not yet available")),
-            Ok(_) => panic!("Expected error for Http config"),
-        }
-    }
+        ctx.write(&path!("ctx/mounts/api"), http.clone()).unwrap();
+        assert_eq!(ctx.read(&path!("ctx/mounts/api")).unwrap(), Some(http));
 
-    #[test]
-    fn factory_structfs_not_available() {
-        let factory = CoreReplStoreFactory;
-        let result = factory.create(&MountConfig::Structfs {
-            url: "https://example.com".to_string(),
+        let remote = Value::Map(btree! {
+            "type".to_string() => Value::from("structfs"),
+            "url".to_string() => Value::from("https://fs.example.com"),
         });
-        match result {
-            Err(e) => assert!(e.to_string().contains("not yet available")),
-            Ok(_) => panic!("Expected error for Structfs config"),
-        }
-    }
-
-    #[test]
-    fn factory_creates_memory_store() {
-        let factory = CoreReplStoreFactory;
-        let result = factory.create(&MountConfig::Memory);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn factory_creates_registers_store() {
-        let factory = CoreReplStoreFactory;
-        let result = factory.create(&MountConfig::Registers);
-        assert!(result.is_ok());
+        assert!(matches!(
+            ctx.write(&path!("ctx/mounts/remote"), remote),
+            Err(ContextError::Store(CoreError::InvalidArgument { .. }))
+        ));
     }
 
     #[test]

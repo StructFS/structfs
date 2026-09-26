@@ -20,6 +20,15 @@ const code = guest.run();
 if (code !== 0) {
   throw new Error(`the probe failed its expectation #${code} on a live run`);
 }
-const out = new URL("./fixtures/js-recorded.jsonl", import.meta.url);
-await writeFile(out, recording.jsonl());
-console.log(`recorded ${recording.entries.length} entries to ${out.pathname}`);
+// Written beside this host's tests and, byte-identically, beside the
+// native runtime's (the release gate compares the two directories).
+for (const out of [
+  new URL("./fixtures/js-recorded.jsonl", import.meta.url),
+  new URL(
+    "../../../runtime/tests/fixtures/js-recorded.jsonl",
+    import.meta.url,
+  ),
+]) {
+  await writeFile(out, recording.jsonl());
+  console.log(`recorded ${recording.entries.length} entries to ${out.pathname}`);
+}

@@ -10,7 +10,12 @@ use std::{
 use structfs_core_store::{Error, Path, Record, Value};
 
 /// Limits on outstanding calls, shared across runtimes when desired.
+///
+/// `#[non_exhaustive]`: start from [`CallLimits::default`] and narrow it with
+/// the `with_*` setters rather than struct-update syntax, so a new ceiling in
+/// a later release does not break your build.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CallLimits {
     pub calls: usize,
     pub bytes: usize,
@@ -27,13 +32,42 @@ impl Default for CallLimits {
         }
     }
 }
+impl CallLimits {
+    /// Total outstanding calls across every block.
+    pub fn with_calls(mut self, calls: usize) -> Self {
+        self.calls = calls;
+        self
+    }
+    /// Total outstanding payload bytes across every block.
+    pub fn with_bytes(mut self, bytes: usize) -> Self {
+        self.bytes = bytes;
+        self
+    }
+    /// Outstanding calls chargeable to any one block.
+    pub fn with_calls_per_block(mut self, calls: usize) -> Self {
+        self.calls_per_block = calls;
+        self
+    }
+    /// Outstanding payload bytes chargeable to any one block.
+    pub fn with_bytes_per_block(mut self, bytes: usize) -> Self {
+        self.bytes_per_block = bytes;
+        self
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CallUsage {
     pub calls: usize,
     pub bytes: usize,
 }
+impl CallUsage {
+    pub fn new(calls: usize, bytes: usize) -> Self {
+        Self { calls, bytes }
+    }
+}
 /// Cumulative admission measurements. Bytes are logical payload weight, not RSS.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CallMetrics {
     pub admitted: u64,
     pub rejected: u64,
@@ -43,6 +77,7 @@ pub struct CallMetrics {
 }
 /// An atomic view of this budget, not an aggregate snapshot of its ancestors.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CallBudgetSnapshot {
     pub revision: u64,
     pub limits: CallLimits,
@@ -63,11 +98,17 @@ pub struct CallBudget<I: Clone + Eq + Hash + Send + Sync + 'static = String> {
     usage: Mutex<Usage<I>>,
 }
 impl<I: Clone + Eq + Hash + Send + Sync + 'static> CallBudget<I> {
-    pub fn new(limits: CallLimits) -> Arc<Self> {
+    /// Wrap the result in `Arc` — or call [`CallBudget::shared`] — to acquire
+    /// against it.
+    pub fn new(limits: CallLimits) -> Self {
         Self::build(limits, None)
     }
-    fn build(limits: CallLimits, parent: Option<Arc<Self>>) -> Arc<Self> {
-        Arc::new(Self {
+    /// [`CallBudget::new`], already shared.
+    pub fn shared(limits: CallLimits) -> Arc<Self> {
+        Arc::new(Self::new(limits))
+    }
+    fn build(limits: CallLimits, parent: Option<Arc<Self>>) -> Self {
+        Self {
             parent,
             usage: Mutex::new(Usage {
                 limits,
@@ -76,12 +117,12 @@ impl<I: Clone + Eq + Hash + Send + Sync + 'static> CallBudget<I> {
                 total: CallUsage::default(),
                 blocks: HashMap::new(),
             }),
-        })
+        }
     }
     /// Create a request or tenant budget that also charges this budget and
     /// every ancestor. Retain the returned handle to update or inspect it.
     pub fn child(self: &Arc<Self>, limits: CallLimits) -> Arc<Self> {
-        Self::build(limits, Some(self.clone()))
+        Arc::new(Self::build(limits, Some(self.clone())))
     }
     /// Atomically replace admission policy without forgetting live charges.
     /// Existing calls are grandfathered; new calls must fit the new limits.
@@ -169,7 +210,9 @@ impl<I: Clone + Eq + Hash + Send + Sync + 'static> CallBudget<I> {
                     .saturating_add(bytes.len()),
             ),
             None => self.acquire(key, path, &Value::Null),
-            _ => Err(Error::store("admission", "acquire", "unsupported record")),
+            _ => Err(Error::invalid_argument(
+                "admission cannot weigh this record kind",
+            )),
         }
     }
     pub fn acquire_bytes(self: &Arc<Self>, block: &I, bytes: usize) -> Result<Lease, Error> {
@@ -188,7 +231,7 @@ impl<I: Clone + Eq + Hash + Send + Sync + 'static> CallBudget<I> {
         // immutable and acyclic. A parent rejection leaves this child uncharged.
         let parent = match &self.parent {
             Some(parent) => match parent.acquire_bytes(block, bytes) {
-                Ok(charge) => Some(Box::new(charge)),
+                Ok(charge) => Some(charge),
                 Err(error) => {
                     usage.metrics.rejected = usage.metrics.rejected.saturating_add(1);
                     return Err(error);
@@ -217,7 +260,9 @@ struct CallCharge<I: Clone + Eq + Hash + Send + Sync + 'static> {
     budget: Arc<CallBudget<I>>,
     block: I,
     bytes: usize,
-    _parent: Option<Box<Lease>>,
+    /// A `Lease` is already `Arc`-backed; boxing it would add a second
+    /// indirection for nothing.
+    _parent: Option<Lease>,
 }
 impl<I: Clone + Eq + Hash + Send + Sync + 'static> Drop for CallCharge<I> {
     fn drop(&mut self) {

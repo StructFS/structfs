@@ -14,9 +14,6 @@ categories = ["data-structures"]
 structfs-core-store = { workspace = true }
 structfs-serde-store = { workspace = true }
 
-serde = { workspace = true }
-serde_json = { workspace = true }
-
 tempfile = { workspace = true }
 
 [dev-dependencies]

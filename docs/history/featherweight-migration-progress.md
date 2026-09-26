@@ -1,7 +1,7 @@
 # Featherweight embedding migration progress
 
 Updated 2026-09-10. Implements part of the StructFS work described in
-[Appiware's migration plan](../../appiware/docs/featherweight_migration.md).
+[Appiware's migration plan](../../../appiware/docs/featherweight_migration.md).
 A native Appiware echo listener now embeds the runtime; the existing Python/control-plane serving path has not switched.
 
 ## Implemented in the working tree
@@ -90,7 +90,7 @@ all block slots up front, including lazy dependencies; `in_session` binds
 prepared code to those slots. A gateway/worker test proves the lazy dependency
 can start when no unreserved capacity remains.
 
-The [Appiware native listener](../../appiware/daemon/native/README.md) uses
+The [Appiware native listener](../../../appiware/daemon/native/README.md) uses
 these APIs with a generated, SHA-256-pinned in-tree source snapshot and Cargo/
 Bazel locks. Both repositories now use Wasmtime 48.0.1 for this path. A separate
 SDK feature lets rebuilt applications use the native guest SDK without linking

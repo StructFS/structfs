@@ -1,18 +1,23 @@
-//! REPL command parsing and execution using new architecture.
+//! REPL command parsing and execution.
 //!
-//! This module mirrors commands.rs but uses the new core-store architecture
-//! with Value instead of JsonValue internally.
+//! Commands are named in [`crate::command_table::COMMANDS`]; this module
+//! dispatches them against a [`StoreContext`].
 
-use nu_ansi_term::{Color, Style};
+use nu_ansi_term::Color;
 use serde_json::Value as JsonValue;
 
-use structfs_core_store::{Path, Value};
+use structfs_core_store::{path, Path, Value};
 use structfs_serde_store::{json_to_value, value_to_json};
 
-use crate::store_context::{is_register_path, StoreContext};
+use crate::command_table;
+use crate::help_format::{format_help_root, format_help_value_with_path};
+use crate::store_context::{is_register_path, register_store_path, StoreContext};
+
+pub use crate::help_format::format_help;
 
 /// Result of executing a command
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CommandResult {
     /// Command succeeded, optionally with output to display and a value to capture
     Ok {
@@ -84,16 +89,9 @@ fn parse_register_capture(input: &str) -> Option<(String, &str)> {
     }
 
     let first_word = remaining.split_whitespace().next()?;
-    let is_command = matches!(
-        first_word.to_lowercase().as_str(),
-        "read" | "get" | "r" | "write" | "set" | "w" | "cd" | "pwd" | "mounts" | "ls"
-    );
-
-    if is_command {
-        Some((register_name.to_string(), remaining))
-    } else {
-        None
-    }
+    command_table::lookup(first_word)
+        .filter(|command| command.capturable)
+        .map(|_| (register_name.to_string(), remaining))
 }
 
 fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext) -> CommandResult {
@@ -113,7 +111,9 @@ fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext
                 (Value::Null, false)
             };
 
-            ctx.set_register(register_name, value.clone());
+            if let Err(e) = ctx.set_register(register_name, value.clone()) {
+                return CommandResult::Error(format!("Failed to store @{}: {}", register_name, e));
+            }
 
             let type_hint = if matches!(value, Value::Null) {
                 Some("(null)")
@@ -144,7 +144,7 @@ fn execute_with_capture(register_name: &str, input: &str, ctx: &mut StoreContext
     }
 }
 
-fn strip_ansi_codes(s: &str) -> String {
+pub(crate) fn strip_ansi_codes(s: &str) -> String {
     let mut result = String::new();
     let mut chars = s.chars().peekable();
 
@@ -215,108 +215,100 @@ fn execute_command(input: &str, ctx: &mut StoreContext) -> CommandResult {
     let command = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("").trim();
 
-    match command.to_lowercase().as_str() {
-        "help" | "?" => cmd_help(args, ctx),
-        "exit" | "quit" | "q" => CommandResult::Exit,
-        "read" | "get" | "r" => cmd_read(args, ctx),
-        "write" | "set" | "w" => cmd_write(args, ctx),
-        "cd" => cmd_cd(args, ctx),
-        "pwd" => cmd_pwd(ctx),
-        "registers" | "regs" => cmd_registers(ctx),
-        _ => CommandResult::Error(format!(
+    let Some(spec) = command_table::lookup(command) else {
+        return CommandResult::Error(format!(
             "Unknown command: '{}'. Type 'help' for available commands.",
             command
-        )),
+        ));
+    };
+    match spec.name {
+        "help" => cmd_help(args, ctx),
+        "exit" => CommandResult::Exit,
+        "read" => cmd_read(args, ctx),
+        "write" => cmd_write(args, ctx),
+        "ls" => cmd_ls(args, ctx),
+        "cd" => cmd_cd(args, ctx),
+        "pwd" => cmd_pwd(ctx),
+        "mounts" => cmd_mounts(ctx),
+        "registers" => cmd_registers(ctx),
+        other => CommandResult::Error(format!("command '{other}' is not dispatched")),
     }
 }
 
-/// Format help text
-pub fn format_help() -> String {
-    let cmd_style = Style::new().bold().fg(Color::Cyan);
-    let arg_style = Style::new().fg(Color::Yellow);
-    let desc_style = Style::new().fg(Color::White);
-
-    let mut help = String::new();
-    help.push_str(&format!(
-        "{}\n\n",
-        Style::new().bold().paint("StructFS REPL")
-    ));
-
-    let commands = [
-        (
-            "read",
-            "[path|@reg]",
-            "Read Value from path or register (alias: get, r)",
-        ),
-        (
-            "write",
-            "<path> <json|@reg>",
-            "Write Value to path (alias: set, w)",
-        ),
-        ("cd", "<path>", "Change current path"),
-        ("pwd", "", "Print current path"),
-        ("registers", "", "List all registers (alias: regs)"),
-        ("", "", ""),
-        ("help", "[topic]", "Show help (try: help ctx/http)"),
-        ("exit", "", "Exit the REPL (alias: quit, q)"),
-    ];
-
-    for (cmd, args, desc) in commands {
-        if cmd.is_empty() {
-            help.push('\n');
-        } else {
-            help.push_str(&format!(
-                "  {:<12} {:<20} {}\n",
-                cmd_style.paint(cmd),
-                arg_style.paint(args),
-                desc_style.paint(desc)
-            ));
-        }
+/// Resolve a command's path argument: dereference `*@reg`, map `@reg` to
+/// its register path, and resolve relative paths against the current path.
+fn resolve_arg_path(arg: &str, ctx: &mut StoreContext) -> Result<Path, String> {
+    let path_str = resolve_dereference(arg, ctx)?;
+    if is_register_path(&path_str) {
+        return register_store_path(&path_str).map_err(|e| format!("Invalid path: {}", e));
     }
+    ctx.resolve_path(&path_str)
+        .map_err(|e| format!("Invalid path: {}", e))
+}
 
-    help.push_str(&format!(
-        "\n{}\n",
-        Style::new().bold().paint("Default Mounts")
-    ));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("/ctx/sys"),
-        "System primitives (env, time, random, proc, fs)"
-    ));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("/ctx/http"),
-        "HTTP broker (async, background threads)"
-    ));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("/ctx/http_sync"),
-        "HTTP broker (sync, blocks on read)"
-    ));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("/ctx/help"),
-        "Documentation system"
-    ));
+fn cmd_ls(args: &str, ctx: &mut StoreContext) -> CommandResult {
+    let path = match resolve_arg_path(if args.is_empty() { "." } else { args }, ctx) {
+        Ok(path) => path,
+        Err(e) => return CommandResult::Error(e),
+    };
+    match ctx.read_children(&path) {
+        Ok(Some(names)) => {
+            let display = if names.is_empty() {
+                format!("{}", Color::Yellow.paint("(no children)"))
+            } else {
+                names
+                    .iter()
+                    .map(|name| format!("  {}", Color::Cyan.paint(name)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            CommandResult::ok_with_capture(
+                display,
+                Value::Array(names.into_iter().map(Value::String).collect()),
+            )
+        }
+        Ok(None) => CommandResult::ok_with_capture(
+            format!("{}", Color::Yellow.paint("null (path does not exist)")),
+            Value::Null,
+        ),
+        Err(e) => CommandResult::Error(format!("ls error: {}", e)),
+    }
+}
 
-    help.push_str(&format!("\n{}\n", Style::new().bold().paint("Registers")));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("@name <command>"),
-        "Capture output in register"
-    ));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("read @name"),
-        "Read register contents"
-    ));
-    help.push_str(&format!(
-        "  {:<24} {}\n",
-        arg_style.paint("*@name"),
-        "Dereference register as path"
-    ));
-
-    help
+fn cmd_mounts(ctx: &mut StoreContext) -> CommandResult {
+    let listing = match ctx.read(&path!("ctx/mounts")) {
+        Ok(Some(listing)) => listing,
+        Ok(None) => Value::Array(Vec::new()),
+        Err(e) => return CommandResult::Error(format!("Read error: {}", e)),
+    };
+    let Value::Array(entries) = &listing else {
+        return CommandResult::ok_with_capture(format_ir_value(&listing), listing);
+    };
+    let mut lines = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Value::Map(entry) = entry else { continue };
+        let name = match entry.get("path") {
+            Some(Value::String(name)) => name.as_str(),
+            _ => "?",
+        };
+        let config = match entry.get("config") {
+            None | Some(Value::Null) => Color::White.dimmed().paint("(built in)").to_string(),
+            Some(config) => value_to_json(config.clone())
+                .map(|json| json.to_string())
+                .unwrap_or_else(|_| format_ir_value(config)),
+        };
+        lines.push(format!(
+            "  {:<24} {}",
+            Color::Yellow.paint(format!("/{name}")),
+            config
+        ));
+    }
+    let display = if lines.is_empty() {
+        format!("{}", Color::Yellow.paint("No mounts."))
+    } else {
+        lines.join("\n")
+    };
+    CommandResult::ok_with_capture(display, listing)
 }
 
 fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
@@ -333,7 +325,7 @@ fn cmd_read(args: &str, ctx: &mut StoreContext) -> CommandResult {
                 let mut output = format_ir_value(&value);
 
                 if let Value::String(s) = &value {
-                    if s.starts_with('/') || s.contains('/') {
+                    if s.contains('/') {
                         output.push_str(&format!(
                             "\n{}",
                             Color::Cyan
@@ -389,14 +381,11 @@ fn cmd_write(args: &str, ctx: &mut StoreContext) -> CommandResult {
     };
 
     // Get the value - either from JSON or from a register
-    let value: Value = if let Some(_reg_name) = value_str.strip_prefix('@') {
+    let value: Value = if let Some(register_name) = value_str.strip_prefix('@') {
         match ctx.read_register(&value_str) {
             Ok(Some(v)) => v,
             Ok(None) => {
-                return CommandResult::Error(format!(
-                    "Register '{}' does not exist",
-                    &value_str[1..]
-                ))
+                return CommandResult::Error(format!("Register '{}' does not exist", register_name))
             }
             Err(e) => return CommandResult::Error(format!("Error reading register: {}", e)),
         }
@@ -474,24 +463,21 @@ fn cmd_pwd(ctx: &mut StoreContext) -> CommandResult {
 }
 
 fn cmd_registers(ctx: &mut StoreContext) -> CommandResult {
-    let registers = ctx.list_registers();
-    if registers.is_empty() {
+    let names = ctx.list_registers();
+    if names.is_empty() {
         CommandResult::ok_display(format!(
             "{}",
             Color::Yellow
                 .paint("No registers. Use '@name read <path>' to store output in a register.")
         ))
     } else {
-        let mut output = String::new();
-        let names: Vec<String> = registers.iter().map(|s| (*s).clone()).collect();
-        for name in &names {
-            output.push_str(&format!(
-                "  {}\n",
-                Color::Magenta.paint(format!("@{}", name))
-            ));
-        }
+        let output = names
+            .iter()
+            .map(|name| format!("  {}", Color::Magenta.paint(format!("@{}", name))))
+            .collect::<Vec<_>>()
+            .join("\n");
         CommandResult::ok_with_capture(
-            output.trim_end().to_string(),
+            output,
             Value::Array(names.into_iter().map(Value::String).collect()),
         )
     }
@@ -507,7 +493,7 @@ fn cmd_help(args: &str, ctx: &mut StoreContext) -> CommandResult {
         format!("ctx/help/{}", topic)
     };
 
-    let path = match structfs_core_store::Path::parse(&help_path) {
+    let path = match Path::parse(&help_path) {
         Ok(p) => p,
         Err(e) => return CommandResult::Error(format!("Invalid help path: {}", e)),
     };
@@ -537,708 +523,6 @@ fn cmd_help(args: &str, ctx: &mut StoreContext) -> CommandResult {
             CommandResult::ok_display(format!("{}", Color::Yellow.paint(suggestion)))
         }
         Err(e) => CommandResult::Error(format!("Help error: {}", e)),
-    }
-}
-
-/// Format root help: show built-in commands plus available help topics
-fn format_help_root(topics: &Value) -> String {
-    // Start with the built-in help
-    let mut output = format_help();
-
-    // Add topics from HelpStore
-    if let Value::Array(topic_list) = topics {
-        if !topic_list.is_empty() {
-            output.push_str(&format!(
-                "\n{}\n",
-                Style::new().bold().paint("Available Help Topics")
-            ));
-            for topic in topic_list {
-                if let Value::String(t) = topic {
-                    output.push_str(&format!(
-                        "  {} {}\n",
-                        Color::Cyan.paint(format!("help {}", t)),
-                        Color::White
-                            .dimmed()
-                            .paint(format!("(read /ctx/help/{})", t))
-                    ));
-                }
-            }
-        }
-    }
-
-    output
-}
-
-/// Pretty-print a help Value with path shown after title
-fn format_help_value_with_path(value: &Value, path: &str) -> String {
-    match value {
-        Value::Map(map) => {
-            let mut output = String::new();
-
-            // Handle title with path on same line
-            if let Some(Value::String(title)) = map.get("title") {
-                output.push_str(&format!(
-                    "{} {}\n\n",
-                    Style::new().bold().paint(title),
-                    Color::Cyan.dimmed().paint(format!("({})", path))
-                ));
-            } else {
-                // No title, just show path
-                output.push_str(&format!("{}\n\n", Color::Cyan.dimmed().paint(path)));
-            }
-
-            // Format the rest without the title
-            output.push_str(&format_help_value_body(map));
-            output
-        }
-        other => format_help_value(other, 0),
-    }
-}
-
-/// Format the body of a help map (everything except title)
-fn format_help_value_body(map: &std::collections::BTreeMap<String, Value>) -> String {
-    let cmd_style = Style::new().bold().fg(Color::Cyan);
-    let arg_style = Style::new().fg(Color::Yellow);
-    let desc_style = Style::new().fg(Color::White);
-
-    let mut output = String::new();
-
-    // Handle description
-    if let Some(Value::String(desc)) = map.get("description") {
-        output.push_str(&format!("{}\n\n", desc));
-    }
-
-    // Handle error (for "not found" responses)
-    if let Some(Value::String(err)) = map.get("error") {
-        output.push_str(&format!("{}\n", Color::Yellow.paint(err)));
-    }
-
-    // Handle hint
-    if let Some(Value::String(hint)) = map.get("hint") {
-        output.push_str(&format!("{}\n\n", hint));
-    }
-
-    // Handle commands with args/desc structure (root help)
-    if let Some(Value::Map(commands)) = map.get("commands") {
-        let is_detailed = commands
-            .values()
-            .next()
-            .map(|v| matches!(v, Value::Map(_)))
-            .unwrap_or(false);
-
-        if is_detailed {
-            for (cmd, info) in commands {
-                if let Value::Map(details) = info {
-                    let args = details
-                        .get("args")
-                        .and_then(|v| {
-                            if let Value::String(s) = v {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or("");
-                    let desc = details
-                        .get("desc")
-                        .and_then(|v| {
-                            if let Value::String(s) = v {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or("");
-                    output.push_str(&format!(
-                        "  {:<12} {:<20} {}\n",
-                        cmd_style.paint(cmd),
-                        arg_style.paint(args),
-                        desc_style.paint(desc)
-                    ));
-                }
-            }
-            output.push('\n');
-        } else {
-            output.push_str(&format!("{}\n", Style::new().bold().paint("Commands:")));
-            for (cmd, desc) in commands {
-                if let Value::String(d) = desc {
-                    output.push_str(&format!("  {:<24} {}\n", cmd_style.paint(cmd), d));
-                }
-            }
-            output.push('\n');
-        }
-    }
-
-    // Handle default_mounts
-    if let Some(Value::Map(mounts)) = map.get("default_mounts") {
-        output.push_str(&format!(
-            "{}\n",
-            Style::new().bold().paint("Default Mounts")
-        ));
-        for (path, desc) in mounts {
-            if let Value::String(d) = desc {
-                output.push_str(&format!("  {:<24} {}\n", arg_style.paint(path), d));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle registers (key-value style)
-    if let Some(Value::Map(registers)) = map.get("registers") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Registers")));
-        for (syntax, desc) in registers {
-            if let Value::String(d) = desc {
-                output.push_str(&format!("  {:<24} {}\n", arg_style.paint(syntax), d));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle topics hint
-    if map.contains_key("topics") {
-        output.push_str(&format!(
-            "{}\n",
-            Color::White
-                .dimmed()
-                .paint("More help: commands, mounts, http, paths, stores, examples")
-        ));
-    }
-
-    // Handle available_topics (from "not found" responses)
-    if let Some(Value::Array(topics)) = map.get("available_topics") {
-        output.push_str(&format!(
-            "{}\n",
-            Style::new().bold().paint("Available topics:")
-        ));
-        for topic in topics {
-            if let Value::String(t) = topic {
-                output.push_str(&format!("  {}\n", Color::Cyan.paint(t)));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle paths (from store docs)
-    if let Some(Value::Map(paths)) = map.get("paths") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Paths")));
-        for (path, desc) in paths {
-            if let Value::String(d) = desc {
-                output.push_str(&format!(
-                    "  {}\n    {}\n",
-                    arg_style.paint(path),
-                    Color::White.dimmed().paint(d)
-                ));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle example
-    if let Some(Value::Array(steps)) = map.get("example") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Example")));
-        for step in steps {
-            if let Value::String(s) = step {
-                if s.starts_with('#') {
-                    output.push_str(&format!("  {}\n", Color::White.dimmed().paint(s)));
-                } else {
-                    output.push_str(&format!("  {}\n", Color::Green.paint(s)));
-                }
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle operations
-    if let Some(Value::Map(ops)) = map.get("operations") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Operations")));
-        for (op, desc) in ops {
-            if let Value::String(d) = desc {
-                output.push_str(&format!(
-                    "  {}\n    {}\n",
-                    arg_style.paint(op),
-                    Color::White.dimmed().paint(d)
-                ));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle brokers
-    if let Some(Value::Map(brokers)) = map.get("brokers") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Brokers")));
-        for (broker, desc) in brokers {
-            if let Value::String(d) = desc {
-                output.push_str(&format!("  {:<24} {}\n", arg_style.paint(broker), d));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle request_format
-    if let Some(Value::Map(fmt)) = map.get("request_format") {
-        output.push_str(&format!(
-            "{}\n",
-            Style::new().bold().paint("Request Format")
-        ));
-        for (field, desc) in fmt {
-            if let Value::String(d) = desc {
-                output.push_str(&format!("  {:<16} {}\n", cmd_style.paint(field), d));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle syntax
-    if let Some(Value::Map(syntax)) = map.get("syntax") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Syntax")));
-        for (syn, desc) in syntax {
-            if let Value::String(d) = desc {
-                output.push_str(&format!("  {:<16} {}\n", arg_style.paint(syn), d));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle mount_configs
-    if let Some(Value::Map(configs)) = map.get("mount_configs") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Mount Configs")));
-        for (cfg, desc) in configs {
-            if let Value::String(d) = desc {
-                output.push_str(&format!("  {:<16} {}\n", cmd_style.paint(cfg), d));
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle stores
-    if let Some(Value::Map(stores)) = map.get("stores") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Stores")));
-        for (name, store_info) in stores {
-            output.push_str(&format!(
-                "  {}\n",
-                Style::new().bold().fg(Color::Cyan).paint(name)
-            ));
-            if let Value::Map(info) = store_info {
-                if let Some(Value::String(d)) = info.get("description") {
-                    output.push_str(&format!("    {}\n", d));
-                }
-                if let Some(Value::String(c)) = info.get("config") {
-                    output.push_str(&format!("    Config: {}\n", Color::Green.paint(c)));
-                }
-            }
-        }
-        output.push('\n');
-    }
-
-    // Handle examples array (from REPL topics)
-    if let Some(Value::Array(examples)) = map.get("examples") {
-        output.push_str(&format!("{}\n", Style::new().bold().paint("Examples")));
-        for example in examples {
-            if let Value::Map(ex) = example {
-                if let Some(Value::String(title)) = ex.get("title") {
-                    output.push_str(&format!("  {}\n", Style::new().bold().paint(title)));
-                }
-                if let Some(Value::Array(steps)) = ex.get("steps") {
-                    for step in steps {
-                        if let Value::String(s) = step {
-                            output.push_str(&format!("    {}\n", Color::Green.paint(s)));
-                        }
-                    }
-                }
-            }
-        }
-        output.push('\n');
-    }
-
-    output.trim_end().to_string()
-}
-
-/// Pretty-print a help Value with proper formatting
-fn format_help_value(value: &Value, indent: usize) -> String {
-    let indent_str = "  ".repeat(indent);
-    let cmd_style = Style::new().bold().fg(Color::Cyan);
-    let arg_style = Style::new().fg(Color::Yellow);
-    let desc_style = Style::new().fg(Color::White);
-
-    match value {
-        Value::Map(map) => {
-            let mut output = String::new();
-
-            // Handle title first if present
-            if let Some(Value::String(title)) = map.get("title") {
-                output.push_str(&format!("{}\n\n", Style::new().bold().paint(title)));
-            }
-
-            // Handle description
-            if let Some(Value::String(desc)) = map.get("description") {
-                output.push_str(&format!("{}{}\n\n", indent_str, desc));
-            }
-
-            // Handle error (for "not found" responses)
-            if let Some(Value::String(err)) = map.get("error") {
-                output.push_str(&format!("{}{}\n", indent_str, Color::Yellow.paint(err)));
-            }
-
-            // Handle hint
-            if let Some(Value::String(hint)) = map.get("hint") {
-                output.push_str(&format!("{}{}\n\n", indent_str, hint));
-            }
-
-            // Handle commands with args/desc structure (root help)
-            if let Some(Value::Map(commands)) = map.get("commands") {
-                // Check if it's the new structure with args/desc
-                let is_detailed = commands
-                    .values()
-                    .next()
-                    .map(|v| matches!(v, Value::Map(_)))
-                    .unwrap_or(false);
-
-                if is_detailed {
-                    // New structure: {cmd: {args, desc}}
-                    for (cmd, info) in commands {
-                        if let Value::Map(details) = info {
-                            let args = details
-                                .get("args")
-                                .and_then(|v| {
-                                    if let Value::String(s) = v {
-                                        Some(s.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or("");
-                            let desc = details
-                                .get("desc")
-                                .and_then(|v| {
-                                    if let Value::String(s) = v {
-                                        Some(s.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or("");
-                            output.push_str(&format!(
-                                "{}  {:<12} {:<20} {}\n",
-                                indent_str,
-                                cmd_style.paint(cmd),
-                                arg_style.paint(args),
-                                desc_style.paint(desc)
-                            ));
-                        }
-                    }
-                    output.push('\n');
-                } else {
-                    // Old structure: {cmd: desc}
-                    output.push_str(&format!(
-                        "{}{}\n",
-                        indent_str,
-                        Style::new().bold().paint("Commands:")
-                    ));
-                    for (cmd, desc) in commands {
-                        if let Value::String(d) = desc {
-                            output.push_str(&format!(
-                                "{}  {:<24} {}\n",
-                                indent_str,
-                                cmd_style.paint(cmd),
-                                d
-                            ));
-                        }
-                    }
-                    output.push('\n');
-                }
-            }
-
-            // Handle default_mounts
-            if let Some(Value::Map(mounts)) = map.get("default_mounts") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Default Mounts")
-                ));
-                for (path, desc) in mounts {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {:<24} {}\n",
-                            indent_str,
-                            arg_style.paint(path),
-                            d
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle registers (key-value style)
-            if let Some(Value::Map(registers)) = map.get("registers") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Registers")
-                ));
-                for (syntax, desc) in registers {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {:<24} {}\n",
-                            indent_str,
-                            arg_style.paint(syntax),
-                            d
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle topics (from root help)
-            if map.contains_key("topics") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Color::White
-                        .dimmed()
-                        .paint("More help: commands, mounts, http, paths, stores, examples")
-                ));
-            }
-
-            // Handle available_topics (from "not found" responses)
-            if let Some(Value::Array(topics)) = map.get("available_topics") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Available topics:")
-                ));
-                for topic in topics {
-                    if let Value::String(t) = topic {
-                        output.push_str(&format!("{}  {}\n", indent_str, Color::Cyan.paint(t)));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle paths (from store docs)
-            if let Some(Value::Map(paths)) = map.get("paths") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Paths")
-                ));
-                for (path, desc) in paths {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {}\n{}    {}\n",
-                            indent_str,
-                            arg_style.paint(path),
-                            indent_str,
-                            Color::White.dimmed().paint(d)
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle example
-            if let Some(Value::Array(steps)) = map.get("example") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Example")
-                ));
-                for step in steps {
-                    if let Value::String(s) = step {
-                        if s.starts_with('#') {
-                            output.push_str(&format!(
-                                "{}  {}\n",
-                                indent_str,
-                                Color::White.dimmed().paint(s)
-                            ));
-                        } else {
-                            output.push_str(&format!(
-                                "{}  {}\n",
-                                indent_str,
-                                Color::Green.paint(s)
-                            ));
-                        }
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle operations
-            if let Some(Value::Map(ops)) = map.get("operations") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Operations")
-                ));
-                for (op, desc) in ops {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {}\n{}    {}\n",
-                            indent_str,
-                            arg_style.paint(op),
-                            indent_str,
-                            Color::White.dimmed().paint(d)
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle brokers
-            if let Some(Value::Map(brokers)) = map.get("brokers") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Brokers")
-                ));
-                for (broker, desc) in brokers {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {:<24} {}\n",
-                            indent_str,
-                            arg_style.paint(broker),
-                            d
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle request_format
-            if let Some(Value::Map(fmt)) = map.get("request_format") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Request Format")
-                ));
-                for (field, desc) in fmt {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {:<16} {}\n",
-                            indent_str,
-                            cmd_style.paint(field),
-                            d
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle syntax
-            if let Some(Value::Map(syntax)) = map.get("syntax") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Syntax")
-                ));
-                for (syn, desc) in syntax {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {:<16} {}\n",
-                            indent_str,
-                            arg_style.paint(syn),
-                            d
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle mount_configs
-            if let Some(Value::Map(configs)) = map.get("mount_configs") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Mount Configs")
-                ));
-                for (cfg, desc) in configs {
-                    if let Value::String(d) = desc {
-                        output.push_str(&format!(
-                            "{}  {:<16} {}\n",
-                            indent_str,
-                            cmd_style.paint(cfg),
-                            d
-                        ));
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle stores
-            if let Some(Value::Map(stores)) = map.get("stores") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Stores")
-                ));
-                for (name, store_info) in stores {
-                    output.push_str(&format!(
-                        "{}  {}\n",
-                        indent_str,
-                        Style::new().bold().fg(Color::Cyan).paint(name)
-                    ));
-                    if let Value::Map(info) = store_info {
-                        if let Some(Value::String(d)) = info.get("description") {
-                            output.push_str(&format!("{}    {}\n", indent_str, d));
-                        }
-                        if let Some(Value::String(c)) = info.get("config") {
-                            output.push_str(&format!(
-                                "{}    Config: {}\n",
-                                indent_str,
-                                Color::Green.paint(c)
-                            ));
-                        }
-                    }
-                }
-                output.push('\n');
-            }
-
-            // Handle examples array (from REPL topics)
-            if let Some(Value::Array(examples)) = map.get("examples") {
-                output.push_str(&format!(
-                    "{}{}\n",
-                    indent_str,
-                    Style::new().bold().paint("Examples")
-                ));
-                for example in examples {
-                    if let Value::Map(ex) = example {
-                        if let Some(Value::String(title)) = ex.get("title") {
-                            output.push_str(&format!(
-                                "{}  {}\n",
-                                indent_str,
-                                Style::new().bold().paint(title)
-                            ));
-                        }
-                        if let Some(Value::Array(steps)) = ex.get("steps") {
-                            for step in steps {
-                                if let Value::String(s) = step {
-                                    output.push_str(&format!(
-                                        "{}    {}\n",
-                                        indent_str,
-                                        Color::Green.paint(s)
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                output.push('\n');
-            }
-
-            output.trim_end().to_string()
-        }
-        Value::String(s) => s.clone(),
-        Value::Array(arr) => {
-            let mut output = String::new();
-            for item in arr {
-                output.push_str(&format!(
-                    "{}• {}\n",
-                    indent_str,
-                    format_help_value(item, indent)
-                ));
-            }
-            output
-        }
-        other => format_ir_value(other),
     }
 }
 
@@ -1350,8 +634,8 @@ fn format_json(value: &JsonValue) -> String {
     result
 }
 
-// Display full IR values without interpreting Bytes as ordinary strings.
-fn format_ir_value(value: &Value) -> String {
+/// Display a full IR value without interpreting Bytes as ordinary strings.
+pub(crate) fn format_ir_value(value: &Value) -> String {
     match value_to_json(value.clone()) {
         Ok(json) => format_json(&json),
         Err(_) => match structfs_core_store::Codec::encode(
@@ -1368,6 +652,46 @@ fn format_ir_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command_table::COMMANDS;
+    use crate::mounts::MountConfig;
+
+    fn display_of(result: CommandResult) -> String {
+        match result {
+            CommandResult::Ok {
+                display: Some(text),
+                ..
+            } => strip_ansi_codes(&text),
+            other => panic!("expected Ok with display, got {other:?}"),
+        }
+    }
+
+    fn capture_of(result: CommandResult) -> Value {
+        match result {
+            CommandResult::Ok {
+                capture: Some(value),
+                ..
+            } => value,
+            other => panic!("expected Ok with capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_table_entry_dispatches() {
+        for spec in COMMANDS {
+            for spelling in spec.spellings() {
+                let mut ctx = StoreContext::new();
+                let result = execute(spelling, &mut ctx);
+                if let CommandResult::Error(msg) = &result {
+                    assert!(
+                        !msg.contains("Unknown command") && !msg.contains("not dispatched"),
+                        "'{spelling}' does not dispatch: {msg}"
+                    );
+                }
+                let captured = parse_register_capture(&format!("@r {spelling}")).is_some();
+                assert_eq!(captured, spec.capturable, "{spelling}");
+            }
+        }
+    }
 
     // Pure function tests
     #[test]
@@ -1409,188 +733,74 @@ mod tests {
     }
 
     #[test]
-    fn format_help_contains_commands() {
-        let help = format_help();
-        assert!(help.contains("read"));
-        assert!(help.contains("write"));
-        assert!(help.contains("cd"));
-        assert!(help.contains("pwd"));
-        assert!(help.contains("help"));
-        assert!(help.contains("exit"));
+    fn format_json_scalars_and_containers() {
+        for (json, text) in [
+            (serde_json::Value::Null, "null"),
+            (serde_json::json!(true), "true"),
+            (serde_json::json!(false), "false"),
+            (serde_json::json!(42), "42"),
+            (serde_json::json!(-42), "-42"),
+            (serde_json::json!(2.75), "2.75"),
+            (serde_json::json!("hello"), "hello"),
+            (serde_json::json!("hello\\nworld"), "hello"),
+        ] {
+            assert!(
+                strip_ansi_codes(&format_json(&json)).contains(text),
+                "{json}"
+            );
+        }
+        let plain = strip_ansi_codes(&format_json(
+            &serde_json::json!({"outer": {"inner": [1, 2, 3]}}),
+        ));
+        for text in ["outer", "inner", "1", "2", "3"] {
+            assert!(plain.contains(text));
+        }
     }
 
     #[test]
-    fn format_help_contains_mounts() {
-        let help = format_help();
-        assert!(help.contains("/ctx/sys"));
-        assert!(help.contains("/ctx/http_sync"));
-    }
-
-    #[test]
-    fn format_help_contains_register_info() {
-        let help = format_help();
-        assert!(help.contains("@name"));
-        assert!(help.contains("*@"));
-    }
-
-    #[test]
-    fn format_json_null() {
-        let formatted = format_json(&serde_json::Value::Null);
-        // Should contain "null" (possibly with ANSI codes)
-        assert!(strip_ansi_codes(&formatted).contains("null"));
-    }
-
-    #[test]
-    fn format_json_bool() {
-        let formatted = format_json(&serde_json::json!(true));
-        assert!(strip_ansi_codes(&formatted).contains("true"));
-    }
-
-    #[test]
-    fn format_json_number() {
-        let formatted = format_json(&serde_json::json!(42));
-        assert!(strip_ansi_codes(&formatted).contains("42"));
-    }
-
-    #[test]
-    fn format_json_string() {
-        let formatted = format_json(&serde_json::json!("hello"));
-        assert!(strip_ansi_codes(&formatted).contains("hello"));
-    }
-
-    #[test]
-    fn format_json_object() {
-        let formatted = format_json(&serde_json::json!({"key": "value"}));
-        let plain = strip_ansi_codes(&formatted);
-        assert!(plain.contains("key"));
-        assert!(plain.contains("value"));
-    }
-
-    #[test]
-    fn format_json_array() {
-        let formatted = format_json(&serde_json::json!([1, 2, 3]));
-        let plain = strip_ansi_codes(&formatted);
-        assert!(plain.contains("1"));
-        assert!(plain.contains("2"));
-        assert!(plain.contains("3"));
-    }
-
-    #[test]
-    fn format_json_with_escapes() {
-        let formatted = format_json(&serde_json::json!("hello\\nworld"));
-        let plain = strip_ansi_codes(&formatted);
-        assert!(plain.contains("hello"));
-    }
-
-    #[test]
-    fn format_json_nested() {
-        let formatted = format_json(&serde_json::json!({"outer": {"inner": 42}}));
-        let plain = strip_ansi_codes(&formatted);
-        assert!(plain.contains("outer"));
-        assert!(plain.contains("inner"));
-        assert!(plain.contains("42"));
-    }
-
-    #[test]
-    fn format_json_false() {
-        let formatted = format_json(&serde_json::json!(false));
-        assert!(strip_ansi_codes(&formatted).contains("false"));
-    }
-
-    #[test]
-    fn format_json_negative_number() {
-        let formatted = format_json(&serde_json::json!(-42));
-        assert!(strip_ansi_codes(&formatted).contains("-42"));
-    }
-
-    #[test]
-    fn format_json_float() {
-        let formatted = format_json(&serde_json::json!(2.75));
-        let plain = strip_ansi_codes(&formatted);
-        assert!(plain.contains("2.75"));
+    fn format_ir_value_shows_bytes() {
+        let shown = format_ir_value(&Value::Bytes(vec![1, 2, 3]));
+        assert!(!shown.is_empty());
     }
 
     // Command execution tests with context
     #[test]
     fn execute_empty_input() {
         let mut ctx = StoreContext::new();
-        let result = execute("", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => assert!(display.is_none()),
-            _ => panic!("Expected Ok"),
-        }
-    }
-
-    #[test]
-    fn execute_whitespace_input() {
-        let mut ctx = StoreContext::new();
-        let result = execute("   ", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => assert!(display.is_none()),
-            _ => panic!("Expected Ok"),
+        for input in ["", "   "] {
+            match execute(input, &mut ctx) {
+                CommandResult::Ok { display, .. } => assert!(display.is_none()),
+                _ => panic!("Expected Ok"),
+            }
         }
     }
 
     #[test]
     fn execute_help_command() {
         let mut ctx = StoreContext::new();
-        // Help command now reads from /ctx/help and returns Ok with output
-        let result = execute("help", &mut ctx);
-        match &result {
-            CommandResult::Ok {
-                display: Some(output),
-                ..
-            } => {
-                // Should contain built-in help
-                assert!(
-                    output.contains("read"),
-                    "Expected built-in help with 'read'"
-                );
-                assert!(
-                    output.contains("write"),
-                    "Expected built-in help with 'write'"
-                );
-                // Should contain available help topics
-                assert!(
-                    output.contains("Available Help Topics"),
-                    "Expected help topics section"
-                );
-                // Should list topics from mounted stores
-                assert!(output.contains("ctx/sys"), "Expected ctx/sys topic");
-                assert!(output.contains("ctx/repl"), "Expected ctx/repl topic");
-            }
-            _ => panic!("Expected Ok with display"),
-        }
+        let output = display_of(execute("help", &mut ctx));
+        assert!(
+            output.contains("read"),
+            "Expected built-in help with 'read'"
+        );
+        assert!(
+            output.contains("write"),
+            "Expected built-in help with 'write'"
+        );
+        assert!(output.contains("Available Help Topics"));
+        assert!(output.contains("ctx/sys"), "Expected ctx/sys topic");
+        assert!(output.contains("ctx/repl"), "Expected ctx/repl topic");
 
-        let result = execute("?", &mut ctx);
-        assert!(matches!(
-            result,
-            CommandResult::Ok {
-                display: Some(_),
-                ..
-            }
-        ));
+        assert!(!display_of(execute("?", &mut ctx)).is_empty());
     }
 
     #[test]
     fn execute_help_topic_command() {
         let mut ctx = StoreContext::new();
-        // Help for specific topic should redirect to store docs
-        let result = execute("help ctx/sys", &mut ctx);
-        match &result {
-            CommandResult::Ok {
-                display: Some(output),
-                ..
-            } => {
-                // Should show sys docs via redirect
-                assert!(
-                    output.contains("System Primitives"),
-                    "Expected sys docs title, got: {}",
-                    output
-                );
-            }
-            _ => panic!("Expected Ok with display"),
-        }
+        let output = display_of(execute("help ctx/sys", &mut ctx));
+        assert!(output.contains("System Primitives"), "{output}");
+        let missing = display_of(execute("help nothing/here", &mut ctx));
+        assert!(missing.contains("No help found"), "{missing}");
     }
 
     #[test]
@@ -1604,8 +814,7 @@ mod tests {
     #[test]
     fn execute_unknown_command() {
         let mut ctx = StoreContext::new();
-        let result = execute("unknown_cmd", &mut ctx);
-        match result {
+        match execute("unknown_cmd", &mut ctx) {
             CommandResult::Error(msg) => assert!(msg.contains("Unknown command")),
             _ => panic!("Expected Error"),
         }
@@ -1614,218 +823,262 @@ mod tests {
     #[test]
     fn execute_pwd() {
         let mut ctx = StoreContext::new();
-        let result = execute("pwd", &mut ctx);
-        match result {
-            CommandResult::Ok { display, capture } => {
-                assert!(display.is_some());
-                assert!(capture.is_some());
-            }
-            _ => panic!("Expected Ok"),
-        }
+        assert_eq!(capture_of(execute("pwd", &mut ctx)), Value::from("/"));
     }
 
     #[test]
-    fn execute_cd_root() {
-        let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo/bar").unwrap());
-        execute("cd /", &mut ctx);
-        assert!(ctx.current_path().is_empty());
-    }
-
-    #[test]
-    fn execute_cd_relative() {
+    fn execute_cd() {
         let mut ctx = StoreContext::new();
         execute("cd foo", &mut ctx);
         assert_eq!(ctx.current_path().to_string(), "foo");
-    }
-
-    #[test]
-    fn execute_cd_no_args() {
-        let mut ctx = StoreContext::new();
-        ctx.set_current_path(Path::parse("foo/bar").unwrap());
+        execute("cd /", &mut ctx);
+        assert!(ctx.current_path().is_empty());
+        ctx.set_current_path(path!("foo/bar"));
         execute("cd", &mut ctx);
         assert!(ctx.current_path().is_empty());
     }
 
     #[test]
-    fn execute_registers_empty() {
+    fn execute_registers() {
         let mut ctx = StoreContext::new();
-        let result = execute("registers", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => {
-                let text = display.unwrap();
-                assert!(strip_ansi_codes(&text).contains("No registers"));
-            }
-            _ => panic!("Expected Ok"),
-        }
-    }
-
-    #[test]
-    fn execute_registers_with_values() {
-        let mut ctx = StoreContext::new();
-        ctx.set_register("foo", Value::Integer(42));
-        let result = execute("registers", &mut ctx);
-        match result {
-            CommandResult::Ok { display, capture } => {
-                assert!(display.is_some());
-                assert!(capture.is_some());
-            }
-            _ => panic!("Expected Ok"),
-        }
+        assert!(display_of(execute("registers", &mut ctx)).contains("No registers"));
+        ctx.set_register("foo", Value::Integer(42)).unwrap();
+        assert_eq!(
+            capture_of(execute("regs", &mut ctx)),
+            Value::Array(vec![Value::from("foo")])
+        );
     }
 
     #[test]
     fn execute_read_sys_time() {
         let mut ctx = StoreContext::new();
-        let result = execute("read /ctx/sys/time/now", &mut ctx);
-        match result {
-            CommandResult::Ok { display, capture } => {
-                assert!(display.is_some());
-                assert!(capture.is_some());
-            }
-            _ => panic!("Expected Ok"),
-        }
+        assert!(matches!(
+            capture_of(execute("read /ctx/sys/time/now", &mut ctx)),
+            Value::String(_)
+        ));
     }
 
     #[test]
     fn execute_read_nonexistent() {
         let mut ctx = StoreContext::new();
-        ctx.mount(
-            "test",
-            structfs_core_store::mount_store::MountConfig::Memory,
-        )
-        .unwrap();
-        let result = execute("read /test/nonexistent", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => {
-                let text = strip_ansi_codes(&display.unwrap());
-                assert!(text.contains("null"));
-            }
-            _ => panic!("Expected Ok"),
-        }
+        ctx.mount("test", MountConfig::Memory).unwrap();
+        assert!(display_of(execute("read /test/nonexistent", &mut ctx)).contains("null"));
     }
 
     #[test]
     fn execute_read_register() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("foo", Value::String("bar".to_string()));
-        let result = execute("read @foo", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => {
-                let text = strip_ansi_codes(&display.unwrap());
-                assert!(text.contains("bar"));
-            }
-            _ => panic!("Expected Ok"),
-        }
-    }
-
-    #[test]
-    fn execute_read_register_not_found() {
-        let mut ctx = StoreContext::new();
-        let result = execute("read @nonexistent", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => {
-                let text = strip_ansi_codes(&display.unwrap());
-                assert!(text.contains("null"));
-            }
-            _ => panic!("Expected Ok"),
-        }
+        ctx.set_register("foo", Value::from("bar/baz")).unwrap();
+        let text = display_of(execute("read @foo", &mut ctx));
+        assert!(text.contains("bar") && text.contains("*@foo"), "{text}");
+        assert!(display_of(execute("read @nonexistent", &mut ctx)).contains("null"));
     }
 
     #[test]
     fn execute_write_to_memory() {
         let mut ctx = StoreContext::new();
-        ctx.mount(
-            "test",
-            structfs_core_store::mount_store::MountConfig::Memory,
-        )
-        .unwrap();
-        let result = execute("write /test/key 42", &mut ctx);
-        match result {
-            CommandResult::Ok { display, .. } => {
-                let text = strip_ansi_codes(&display.unwrap());
-                assert!(text.contains("ok"));
-            }
-            _ => panic!("Expected Ok, got {:?}", result),
-        }
-    }
-
-    #[test]
-    fn execute_write_json_object() {
-        let mut ctx = StoreContext::new();
-        ctx.mount(
-            "test",
-            structfs_core_store::mount_store::MountConfig::Memory,
-        )
-        .unwrap();
-        let result = execute("write /test/data {\"key\": \"value\"}", &mut ctx);
-        assert!(matches!(result, CommandResult::Ok { .. }));
-    }
-
-    #[test]
-    fn execute_write_invalid_json() {
-        let mut ctx = StoreContext::new();
-        let result = execute("write /test/data {invalid}", &mut ctx);
-        assert!(matches!(result, CommandResult::Error(_)));
-    }
-
-    #[test]
-    fn execute_write_no_value() {
-        let mut ctx = StoreContext::new();
-        let result = execute("write /test/path", &mut ctx);
-        assert!(matches!(result, CommandResult::Error(_)));
+        ctx.mount("test", MountConfig::Memory).unwrap();
+        assert!(display_of(execute("write /test/key 42", &mut ctx)).contains("ok"));
+        assert!(matches!(
+            execute("write /test/data {\"key\": \"value\"}", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        assert!(matches!(
+            execute("write /test/data {invalid}", &mut ctx),
+            CommandResult::Error(_)
+        ));
+        assert!(matches!(
+            execute("write /test/path", &mut ctx),
+            CommandResult::Error(_)
+        ));
     }
 
     #[test]
     fn execute_register_capture() {
         let mut ctx = StoreContext::new();
-        let result = execute("@result pwd", &mut ctx);
-        assert!(matches!(result, CommandResult::Ok { .. }));
-        assert!(ctx.get_register("result").is_some());
-    }
-
-    #[test]
-    fn execute_register_capture_with_read() {
-        let mut ctx = StoreContext::new();
+        assert!(matches!(
+            execute("@result pwd", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        assert!(ctx.get_register("result").unwrap().is_some());
         execute("@time read /ctx/sys/time/now_unix", &mut ctx);
-        let reg = ctx.get_register("time");
-        assert!(reg.is_some());
+        assert!(ctx.get_register("time").unwrap().is_some());
     }
 
     #[test]
     fn execute_dereference() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("path", Value::String("/ctx/sys/time/now".to_string()));
-        let result = execute("read *@path", &mut ctx);
-        assert!(matches!(result, CommandResult::Ok { .. }));
-    }
-
-    #[test]
-    fn execute_dereference_nonexistent() {
-        let mut ctx = StoreContext::new();
-        let result = execute("read *@nonexistent", &mut ctx);
-        assert!(matches!(result, CommandResult::Error(_)));
+        ctx.set_register("path", Value::String("/ctx/sys/time/now".to_string()))
+            .unwrap();
+        assert!(matches!(
+            execute("read *@path", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        assert!(matches!(
+            execute("read *@nonexistent", &mut ctx),
+            CommandResult::Error(_)
+        ));
     }
 
     #[test]
     fn execute_write_to_register() {
         let mut ctx = StoreContext::new();
-        let result = execute("write @myreg 42", &mut ctx);
-        assert!(matches!(result, CommandResult::Ok { .. }));
-        assert_eq!(ctx.get_register("myreg"), Some(Value::Integer(42)));
+        assert!(matches!(
+            execute("write @myreg 42", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        assert_eq!(ctx.get_register("myreg").unwrap(), Some(Value::Integer(42)));
+    }
+
+    #[test]
+    fn nested_register_write_sets_a_child_instead_of_replacing() {
+        let mut ctx = StoreContext::new();
+        execute("write @foo {\"keep\": 1}", &mut ctx);
+        assert!(matches!(
+            execute("write @foo/bar 2", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        let foo = ctx.get_register("foo").unwrap().unwrap();
+        assert_eq!(foo.get(&path!("keep")), Some(&Value::Integer(1)), "{foo:?}");
+        assert_eq!(foo.get(&path!("bar")), Some(&Value::Integer(2)));
+        // A child of a scalar cannot be set.
+        execute("write @n 1", &mut ctx);
+        assert!(matches!(
+            execute("write @n/x 2", &mut ctx),
+            CommandResult::Error(_)
+        ));
     }
 
     #[test]
     fn execute_write_from_register() {
         let mut ctx = StoreContext::new();
-        ctx.set_register("source", Value::Integer(99));
-        ctx.mount(
-            "test",
-            structfs_core_store::mount_store::MountConfig::Memory,
-        )
-        .unwrap();
-        let result = execute("write /test/dest @source", &mut ctx);
-        assert!(matches!(result, CommandResult::Ok { .. }));
+        ctx.set_register("source", Value::Integer(99)).unwrap();
+        ctx.mount("test", MountConfig::Memory).unwrap();
+        assert!(matches!(
+            execute("write /test/dest @source", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        assert_eq!(
+            ctx.read(&path!("test/dest")).unwrap(),
+            Some(Value::Integer(99))
+        );
+    }
+
+    #[test]
+    fn mounts_lists_every_mount_with_its_config() {
+        let mut ctx = StoreContext::new();
+        ctx.mount("data", MountConfig::Memory).unwrap();
+        let result = execute("mounts", &mut ctx);
+        let CommandResult::Ok {
+            display: Some(display),
+            capture: Some(Value::Array(entries)),
+        } = result
+        else {
+            panic!("expected a listing");
+        };
+        let display = strip_ansi_codes(&display);
+        assert!(display.contains("/data"), "{display}");
+        assert!(display.contains("\"type\":\"memory\""), "{display}");
+        assert!(display.contains("/ctx/help") && display.contains("(built in)"));
+        assert_eq!(entries.len(), ctx.mount_count());
+
+        let mut empty = StoreContext::with_factory(crate::mounts::CoreReplStoreFactory);
+        assert!(display_of(execute("mounts", &mut empty)).contains("No mounts"));
+    }
+
+    #[test]
+    fn ls_lists_children() {
+        let mut ctx = StoreContext::new();
+        ctx.mount("data", MountConfig::Memory).unwrap();
+        execute("write /data/users/alice 1", &mut ctx);
+        execute("write /data/users/bob 2", &mut ctx);
+
+        assert_eq!(
+            capture_of(execute("ls /data/users", &mut ctx)),
+            Value::Array(vec![Value::from("alice"), Value::from("bob")])
+        );
+        // Relative to the current path, and between mounts.
+        execute("cd /data", &mut ctx);
+        assert_eq!(
+            capture_of(execute("ls", &mut ctx)),
+            Value::Array(vec![Value::from("users")])
+        );
+        assert!(display_of(execute("ls /", &mut ctx)).contains("data"));
+        let ctx_listing = display_of(execute("ls /ctx", &mut ctx));
+        assert!(
+            ctx_listing.contains("sys") && ctx_listing.contains("mounts"),
+            "{ctx_listing}"
+        );
+        // Missing paths, registers, dereferences, and errors.
+        assert_eq!(
+            capture_of(execute("ls /data/nobody", &mut ctx)),
+            Value::Null
+        );
+        ctx.set_register("m", Value::Map(Default::default()))
+            .unwrap();
+        execute("write @m/k 1", &mut ctx);
+        assert_eq!(
+            capture_of(execute("ls @m", &mut ctx)),
+            Value::Array(vec![Value::from("k")])
+        );
+        ctx.set_register("where", Value::from("/data")).unwrap();
+        assert_eq!(
+            capture_of(execute("ls *@where", &mut ctx)),
+            Value::Array(vec![Value::from("users")])
+        );
+        assert!(matches!(
+            execute("ls /nowhere", &mut ctx),
+            CommandResult::Error(_)
+        ));
+        assert!(matches!(
+            execute("ls *@missing", &mut ctx),
+            CommandResult::Error(_)
+        ));
+        // Capturable.
+        execute("@kids ls /data/users", &mut ctx);
+        assert_eq!(
+            ctx.get_register("kids").unwrap(),
+            Some(Value::Array(vec![Value::from("alice"), Value::from("bob")]))
+        );
+    }
+
+    #[test]
+    fn ls_of_listings_shows_names_not_indices() {
+        let mut ctx = StoreContext::new();
+        ctx.set_register("alpha", Value::Integer(1)).unwrap();
+        ctx.set_register("beta", Value::Integer(2)).unwrap();
+        let names = Value::Array(vec![Value::from("alpha"), Value::from("beta")]);
+        assert_eq!(capture_of(execute("ls @", &mut ctx)), names);
+        assert_eq!(capture_of(execute("ls /ctx/registers", &mut ctx)), names);
+
+        let Value::Array(mounts) = capture_of(execute("ls /ctx/mounts", &mut ctx)) else {
+            panic!("mount names");
+        };
+        assert!(mounts.contains(&Value::from("ctx/sys")), "{mounts:?}");
+        assert!(!mounts.contains(&Value::from("0")));
+    }
+
+    #[test]
+    fn claude_md_register_example_writes_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test");
+        let mut ctx = StoreContext::new();
+        let open = format!(
+            "@handle write /ctx/sys/fs/open {{\"path\": \"{}\", \"mode\": \"write\", \"encoding\": \"utf8\"}}",
+            file.display()
+        );
+        for line in [open.as_str(), "write *@handle \"Hello\"", "read @handle"] {
+            let result = execute(line, &mut ctx);
+            assert!(
+                matches!(result, CommandResult::Ok { .. }),
+                "{line}: {result:?}"
+            );
+        }
+        assert!(matches!(
+            execute("write *@handle/close null", &mut ctx),
+            CommandResult::Ok { .. }
+        ));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "Hello");
     }
 
     // Original tests
@@ -1851,92 +1104,59 @@ mod tests {
 
     #[test]
     fn test_parse_write_args_with_nested_json() {
-        let result = parse_write_args("/data {\"nested\": {\"key\": \"value\"}}");
-        assert!(result.is_some());
-        let (path, val) = result.unwrap();
+        let (path, val) = parse_write_args("/data {\"nested\": {\"key\": \"value\"}}").unwrap();
         assert_eq!(path, "/data");
         assert!(val.contains("nested"));
     }
 
     #[test]
     fn test_parse_write_args_array() {
-        let result = parse_write_args("/items [1, 2, 3]");
-        assert!(result.is_some());
-        let (path, val) = result.unwrap();
+        let (path, val) = parse_write_args("/items [1, 2, 3]").unwrap();
         assert_eq!(path, "/items");
-        assert!(val.contains("["));
+        assert!(val.contains('['));
     }
 
     #[test]
     fn test_parse_write_args_string_value() {
-        let result = parse_write_args("/name \"Alice\"");
-        assert!(result.is_some());
-        let (path, val) = result.unwrap();
+        let (path, val) = parse_write_args("/name \"Alice\"").unwrap();
         assert_eq!(path, "/name");
         assert_eq!(val, "\"Alice\"");
     }
 
     #[test]
     fn test_parse_write_args_null() {
-        let result = parse_write_args("/delete null");
-        assert!(result.is_some());
-        let (path, val) = result.unwrap();
+        let (path, val) = parse_write_args("/delete null").unwrap();
         assert_eq!(path, "/delete");
         assert_eq!(val, "null");
     }
 
     #[test]
     fn test_parse_write_args_path_only() {
-        let result = parse_write_args("/only/path");
-        assert!(result.is_none());
+        assert!(parse_write_args("/only/path").is_none());
     }
 
     #[test]
     fn test_parse_register_capture_valid() {
-        let result = parse_register_capture("@result read /foo");
-        assert!(result.is_some());
-        let (name, cmd) = result.unwrap();
+        let (name, cmd) = parse_register_capture("@result read /foo").unwrap();
         assert_eq!(name, "result");
         assert_eq!(cmd, "read /foo");
     }
 
     #[test]
     fn test_parse_register_capture_write() {
-        let result = parse_register_capture("@handle write /foo {\"x\": 1}");
-        assert!(result.is_some());
-        let (name, cmd) = result.unwrap();
+        let (name, cmd) = parse_register_capture("@handle write /foo {\"x\": 1}").unwrap();
         assert_eq!(name, "handle");
         assert!(cmd.starts_with("write"));
     }
 
     #[test]
-    fn test_parse_register_capture_no_at() {
-        let result = parse_register_capture("read /foo");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_register_capture_no_command() {
-        let result = parse_register_capture("@name");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_register_capture_empty_name() {
-        let result = parse_register_capture("@ read /foo");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_register_capture_invalid_name_with_slash() {
-        let result = parse_register_capture("@foo/bar read /baz");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_register_capture_non_command() {
-        let result = parse_register_capture("@name something /foo");
-        assert!(result.is_none());
+    fn test_parse_register_capture_rejections() {
+        assert!(parse_register_capture("read /foo").is_none());
+        assert!(parse_register_capture("@name").is_none());
+        assert!(parse_register_capture("@ read /foo").is_none());
+        assert!(parse_register_capture("@foo/bar read /baz").is_none());
+        assert!(parse_register_capture("@name something /foo").is_none());
+        assert!(parse_register_capture("@name help").is_none());
     }
 
     #[test]
@@ -1952,33 +1172,22 @@ mod tests {
     }
 
     #[test]
-    fn command_result_ok_display() {
-        let result = CommandResult::ok_display("test");
-        match result {
+    fn command_result_constructors() {
+        match CommandResult::ok_display("test") {
             CommandResult::Ok { display, capture } => {
                 assert_eq!(display, Some("test".to_string()));
                 assert!(capture.is_none());
             }
             _ => panic!("Expected Ok variant"),
         }
-    }
-
-    #[test]
-    fn command_result_ok_with_capture() {
-        let result = CommandResult::ok_with_capture("test", Value::Integer(42));
-        match result {
+        match CommandResult::ok_with_capture("test", Value::Integer(42)) {
             CommandResult::Ok { display, capture } => {
                 assert_eq!(display, Some("test".to_string()));
                 assert_eq!(capture, Some(Value::Integer(42)));
             }
             _ => panic!("Expected Ok variant"),
         }
-    }
-
-    #[test]
-    fn command_result_ok_none() {
-        let result = CommandResult::ok_none();
-        match result {
+        match CommandResult::ok_none() {
             CommandResult::Ok { display, capture } => {
                 assert!(display.is_none());
                 assert!(capture.is_none());
@@ -1988,16 +1197,8 @@ mod tests {
     }
 
     #[test]
-    fn format_path_simple() {
-        let path = Path::parse("foo/bar").unwrap();
-        let formatted = format_path(&path);
-        assert!(formatted.contains("foo/bar"));
-    }
-
-    #[test]
-    fn format_path_empty() {
-        let path = Path::parse("").unwrap();
-        let formatted = format_path(&path);
-        assert!(formatted.contains("/"));
+    fn format_path_shapes() {
+        assert_eq!(format_path(&path!("foo/bar")), "/foo/bar");
+        assert_eq!(format_path(&path!("")), "/");
     }
 }

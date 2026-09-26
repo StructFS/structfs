@@ -5,4 +5,4 @@
 
 pub mod terminal;
 
-pub use terminal::TerminalHost;
+pub use terminal::{EditMode, TerminalHost};

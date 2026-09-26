@@ -106,4 +106,4 @@ Windows, actual browser engines/worker residency, production socket adapters,
 crash-safe durable stores and OS process isolation are not certified by this
 candidate. After deliberate publication, repeat smoke tests with registry-only
 exact dependencies, inspect docs.rs, and publish the matching reviewed tags/site.
-See [the release procedure](releasing.md) and [migration guide](migration-0.2.md).
+See [the release procedure](../releasing.md) and [migration guide](../migration-0.2.md).

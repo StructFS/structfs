@@ -1,9 +1,15 @@
 //! Typed reader and writer extension traits.
+//!
+//! See the [crate docs](crate#typed-access) for the operation matrix these
+//! share with the async and detached flavours, and for why every
+//! codec-taking method takes an `Arc<dyn Codec>`.
+
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use structfs_core_store::{Codec, Error, Path, Reader, Record, Value, Writer};
+use structfs_core_store::{Codec, Error, Path, Reader, Record, Writer};
 
 use crate::convert::{from_value, to_value};
 
@@ -14,21 +20,30 @@ use crate::convert::{from_value, to_value};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use structfs_serde_store::{TypedReader, JsonCodec};
+/// ```rust
+/// use std::sync::Arc;
 /// use serde::Deserialize;
+/// use structfs_core_store::{path, Codec, Error, MemoryStore, Record, Value, Writer};
+/// use structfs_serde_store::{JsonCodec, TypedReader, TypedWriter};
 ///
-/// #[derive(Deserialize)]
+/// #[derive(Debug, PartialEq, Deserialize, serde::Serialize)]
 /// struct Config {
 ///     debug: bool,
 ///     port: u16,
 /// }
 ///
-/// fn read_config(store: &mut dyn Reader) -> Result<Config, Error> {
-///     let codec = JsonCodec;
-///     store.read_as(&path!("config"), &codec)?
-///         .ok_or_else(|| Error::Other { message: "config not found".into() })
-/// }
+/// let mut store = MemoryStore::new();
+/// store.write_typed(&path!("config"), &Config { debug: true, port: 8080 })?;
+///
+/// // Parsed records need no codec.
+/// let config: Config = store.read_typed(&path!("config"))?.unwrap();
+/// assert_eq!(config, Config { debug: true, port: 8080 });
+///
+/// // Raw records do.
+/// let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
+/// let config: Option<Config> = store.read_as(&path!("config"), codec)?;
+/// assert!(config.is_some());
+/// # Ok::<(), Error>(())
 /// ```
 pub trait TypedReader: Reader {
     /// Read a value and deserialize it into a Rust type.
@@ -40,33 +55,25 @@ pub trait TypedReader: Reader {
     fn read_as<T: DeserializeOwned>(
         &mut self,
         from: &Path,
-        codec: &dyn Codec,
+        codec: Arc<dyn Codec>,
     ) -> Result<Option<T>, Error> {
         let Some(record) = self.read(from)? else {
             return Ok(None);
         };
 
-        let value = record.into_value(codec)?;
+        let value = record.into_value(codec.as_ref())?;
         let typed = from_value(value)?;
         Ok(Some(typed))
     }
 
-    /// Read a value as a serde_json::Value.
-    ///
-    /// Convenience method when you don't know the exact type.
-    fn read_json(
-        &mut self,
-        from: &Path,
-        codec: &dyn Codec,
-    ) -> Result<Option<serde_json::Value>, Error> {
-        self.read_as::<Value>(from, codec)?
-            .map(crate::value_to_json)
-            .transpose()
-    }
-
     /// Parsed-only typed read. Raw records require an explicit codec via `read_as`.
     fn read_typed<T: DeserializeOwned>(&mut self, from: &Path) -> Result<Option<T>, Error> {
-        self.read_as(from, &structfs_core_store::NoCodec)
+        let Some(record) = self.read(from)? else {
+            return Ok(None);
+        };
+        Ok(Some(from_value(
+            record.into_value(&structfs_core_store::NoCodec)?,
+        )?))
     }
 
     /// Enumerate children at a prefix and deserialize each into `T`.
@@ -99,11 +106,16 @@ impl<R: Reader + ?Sized> TypedReader for R {}
 /// This trait is automatically implemented for all `Writer` implementations.
 /// It provides convenience methods for writing Rust types directly.
 ///
+/// There is no codec-taking counterpart to [`TypedReader::read_as`]: a typed
+/// write always produces a parsed record, and it is the store — not the
+/// caller — that decides whether and how to serialize it.
+///
 /// # Example
 ///
-/// ```rust,ignore
-/// use structfs_serde_store::TypedWriter;
+/// ```rust
 /// use serde::Serialize;
+/// use structfs_core_store::{path, Error, MemoryStore};
+/// use structfs_serde_store::TypedWriter;
 ///
 /// #[derive(Serialize)]
 /// struct User {
@@ -111,9 +123,13 @@ impl<R: Reader + ?Sized> TypedReader for R {}
 ///     email: String,
 /// }
 ///
-/// fn create_user(store: &mut dyn Writer, user: &User) -> Result<Path, Error> {
-///     store.write_as(&path!("users/new"), user)
-/// }
+/// let mut store = MemoryStore::new();
+/// let at = store.write_typed(
+///     &path!("users/new"),
+///     &User { name: "Ada".into(), email: "ada@example.com".into() },
+/// )?;
+/// assert_eq!(at.to_string(), "users/new");
+/// # Ok::<(), Error>(())
 /// ```
 pub trait TypedWriter: Writer {
     /// Serialize a Rust type and write it to the store.
@@ -122,24 +138,9 @@ pub trait TypedWriter: Writer {
     /// 1. Serializes the data to a Value
     /// 2. Wraps it in a Record::Parsed
     /// 3. Writes it to the store
-    fn write_as<T: Serialize>(&mut self, to: &Path, data: &T) -> Result<Path, Error> {
+    fn write_typed<T: Serialize + ?Sized>(&mut self, to: &Path, data: &T) -> Result<Path, Error> {
         let value = to_value(data)?;
         self.write(to, Record::parsed(value))
-    }
-
-    /// Write a serde_json::Value to the store.
-    ///
-    /// Convenience method for dynamic JSON data.
-    fn write_json(&mut self, to: &Path, data: serde_json::Value) -> Result<Path, Error> {
-        self.write_as(to, &data)
-    }
-
-    /// Codec-free typed write — the mirror of `TypedReader::read_typed`.
-    ///
-    /// Identical to [`TypedWriter::write_as`]; provided so read/write call
-    /// sites pair up by name.
-    fn write_typed<T: Serialize>(&mut self, to: &Path, data: &T) -> Result<Path, Error> {
-        self.write_as(to, data)
     }
 }
 
@@ -147,133 +148,95 @@ pub trait TypedWriter: Writer {
 impl<W: Writer + ?Sized> TypedWriter for W {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
+    use structfs_core_store::{path, Format, MemoryStore};
 
-    /// Simple test store
-    struct TestStore {
-        data: HashMap<Path, Record>,
+    /// The type the sync, async and detached typed tests all round-trip, so
+    /// the three flavours are checked against the same shape.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    pub(crate) struct TestUser {
+        pub name: String,
+        pub age: u32,
     }
 
-    impl TestStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
+    pub(crate) fn alice() -> TestUser {
+        TestUser {
+            name: "Alice".to_string(),
+            age: 30,
         }
     }
 
-    impl Reader for TestStore {
+    /// A raw JSON record of [`alice`], for exercising the codec path.
+    pub(crate) fn raw_alice() -> Record {
+        Record::raw(
+            crate::Bytes::from_static(b"{\"name\":\"Alice\",\"age\":30}"),
+            Format::JSON,
+        )
+    }
+
+    /// A store that keeps records verbatim. `MemoryStore` parses on write,
+    /// so it cannot hold a raw record; the codec-path tests need one that
+    /// can. Shared with the async and detached flavours' tests so there is
+    /// one such store in the crate rather than one per module.
+    #[derive(Default)]
+    pub(crate) struct RecordStore {
+        data: std::collections::HashMap<Path, Record>,
+    }
+
+    impl Reader for RecordStore {
         fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
             Ok(self.data.get(from).cloned())
         }
     }
 
-    impl Writer for TestStore {
+    impl Writer for RecordStore {
         fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
             self.data.insert(to.clone(), data);
             Ok(to.clone())
         }
     }
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct TestUser {
-        name: String,
-        age: u32,
-    }
-
     #[test]
-    fn typed_roundtrip() {
-        use structfs_core_store::path;
+    fn typed_roundtrip_is_codec_free() {
+        let mut store = MemoryStore::new();
+        store.write_typed(&path!("users/alice"), &alice()).unwrap();
 
-        let mut store = TestStore::new();
-        let codec = crate::JsonCodec;
-
-        let user = TestUser {
-            name: "Alice".to_string(),
-            age: 30,
-        };
-
-        // Write typed
-        store.write_as(&path!("users/alice"), &user).unwrap();
-
-        // Read typed
-        let recovered: TestUser = store
-            .read_as(&path!("users/alice"), &codec)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(user, recovered);
-    }
-
-    #[test]
-    fn read_nonexistent_returns_none() {
-        use structfs_core_store::path;
-
-        let mut store = TestStore::new();
-        let codec = crate::JsonCodec;
-
-        let result: Option<TestUser> = store.read_as(&path!("nonexistent"), &codec).unwrap();
-
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn read_typed_codec_free_roundtrip() {
-        use structfs_core_store::path;
-
-        let mut store = TestStore::new();
-        let user = TestUser {
-            name: "Alice".to_string(),
-            age: 30,
-        };
-
-        store.write_typed(&path!("users/alice"), &user).unwrap();
         let recovered: TestUser = store.read_typed(&path!("users/alice")).unwrap().unwrap();
-        assert_eq!(user, recovered);
+        assert_eq!(recovered, alice());
 
         let missing: Option<TestUser> = store.read_typed(&path!("nope")).unwrap();
         assert!(missing.is_none());
     }
 
     #[test]
-    fn read_typed_requires_explicit_json_codec() {
-        use bytes::Bytes;
-        use structfs_core_store::path;
-        use structfs_core_store::Format;
+    fn read_as_supplies_the_codec_raw_records_need() {
+        let mut store = RecordStore::default();
+        store.write(&path!("raw"), raw_alice()).unwrap();
 
-        let mut store = TestStore::new();
-        store
-            .write(
-                &path!("raw"),
-                Record::raw(
-                    Bytes::from_static(b"{\"name\":\"Bob\",\"age\":40}"),
-                    Format::JSON,
-                ),
-            )
-            .unwrap();
-
+        // Codec-free reads cannot parse a raw record.
         assert!(store.read_typed::<TestUser>(&path!("raw")).is_err());
+
+        let codec: Arc<dyn Codec> = Arc::new(crate::JsonCodec);
         let user: TestUser = store
-            .read_as(&path!("raw"), &crate::JsonCodec)
+            .read_as(&path!("raw"), codec.clone())
             .unwrap()
             .unwrap();
-        assert_eq!(user.name, "Bob");
+        assert_eq!(user, alice());
+
+        // A missing path is None, not an error, even with a codec.
+        let missing: Option<TestUser> = store.read_as(&path!("nonexistent"), codec).unwrap();
+        assert!(missing.is_none());
     }
 
     #[test]
     fn read_typed_rejects_non_json_raw() {
-        use bytes::Bytes;
-        use structfs_core_store::path;
-        use structfs_core_store::Format;
-
-        let mut store = TestStore::new();
+        let mut store = RecordStore::default();
         store
             .write(
                 &path!("raw"),
-                Record::raw(Bytes::from_static(b"data"), Format::OCTET_STREAM),
+                Record::raw(crate::Bytes::from_static(b"data"), Format::OCTET_STREAM),
             )
             .unwrap();
 
@@ -283,18 +246,8 @@ mod tests {
 
     #[test]
     fn read_children_typed_works() {
-        use structfs_core_store::{path, MemoryStore};
-
         let mut store = MemoryStore::new();
-        store
-            .write_typed(
-                &path!("users/alice"),
-                &TestUser {
-                    name: "Alice".to_string(),
-                    age: 30,
-                },
-            )
-            .unwrap();
+        store.write_typed(&path!("users/alice"), &alice()).unwrap();
         store
             .write_typed(
                 &path!("users/bob"),
@@ -309,31 +262,11 @@ mod tests {
             store.read_children_typed(&path!("users")).unwrap().unwrap();
         assert_eq!(users.len(), 2);
         assert_eq!(users[0].0, "alice");
-        assert_eq!(users[0].1.name, "Alice");
+        assert_eq!(users[0].1, alice());
         assert_eq!(users[1].0, "bob");
 
         let missing: Option<Vec<(String, TestUser)>> =
             store.read_children_typed(&path!("nowhere")).unwrap();
         assert!(missing.is_none());
-    }
-
-    #[test]
-    fn write_json_works() {
-        use structfs_core_store::path;
-
-        let mut store = TestStore::new();
-        let codec = crate::JsonCodec;
-
-        let json = serde_json::json!({
-            "key": "value",
-            "nested": {"a": 1, "b": 2}
-        });
-
-        store.write_json(&path!("config"), json.clone()).unwrap();
-
-        let recovered: serde_json::Value =
-            store.read_json(&path!("config"), &codec).unwrap().unwrap();
-
-        assert_eq!(json, recovered);
     }
 }

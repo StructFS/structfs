@@ -52,10 +52,10 @@ permalink: /demo/
     if (crossOriginIsolated) {
       // Resident mode: the block stays parked on its mailbox in a
       // worker (Atomics.wait), so its state survives between requests.
-      const { WorkerHost } = await import("/demo/worker-host.mjs");
+      const { WorkerHost } = await import("/demo/worker-host.js");
       const host = await WorkerHost.start({
         createWorker: () =>
-          new Worker("/demo/worker.mjs", { type: "module" }),
+          new Worker("/demo/worker.js", { type: "module" }),
         wasm,
         onStdio: (stream, text) => log(`[${stream}] ${text}`),
         onLog: (level, value) => log(`[log/${level}] ${JSON.stringify(value)}`),
@@ -69,8 +69,8 @@ permalink: /demo/
       // COOP/COEP headers): batch mode. Each request re-instantiates
       // the block, so state does not persist — the spec-mandated
       // statelessness makes even this degradation well-defined.
-      const { instantiate } = await import("/demo/structfs-host.mjs");
-      const { IsoStore } = await import("/demo/iso-store.mjs");
+      const { instantiate } = await import("/demo/structfs-host.js");
+      const { IsoStore } = await import("/demo/iso-store.js");
       statusEl.textContent =
         "batch mode: no COOP/COEP headers here, so SharedArrayBuffer is " +
         "unavailable and the block cannot stay resident. Each request " +

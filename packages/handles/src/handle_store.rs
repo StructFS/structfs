@@ -14,10 +14,13 @@
 //! - A non-Null write directly to `outstanding/{id}` is a **conflict** —
 //!   handles cannot be overwritten.
 //! - A Null write to `outstanding/{id}` **releases** the handle: its
-//!   cancel token fires (failing parked reads), `close` runs, and the
-//!   entry becomes inaccessible immediately. Acknowledgement awaits `close_wait`.
+//!   cancel token fires (failing parked reads, but *not* protocol writes, so
+//!   teardown writes can still land), `close` runs, and the entry becomes
+//!   inaccessible immediately. Acknowledgement awaits `close_wait`.
 //!   Pending/failed cleanup remains available to repeated releases. Unknown
-//!   handles are a no-op. Abandoning a wait does not undo the release request.
+//!   handles are a no-op. Abandoning a wait does not undo the release request:
+//!   the entry is reclaimed by the next mint or release once
+//!   [`HandleProtocol::close_complete`] reports the cleanup finished.
 //! - Reads and writes below a released or unknown handle see `None` /
 //!   `NotFound`.
 //! - Reading the root (or `outstanding`) lists live handle paths.
@@ -33,13 +36,29 @@ use structfs_core_store::{
 use crate::gate::CancelToken;
 
 /// Context handed to a protocol when a handle is opened.
+///
+/// Construct one with [`HandleCx::new`]; the struct is `#[non_exhaustive]`
+/// so later releases can hand protocols more context without a breaking
+/// change.
+#[non_exhaustive]
 pub struct HandleCx {
     /// The minted handle id.
     pub id: u64,
-    /// Cancelled when the handle is released. Protocol reads that park
-    /// should park cancellably on this token; writes should not, so
-    /// teardown writes can still land.
+    /// Cancelled when the handle is released.
+    ///
+    /// Protocol *reads* that park should park cancellably on this token.
+    /// Protocol *writes* must not: release is a request to tear the handle
+    /// down, and a teardown write (a final "done" marker, an
+    /// acknowledgement, a flush) still has to land after the token fires.
+    /// Cancellation therefore fails parked reads and leaves writes open.
     pub cancel: CancelToken,
+}
+
+impl HandleCx {
+    /// A context for handle `id` whose parked reads fail when `cancel` fires.
+    pub fn new(id: u64, cancel: CancelToken) -> Self {
+        Self { id, cancel }
+    }
 }
 
 /// The store-specific half of a handle store.
@@ -75,15 +94,28 @@ pub trait HandleProtocol: Send + Sync + 'static {
     /// Wait for cleanup requested by `close`. Must be repeatable and safe to
     /// abandon: unfinished cleanup belongs to a supervisor, not this future.
     /// The default is suitable only when `close` completes cleanup synchronously.
+    ///
+    /// **A protocol that overrides this must also override
+    /// [`HandleProtocol::close_complete`]**, otherwise the store reaps the
+    /// handle's table entry as soon as `close` returns — before the cleanup
+    /// this future is waiting on has actually finished.
     fn close_wait(&self, _handle: Arc<Self::Handle>) -> DetachedFuture<()> {
         Box::pin(async { Ok(()) })
     }
 
-    /// Whether requested cleanup completed successfully. Allows abandoned release
-    /// tombstones to be reaped on the next operation. Failure remains false until
-    /// explicitly acknowledged by the cleanup owner.
+    /// Whether requested cleanup completed successfully, so the released
+    /// handle's table entry can be reaped.
+    ///
+    /// The default matches the default [`HandleProtocol::close_wait`]: `close`
+    /// finishes cleanup synchronously, so the entry is reclaimable the moment
+    /// `close` has run. Protocols with asynchronous cleanup override both, and
+    /// keep returning `false` until cleanup succeeds — a failure stays
+    /// uncollected until the cleanup owner acknowledges it.
+    ///
+    /// Called without the handle table locked, so an implementation may take
+    /// its own locks.
     fn close_complete(&self, _handle: &Self::Handle) -> bool {
-        false
+        true
     }
 
     /// Optional documentation served at `docs`.
@@ -99,7 +131,7 @@ struct Entry<H> {
 }
 
 struct Inner<P: HandleProtocol> {
-    protocol: Arc<P>,
+    protocol: P,
     next_id: AtomicU64,
     entries: Mutex<BTreeMap<u64, Entry<P::Handle>>>,
 }
@@ -122,7 +154,7 @@ impl<P: HandleProtocol> Drop for Inner<P> {
 /// Generic handle store over a [`HandleProtocol`].
 ///
 /// Cloneable; clones share the handle table. Implements the detached async
-/// store traits — use [`crate::SyncBridge`] for the sync traits.
+/// store traits.
 pub struct HandleStore<P: HandleProtocol> {
     inner: Arc<Inner<P>>,
 }
@@ -142,7 +174,7 @@ impl<P: HandleProtocol> HandleStore<P> {
     pub fn new(protocol: P) -> Self {
         Self {
             inner: Arc::new(Inner {
-                protocol: Arc::new(protocol),
+                protocol,
                 next_id: AtomicU64::new(0),
                 entries: Mutex::new(BTreeMap::new()),
             }),
@@ -150,13 +182,60 @@ impl<P: HandleProtocol> HandleStore<P> {
     }
 
     fn lock_entries(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Entry<P::Handle>>> {
-        let mut entries = self.inner.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.retain(|_, entry| {
-            !(entry.cancel.is_cancelled()
-                && entry.close.is_completed()
-                && self.inner.protocol.close_complete(&entry.handle))
-        });
-        entries
+        self.inner.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reclaim cancelled entries whose cleanup has finished.
+    ///
+    /// Two kinds of entry end up cancelled without anyone removing them:
+    /// a release whose future was dropped before its first poll (the removal
+    /// lives in that future), and a handle whose token was cancelled by
+    /// someone other than the store — a protocol can hand the store's token to
+    /// an owner, as `structfs_service::SupervisedProtocol` does, and the owner
+    /// closing cancels it. The second kind never had `close` run, so the sweep
+    /// runs it first, exactly once, as a release would have.
+    ///
+    /// Every mint and every release sweeps, which bounds the table by the live
+    /// handles plus those whose cleanup is still running (or failed and is
+    /// awaiting acknowledgement), without an O(n) scan on the read path.
+    ///
+    /// `close` and `close_complete` are protocol code — for a supervised
+    /// protocol they take the owner's mutex — so neither is ever called while
+    /// the table is locked.
+    fn sweep(&self) {
+        let candidates: Vec<(u64, Arc<P::Handle>, Arc<Once>)> = {
+            let entries = self.lock_entries();
+            entries
+                .iter()
+                .filter(|(_, e)| e.cancel.is_cancelled())
+                .map(|(id, e)| (*id, e.handle.clone(), e.close.clone()))
+                .collect()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let reclaimable: Vec<u64> = candidates
+            .into_iter()
+            .filter(|(_, handle, close)| {
+                close.call_once(|| self.inner.protocol.close(handle.clone()));
+                self.inner.protocol.close_complete(handle)
+            })
+            .map(|(id, _, _)| id)
+            .collect();
+        if reclaimable.is_empty() {
+            return;
+        }
+        let mut entries = self.lock_entries();
+        for id in reclaimable {
+            // Re-check under the lock: another thread may have raced a
+            // release between the two critical sections.
+            if entries
+                .get(&id)
+                .is_some_and(|e| e.cancel.is_cancelled() && e.close.is_completed())
+            {
+                entries.remove(&id);
+            }
+        }
     }
 
     /// The handle path for an id: `outstanding/{id}`.
@@ -192,15 +271,13 @@ impl<P: HandleProtocol> HandleStore<P> {
     }
 
     fn mint(&self, request: Value) -> Result<Path, Error> {
+        self.sweep();
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = CancelToken::new();
-        let handle = self.inner.protocol.open(
-            HandleCx {
-                id,
-                cancel: cancel.clone(),
-            },
-            request,
-        )?;
+        let handle = self
+            .inner
+            .protocol
+            .open(HandleCx::new(id, cancel.clone()), request)?;
         self.lock_entries().insert(
             id,
             Entry {
@@ -213,6 +290,9 @@ impl<P: HandleProtocol> HandleStore<P> {
     }
 
     fn release(&self, id: u64) -> DetachedFuture<()> {
+        // Reclaim anything an abandoned release future left behind before
+        // taking this one on.
+        self.sweep();
         // Retain a tombstone until successful cleanup so repeated/concurrent
         // releases wait for the same producer rather than acknowledge early.
         let entry = self.lock_entries().get(&id).map(|entry| {
@@ -299,13 +379,7 @@ impl<P: HandleProtocol> DetachedWriter for HandleStore<P> {
 
         let Some((id, sub)) = Self::parse_handle(to) else {
             let path = to.clone();
-            return Box::pin(async move {
-                Err(Error::store(
-                    "handle_store",
-                    "write",
-                    format!("no such path: {}", path),
-                ))
-            });
+            return Box::pin(async move { Err(Error::not_found(path)) });
         };
 
         if sub.is_empty() {
@@ -345,7 +419,59 @@ impl<P: HandleProtocol> DetachedWriter for HandleStore<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tail::TailLog;
+    use crate::gate::Gate;
+
+    /// A minimal append-only log with an atomic "items plus terminal status"
+    /// read, enough to exercise parked reads through the store.
+    #[derive(Default)]
+    struct Log {
+        state: Mutex<(Vec<Value>, bool)>,
+        gate: Gate,
+    }
+
+    impl Log {
+        fn push(&self, value: Value) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+                .push(value);
+            self.gate.notify();
+        }
+
+        fn finish(&self) {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
+            self.gate.notify();
+        }
+
+        fn is_done(&self) -> bool {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).1
+        }
+
+        /// Park until there are events past `seq` or the log is finished,
+        /// then return them together with the terminal status.
+        async fn read_from(&self, seq: u64, cancel: &CancelToken) -> Result<Value, Error> {
+            self.gate
+                .wait_until_cancellable(cancel, || {
+                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let (events, done) = &*state;
+                    if (events.len() as u64) <= seq && !*done {
+                        return None;
+                    }
+                    let start = (seq as usize).min(events.len());
+                    let mut map = BTreeMap::new();
+                    map.insert("items".to_string(), Value::Array(events[start..].to_vec()));
+                    map.insert("next".to_string(), Value::Integer(events.len() as i64));
+                    map.insert(
+                        "status".to_string(),
+                        Value::from(if *done { "done" } else { "open" }),
+                    );
+                    Some(Value::Map(map))
+                })
+                .await
+                .map_err(|c| c.into_error("stream handle released"))
+        }
+    }
 
     /// Test protocol: each handle is an event log. Writes to `push` append,
     /// reads of `events/from/{n}` are atomic tail reads, reads of `status`
@@ -353,7 +479,7 @@ mod tests {
     struct StreamProtocol;
 
     struct StreamHandle {
-        log: TailLog<Value>,
+        log: Log,
         cancel: CancelToken,
     }
 
@@ -362,7 +488,7 @@ mod tests {
 
         fn open(&self, cx: HandleCx, _request: Value) -> Result<Self::Handle, Error> {
             Ok(StreamHandle {
-                log: TailLog::new(),
+                log: Log::default(),
                 cancel: cx.cancel,
             })
         }
@@ -372,13 +498,9 @@ mod tests {
                 if sub.len() == 3 && &sub[0] == "events" && &sub[1] == "from" {
                     let seq: u64 = sub[2]
                         .parse()
-                        .map_err(|_| Error::store("stream", "read", "bad cursor"))?;
-                    let page = handle
-                        .log
-                        .read_from_cancellable(seq, &handle.cancel)
-                        .await
-                        .map_err(|c| c.into_error("stream handle released"))?;
-                    return Ok(Some(Record::parsed(page.into_value())));
+                        .map_err(|_| Error::invalid_argument("bad cursor"))?;
+                    let page = handle.log.read_from(seq, &handle.cancel).await?;
+                    return Ok(Some(Record::parsed(page)));
                 }
                 if sub.len() == 1 && &sub[0] == "status" {
                     let status = if handle.log.is_done() { "done" } else { "open" };
@@ -553,6 +675,64 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(err.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn abandoned_release_future_does_not_leak_a_tombstone() {
+        // A protocol that overrides neither `close_wait` nor `close_complete`
+        // finishes its cleanup inside `close`. Dropping the Null-write future
+        // before its first poll therefore skips the removal that future owns;
+        // the next operation must reclaim the entry rather than keep it
+        // forever.
+        let mut s = store();
+        let handle = s
+            .write_detached(&Path::parse("").unwrap(), parsed(Value::from("r")))
+            .await
+            .unwrap();
+        assert_eq!(s.lock_entries().len(), 1);
+
+        drop(s.write_detached(&handle, parsed(Value::Null)));
+        assert_eq!(s.live_handles(), 0);
+        assert_eq!(s.lock_entries().len(), 1, "tombstone retained until swept");
+
+        let next = s
+            .write_detached(&Path::parse("").unwrap(), parsed(Value::from("r2")))
+            .await
+            .unwrap();
+        let entries = s.lock_entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "released handle must not survive as a tombstone"
+        );
+        assert!(entries.contains_key(&1));
+        drop(entries);
+        assert_eq!(next.to_string(), "outstanding/1");
+    }
+
+    #[tokio::test]
+    async fn externally_cancelled_handles_are_closed_and_reaped() {
+        // A protocol may share the store's token with an owner that cancels
+        // it on its own schedule. No Null write ever arrives for such a
+        // handle, so the sweep must run `close` itself and reclaim the entry.
+        let mut s = store();
+        let path = s
+            .write_detached(&Path::parse("").unwrap(), parsed(Value::from("r")))
+            .await
+            .unwrap();
+        let handle = s.get_handle(0).unwrap();
+        handle.cancel.cancel();
+        assert_eq!(s.live_handles(), 0);
+        assert!(s.read_detached(&path).await.unwrap().is_none());
+        assert!(!handle.log.is_done(), "close has not run yet");
+
+        s.write_detached(&Path::parse("").unwrap(), parsed(Value::from("r2")))
+            .await
+            .unwrap();
+        assert!(handle.log.is_done(), "the sweep ran the protocol's close");
+        let entries = s.lock_entries();
+        assert_eq!(entries.len(), 1);
+        assert!(!entries.contains_key(&0));
     }
 
     #[tokio::test]

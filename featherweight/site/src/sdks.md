@@ -15,9 +15,9 @@ construction: wrap `read` and `write`, export `block_alloc`,
 
 ## Rust — `featherweight-guest`
 
-The reference SDK and the reference kv block, in one crate. The `sdk`
-module is the whole ABI surface; everything else is ordinary library
-code.
+The reference SDK and, behind the `reference-guest` feature, the
+reference kv block, in one crate. The `sdk` module is the whole ABI
+surface; everything else is ordinary library code.
 
 ```rust
 use featherweight_guest::sdk::{structfs_read, structfs_write};
@@ -28,7 +28,9 @@ structfs_write("iso/stdio/stdout", b"hello")?;  // Ok(result path)
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo build --target wasm32-unknown-unknown --release -p featherweight-guest
+# The reference kv block; your own block depends on the SDK alone.
+cargo build --target wasm32-unknown-unknown --release \
+    -p featherweight-guest --features reference-guest
 ```
 
 No componentization, no bindgen — the artifact runs under the native

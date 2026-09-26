@@ -1,4 +1,5 @@
 use structfs_profiles::*;
+use structfs_state::Token;
 #[test]
 fn shared_input_corpus() {
     let cases: Vec<serde_json::Value> =
@@ -20,7 +21,8 @@ fn shared_input_corpus() {
 #[tokio::test(flavor = "current_thread")]
 async fn queue_bounds_identity_and_presentation_are_independent() {
     use std::{sync::Arc, time::Duration};
-    use structfs_service::{CancelToken, CleanupSupervisor, OwnerLimits};
+    use structfs_handles::CancelToken;
+    use structfs_service::{CleanupSupervisor, OwnerLimits};
     let supervisor = CleanupSupervisor::new(2).unwrap();
     let owner = supervisor.owner(OwnerLimits::default()).unwrap();
     let other = supervisor.owner(OwnerLimits::default()).unwrap();
@@ -28,19 +30,11 @@ async fn queue_bounds_identity_and_presentation_are_independent() {
     let a = host.open(&owner.handle(), "surface", 1, 1024).unwrap();
     assert!(host.open(&other.handle(), "surface", 1, 1024).is_err());
     let b = host.open(&other.handle(), "other", 1, 1024).unwrap();
-    let input = InputEnvelope {
-        version: 1,
-        session: a.status().session,
-        sequence: 1,
-        input: Input::Key { text: "x".into() },
-    };
-    a.submit(input.clone()).unwrap();
-    assert!(a
-        .submit(InputEnvelope {
-            sequence: 2,
-            ..input
-        })
-        .is_err());
+    let session = a.status().session;
+    let key = Input::Key { text: "x".into() };
+    a.submit(InputEnvelope::new(&session, 1, key.clone()))
+        .unwrap();
+    assert!(a.submit(InputEnvelope::new(&session, 2, key)).is_err());
     assert_eq!(a.status().accepted, 1);
     let event = a.next(&CancelToken::new()).await.unwrap();
     assert_eq!(event.sequence, 1);
@@ -48,21 +42,12 @@ async fn queue_bounds_identity_and_presentation_are_independent() {
     assert!(a.processed(2).is_err());
     a.processed(1).unwrap();
     assert!(a.status().rendered.is_none());
-    a.presented(Token {
-        epoch: "e".into(),
-        revision: 2,
-    })
-    .unwrap();
-    assert!(a
-        .presented(Token {
-            epoch: "e".into(),
-            revision: 1
-        })
-        .is_err());
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    a.presented(Token::new("e", 2)).unwrap();
+    assert!(a.presented(Token::new("e", 1)).is_err());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
     assert!(!b.status().closed);
     let replacement = host.open(&other.handle(), "surface", 1, 1024).unwrap();
-    a.release();
+    a.close();
     assert!(!replacement.status().closed);
 }
 
@@ -84,19 +69,10 @@ async fn discovery_is_pure_read_only_and_version_checked() {
     }
     let calls = Arc::new(AtomicUsize::new(0));
     let inner = Arc::new(Effects(calls.clone()));
-    let declaration = Declaration {
-        profile: Profile::Interactive,
-        version: 1,
-        implementation: Implementation::Reference,
-    };
-    assert!(Profiled::new(
-        inner.clone(),
-        vec![Declaration {
-            version: 2,
-            ..declaration.clone()
-        }]
-    )
-    .is_err());
+    let declaration = Declaration::new(Profile::Interactive, Implementation::Reference);
+    let mut wrong_version = declaration.clone();
+    wrong_version.version = 2;
+    assert!(Profiled::new(inner.clone(), vec![wrong_version]).is_err());
     assert!(Profiled::new(
         inner.clone(),
         vec![declaration.clone(), declaration.clone()]
@@ -128,14 +104,8 @@ async fn discovery_is_pure_read_only_and_version_checked() {
 }
 #[test]
 fn persistence_acknowledgments_cannot_claim_memory_is_durable() {
-    let mut ack = CommitAck {
-        token: Token {
-            epoch: "e".into(),
-            revision: 1,
-        },
-        persisted: false,
-        durability: Durability::Memory,
-    };
+    let mut ack = CommitAck::new(Token::new("e", 1), Durability::Memory);
+    assert!(!ack.persisted);
     ack.validate().unwrap();
     ack.persisted = true;
     assert!(ack.validate().is_err());
@@ -154,15 +124,15 @@ async fn shared_service_client_preserves_session_acceptance_and_release() {
     let owner = supervisor.owner(OwnerLimits::default()).unwrap();
     let host = Arc::new(HeadlessHost::default());
     assert!(host.open(&owner.handle(), "invalid", 0, 1024).is_err());
-    let session = host.open(&owner.handle(), "surface", 2, 1024).unwrap();
-    let router = Router::new(vec![Mount::new(
+    let session = Arc::new(host.open(&owner.handle(), "surface", 2, 1024).unwrap());
+    let router = Router::shared(vec![Mount::new(
         path!(""),
         path!(""),
         session.clone(),
-        Arc::new(BudgetAdmission {
-            budget: CallBudget::<String>::new(CallLimits::default()),
-            key: "session".into(),
-        }),
+        Arc::new(BudgetAdmission::new(
+            CallBudget::<String>::shared(CallLimits::default()),
+            "session",
+        )),
     )])
     .unwrap();
     let client = router.client();
@@ -176,12 +146,7 @@ async fn shared_service_client_preserves_session_acceptance_and_release() {
             .unwrap(),
     )
     .unwrap();
-    let event = InputEnvelope {
-        version: 1,
-        session: initial.session,
-        sequence: 1,
-        input: Input::Key { text: "x".into() },
-    };
+    let event = InputEnvelope::new(initial.session, 1, Input::Key { text: "x".into() });
     client
         .write(&path!("input"), Record::parsed(to_value(&event).unwrap()))
         .await
@@ -206,10 +171,7 @@ async fn shared_service_client_preserves_session_acceptance_and_release() {
         .write(&path!("processed"), Record::parsed(Value::Unsigned(1)))
         .await
         .unwrap();
-    let token = Token {
-        epoch: "e".into(),
-        revision: 1,
-    };
+    let token = Token::new("e", 1);
     client
         .write(
             &path!("presented"),
@@ -228,34 +190,24 @@ async fn shared_service_client_preserves_session_acceptance_and_release() {
         .write(&path!("release"), Record::parsed(Value::Bool(true)))
         .await
         .is_err());
-    assert!(session
-        .presented(Token {
-            epoch: "x".repeat(129),
-            revision: 2
-        })
-        .is_err());
-    assert!(session
-        .presented(Token {
-            epoch: "different".into(),
-            revision: 2
-        })
-        .is_err());
+    assert!(session.presented(Token::new("x".repeat(129), 2)).is_err());
+    assert!(session.presented(Token::new("different", 2)).is_err());
     let pending_path = path!("input/next");
     let pending = client.read(&pending_path);
     tokio::pin!(pending);
-    assert!(tokio::time::timeout(Duration::from_millis(1), &mut pending)
-        .await
-        .is_err());
+    // Poll exactly once: a wall-clock timeout would pass or fail on
+    // scheduler luck rather than on whether the read actually parked.
+    std::future::poll_fn(|cx| {
+        let polled = std::future::Future::poll(std::pin::Pin::new(&mut pending), cx);
+        assert!(polled.is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     client
         .write(&path!("release"), Record::parsed(Value::Null))
         .await
         .unwrap();
     assert!(pending.await.is_err());
-    assert!(session
-        .presented(Token {
-            epoch: "e".into(),
-            revision: 2
-        })
-        .is_err());
-    assert!(owner.close(Duration::from_secs(1)).await.is_quiescent());
+    assert!(session.presented(Token::new("e", 2)).is_err());
+    assert!(owner.join(Duration::from_secs(1)).await.is_quiescent());
 }

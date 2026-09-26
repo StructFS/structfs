@@ -20,17 +20,29 @@ assert_eq!(encode("名前"), "名前");
 let encoded = encode("hello world");
 assert!(encoded.starts_with("_N_"));
 assert_eq!(decode(&encoded).unwrap(), "hello world");
+
+// So does the empty string, and anything that merely looks encoded
+assert_eq!(encode(""), "_N_");
+assert_eq!(decode(&encode("_N_helloworld__fa0b")).unwrap(), "_N_helloworld__fa0b");
 ```
 
 ## Properties
 
 | Property | Definition |
 |----------|------------|
-| **Roundtrip** | `decode(encode(s)) == s` for all encoded strings |
-| **Passthrough** | Valid XID identifiers pass through unchanged |
-| **Idempotent** | `encode(encode(x)) == encode(x)` |
-| **Identity** | `encode(decode(s)) == s` for valid encodings |
+| **Roundtrip** | `decode(encode(s)) == s` whenever `encode(s) != s`; a passthrough stands for itself (`decode` answers `NotEncoded`) |
+| **Forced roundtrip** | `decode(encode_forced(s)) == s` for every `s`, and `encode_forced(decode(t)) == t` for every `t` `decode` accepts |
+| **Passthrough** | Valid XID identifiers not starting with `_N_` pass through unchanged |
+| **Canonical** | Each value has exactly one encoding; `decode` rejects any other spelling |
+| **Valid output** | `encode(s)` is always a valid identifier, for every `s` |
 | **O(n)** | Linear time encode and decode |
+
+`encode` is deliberately not idempotent: encoding an encoding encodes it
+again. Passing an encoding through unchanged would make it impossible to tell
+a literal `_N_helloworld__fa0b` from the encoding of `hello world`, and
+`decode` would silently corrupt the former. Use `is_encoded` to test whether a
+string is already an encoding, and `encode_forced` when you need a
+`_N_`-prefixed form even for input that would otherwise pass through.
 
 ## CLI
 

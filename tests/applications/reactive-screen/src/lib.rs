@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use featherweight_runtime::{
-        service_host_store, AssemblyDef, BlockState, CoreWasmEngine, Runtime,
+        service_host_store, AssemblyDef, BlockState, CoreWasmEngine, Runtime, RuntimeConfig,
     };
     use std::{
         collections::{BTreeMap, HashMap},
@@ -11,6 +11,7 @@ mod tests {
         time::Duration,
     };
     use structfs_core_store::{path, DetachedFuture, Error, Path, Record, Value};
+    use structfs_handles::CancelToken;
     use structfs_profiles::{
         Declaration, HeadlessHost, Implementation, Input, InputEnvelope, Profile, Profiled, Session,
     };
@@ -18,14 +19,11 @@ mod tests {
     use structfs_service::*;
     use structfs_state::*;
     fn client(service: Arc<dyn Service>, owner: &OwnerHandle, budget: Arc<CallBudget>) -> Client {
-        Router::new(vec![Mount::new(
+        Router::shared(vec![Mount::new(
             path!(""),
             path!(""),
             service,
-            Arc::new(BudgetAdmission {
-                budget,
-                key: "screen".into(),
-            }),
+            Arc::new(BudgetAdmission::new(budget, "screen")),
         )])
         .unwrap()
         .client()
@@ -58,7 +56,7 @@ mod tests {
                     .await
                     .map_err(|e| Error::store("screen", "projection", e.to_string()))?;
                 snapshot
-                    .release()
+                    .close()
                     .await
                     .map_err(|e| Error::store("screen", "release", e.to_string()))?;
                 let count = match projection.root().and_then(|v| v.get(&path!("counter"))) {
@@ -122,30 +120,24 @@ mod tests {
     async fn equal_labels_ordered_input_native_and_guest_have_identical_projections() {
         let supervisor = CleanupSupervisor::new(4).unwrap();
         let host = Arc::new(HeadlessHost::default());
-        let budget = CallBudget::new(CallLimits::default());
-        let router = Router::new(vec![]).unwrap();
+        let budget = CallBudget::shared(CallLimits::default());
+        let router = Router::shared(vec![]).unwrap();
         let mut mounts = vec![];
         let mut owners = vec![];
         let mut projections = vec![];
         let mut sessions = vec![];
         for (index, surface) in ["left", "right"].iter().enumerate() {
             let owner = supervisor
-                .owner(OwnerLimits {
-                    retained_bytes: 32 << 20,
-                    ..Default::default()
-                })
+                .owner(OwnerLimits::default().with_retained_bytes(32 << 20))
                 .unwrap();
-            let session = host.open(&owner.handle(), surface, 2, 1024).unwrap();
-            let state = State::new(
+            let session = Arc::new(host.open(&owner.handle(), surface, 2, 1024).unwrap());
+            let state = State::shared(
                 &owner.handle(),
                 Some(Value::Map(BTreeMap::from([
                     ("label".into(), Value::String("Catalog".into())),
                     ("credential_present".into(), Value::Bool(true)),
                 ]))),
-                StateLimits {
-                    history_records: 2,
-                    ..Default::default()
-                },
+                StateLimits::default().with_history_records(2),
             )
             .unwrap();
             mounts.push(
@@ -156,10 +148,7 @@ mod tests {
                             Path::parse(surface).unwrap(),
                             path!(""),
                             state.view(path!(""), true),
-                            Arc::new(BudgetAdmission {
-                                budget: budget.clone(),
-                                key: "Catalog".into(),
-                            }),
+                            Arc::new(BudgetAdmission::new(budget.clone(), "Catalog")),
                         ),
                     )
                     .unwrap(),
@@ -180,21 +169,19 @@ mod tests {
             });
             for sequence in 1..=2 {
                 session
-                    .submit(InputEnvelope {
-                        version: 1,
-                        session: session.status().session,
+                    .submit(InputEnvelope::new(
+                        session.status().session,
                         sequence,
-                        input: Input::Key { text: "x".into() },
-                    })
+                        Input::Key { text: "x".into() },
+                    ))
                     .unwrap();
             }
             assert!(session
-                .submit(InputEnvelope {
-                    version: 1,
-                    session: session.status().session,
-                    sequence: 3,
-                    input: Input::Key { text: "x".into() }
-                })
+                .submit(InputEnvelope::new(
+                    session.status().session,
+                    3,
+                    Input::Key { text: "x".into() }
+                ))
                 .is_err());
             assert_eq!(session.status().accepted, 2);
             if index == 0 {
@@ -209,17 +196,19 @@ mod tests {
             } else {
                 let engine = CoreWasmEngine::with_limits(1, 1, 65536).unwrap();
                 let code = Arc::new(engine.prepare(guest()).await.unwrap());
-                let mut runtime = Runtime::new();
-                runtime.register_core_artifact("screen", code);
-                let profiled = Profiled::new(
-                    session.clone(),
-                    vec![Declaration {
-                        profile: Profile::Interactive,
-                        version: 1,
-                        implementation: Implementation::Reference,
-                    }],
-                )
-                .unwrap();
+                let mut config = RuntimeConfig::new(tokio::runtime::Handle::current());
+                config.register_core_artifact("screen", code);
+                let runtime = Runtime::new(config);
+                let profiled = Arc::new(
+                    Profiled::new(
+                        session.clone(),
+                        vec![Declaration::new(
+                            Profile::Interactive,
+                            Implementation::Reference,
+                        )],
+                    )
+                    .unwrap(),
+                );
                 let def=AssemblyDef::from_str(r#"{"assembly":"screen","imports":{"session":"input","reduce":"reducer"},"blocks":{"ui":"screen"},"public":"ui","wiring":["ui:/session -> $session","ui:/reduce -> $reduce"]}"#).unwrap();
                 let instance = runtime
                     .instantiate(
@@ -262,7 +251,7 @@ mod tests {
             owners.push(owner);
         }
         assert_eq!(projections[0], projections[1]);
-        assert!(owners[0].close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(owners[0].join(Duration::from_secs(1)).await.is_quiescent());
         assert!(router
             .client()
             .read(&path!("left/data/label"))
@@ -281,16 +270,15 @@ mod tests {
         );
         assert!(!sessions[1].status().closed);
         sessions[1]
-            .submit(InputEnvelope {
-                version: 1,
-                session: sessions[1].status().session,
-                sequence: 3,
-                input: Input::Key {
+            .submit(InputEnvelope::new(
+                sessions[1].status().session,
+                3,
+                Input::Key {
                     text: "peer still live".into(),
                 },
-            })
+            ))
             .unwrap();
-        assert!(owners[1].close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(owners[1].join(Duration::from_secs(1)).await.is_quiescent());
         assert_eq!(budget.usage().calls, 0);
     }
     #[tokio::test]
@@ -298,11 +286,12 @@ mod tests {
         let supervisor = CleanupSupervisor::new(2).unwrap();
         let owner = supervisor.owner(Default::default()).unwrap();
         let request = supervisor.owner(Default::default()).unwrap();
-        let state = State::new(&owner.handle(), Some(Value::Null), StateLimits::default()).unwrap();
+        let state =
+            State::shared(&owner.handle(), Some(Value::Null), StateLimits::default()).unwrap();
         let c = StateClient::new(client(
             state.view(path!(""), true),
             &owner.handle(),
-            CallBudget::new(CallLimits::default()),
+            CallBudget::shared(CallLimits::default()),
         ));
         let token = c
             .batch(
@@ -344,10 +333,10 @@ mod tests {
         )
         .await
         .unwrap();
-        request.cancel();
+        request.close();
         send.send(()).unwrap();
         assert!(result.await.unwrap());
-        assert!(request.close(Duration::from_secs(1)).await.is_quiescent());
+        assert!(request.join(Duration::from_secs(1)).await.is_quiescent());
         assert_eq!(c.data(&path!("result")).await.unwrap(), None);
     }
 }
@@ -367,18 +356,18 @@ mod coherent_contracts {
         let writer: Arc<dyn SharedWriter> = shared;
         assert_eq!(
             reader
-                .read(path!("settings/example"))
+                .read_shared(path!("settings/example"))
                 .await
                 .unwrap()
                 .unwrap()
                 .as_value(),
             Some(&Value::Null)
         );
-        let first = writer.write(
+        let first = writer.write_shared(
             path!("accounts/alice/provider"),
             Record::parsed(Value::Bool(true)),
         );
-        let second = writer.write(path!("settings/example"), Record::parsed(Value::Null));
+        let second = writer.write_shared(path!("settings/example"), Record::parsed(Value::Null));
         let written = first.await.unwrap();
         second.await.unwrap();
         assert!(matches_prefix_suffix(
@@ -388,7 +377,7 @@ mod coherent_contracts {
             1
         ));
         assert!(reader
-            .read(path!("settings/example"))
+            .read_shared(path!("settings/example"))
             .await
             .unwrap()
             .is_none());

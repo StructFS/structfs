@@ -1,13 +1,21 @@
-//! Random number generation store.
+//! Random value store.
 
 use collection_literals::btree;
-
 use rand::Rng;
 use uuid::Uuid;
 
-use structfs_core_store::{Error, NoCodec, Path, Reader, Record, Value, Writer};
+use structfs_core_store::{Error, Path, Reader, Record, Value, Writer};
 
-/// Store for random number generation.
+/// The most bytes one `random/bytes/{n}` read may return (1 MiB).
+pub const MAX_RANDOM_BYTES: u64 = 1024 * 1024;
+
+/// Store for random values. Every read draws fresh values; the store is
+/// read-only.
+///
+/// - `random/u64`: a random `u64` (`Value::Unsigned`)
+/// - `random/uuid`: a random UUID v4 string
+/// - `random/bytes/{n}`: `n` random bytes (`Value::Bytes`), `n` at most
+///   [`MAX_RANDOM_BYTES`]
 pub struct RandomStore;
 
 impl RandomStore {
@@ -15,31 +23,37 @@ impl RandomStore {
         Self
     }
 
-    fn read_value(&self, path: &Path) -> Result<Option<Value>, Error> {
-        if path.is_empty() {
-            return Ok(Some(Value::Map(btree! {
-                "u64".into() => Value::String("Random 64-bit unsigned integer".into()),
-                "uuid".into() => Value::String("Random UUID v4".into()),
-                "bytes".into() => Value::String("Write {\"count\": N} to get base64-encoded random bytes".into()),
-            })));
-        }
-
-        if path.len() != 1 {
+    fn bytes(count: &str) -> Result<Option<Value>, Error> {
+        let Ok(count) = count.parse::<u64>() else {
             return Ok(None);
+        };
+        if count > MAX_RANDOM_BYTES {
+            return Err(Error::resource_limit(format!(
+                "random/bytes/{count} exceeds the {MAX_RANDOM_BYTES}-byte limit"
+            )));
         }
+        let mut bytes = vec![0u8; count as usize];
+        rand::rng().fill(&mut bytes[..]);
+        Ok(Some(Value::Bytes(bytes)))
+    }
 
-        match &path[0] {
-            "u64" => {
-                let value: u64 = rand::thread_rng().gen();
-                // u64 can exceed i64 max, so we store as string for safety
-                Ok(Some(Value::String(value.to_string())))
-            }
-            "uuid" => {
-                let uuid = Uuid::new_v4();
-                Ok(Some(Value::String(uuid.to_string())))
-            }
-            _ => Ok(None),
-        }
+    fn read_value(path: &Path) -> Result<Option<Value>, Error> {
+        let u64 = || Value::Unsigned(rand::rng().random());
+        let uuid = || Value::String(Uuid::new_v4().to_string());
+        Ok(match path.len() {
+            // `bytes` is parameterized by its count, so it is not a child.
+            0 => Some(Value::Map(btree! {
+                "u64".into() => u64(),
+                "uuid".into() => uuid(),
+            })),
+            1 => match &path[0] {
+                "u64" => Some(u64()),
+                "uuid" => Some(uuid()),
+                _ => None,
+            },
+            2 if &path[0] == "bytes" => return Self::bytes(&path[1]),
+            _ => None,
+        })
     }
 }
 
@@ -51,195 +65,74 @@ impl Default for RandomStore {
 
 impl Reader for RandomStore {
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        Ok(self.read_value(from)?.map(Record::parsed))
+        Ok(Self::read_value(from)?.map(Record::parsed))
     }
 }
 
 impl Writer for RandomStore {
-    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        if to.len() != 1 {
-            return Err(Error::store("random", "write", "Invalid random path"));
-        }
-
-        match &to[0] {
-            "bytes" => {
-                let value = data.into_value(&NoCodec)?;
-
-                let count = match &value {
-                    Value::Map(map) => {
-                        if let Some(Value::Integer(c)) = map.get("count") {
-                            *c as usize
-                        } else {
-                            return Err(Error::store(
-                                "random",
-                                "bytes",
-                                "bytes requires 'count' field",
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(Error::store(
-                            "random",
-                            "bytes",
-                            "bytes requires a map with 'count' field",
-                        ));
-                    }
-                };
-
-                if count > 1024 * 1024 {
-                    return Err(Error::store(
-                        "random",
-                        "bytes",
-                        "Cannot generate more than 1MB of random bytes",
-                    ));
-                }
-
-                let mut bytes = vec![0u8; count];
-                rand::thread_rng().fill(&mut bytes[..]);
-
-                let encoded =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-
-                // Return the base64 string as the path (workaround for returning data from write)
-                Path::parse(&encoded).map_err(|_| {
-                    Error::store(
-                        "random",
-                        "bytes",
-                        "Generated bytes resulted in invalid path",
-                    )
-                })
-            }
-            _ => Err(Error::store(
-                "random",
-                "write",
-                format!("Cannot write to random/{}", &to[0]),
-            )),
-        }
+    fn write(&mut self, to: &Path, _data: Record) -> Result<Path, Error> {
+        Err(Error::permission_denied(format!(
+            "random/{to} is read-only; read random/bytes/{{n}} for random bytes"
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use structfs_core_store::path;
+    use structfs_core_store::{path, NoCodec};
+
+    fn read(at: &Path) -> Result<Option<Value>, Error> {
+        Ok(RandomStore::new()
+            .read(at)?
+            .map(|r| r.into_value(&NoCodec).unwrap()))
+    }
 
     #[test]
-    fn read_uuid() {
-        let mut store = RandomStore::new();
-        let record = store.read(&path!("uuid")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::String(s) => {
-                assert_eq!(s.len(), 36);
-                assert_eq!(&s[14..15], "4"); // Version 4
-            }
-            _ => panic!("Expected string"),
+    fn uuid_and_u64() {
+        let Some(Value::String(uuid)) = read(&path!("uuid")).unwrap() else {
+            panic!("expected uuid string")
+        };
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(&uuid[14..15], "4");
+        assert!(matches!(
+            read(&path!("u64")).unwrap(),
+            Some(Value::Unsigned(_))
+        ));
+        let Some(Value::Map(root)) = read(&path!("")).unwrap() else {
+            panic!("expected map")
+        };
+        assert!(matches!(root.get("u64"), Some(Value::Unsigned(_))));
+        assert!(matches!(root.get("uuid"), Some(Value::String(_))));
+        assert_eq!(read(&path!("nonexistent")).unwrap(), None);
+        assert_eq!(read(&path!("uuid/extra")).unwrap(), None);
+    }
+
+    #[test]
+    fn bytes_are_readable_and_capped() {
+        for n in [0usize, 3, 64] {
+            let at = Path::parse(&format!("bytes/{n}")).unwrap();
+            let Some(Value::Bytes(bytes)) = read(&at).unwrap() else {
+                panic!("expected bytes")
+            };
+            assert_eq!(bytes.len(), n);
         }
+        let max = Path::parse(&format!("bytes/{MAX_RANDOM_BYTES}")).unwrap();
+        assert!(read(&max).unwrap().is_some());
+        let over = Path::parse(&format!("bytes/{}", MAX_RANDOM_BYTES + 1)).unwrap();
+        assert!(matches!(read(&over), Err(Error::ResourceLimit { .. })));
+        assert_eq!(read(&path!("bytes")).unwrap(), None);
+        assert_eq!(read(&path!("bytes/many")).unwrap(), None);
     }
 
     #[test]
-    fn read_u64() {
-        let mut store = RandomStore::new();
-        let record = store.read(&path!("u64")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::String(s) => {
-                s.parse::<u64>().expect("Should be valid u64");
-            }
-            _ => panic!("Expected string"),
+    fn writes_are_denied() {
+        let mut store = RandomStore;
+        for at in [path!("bytes"), path!("u64"), path!("")] {
+            assert!(matches!(
+                store.write(&at, Record::parsed(Value::Null)),
+                Err(Error::PermissionDenied { .. })
+            ));
         }
-    }
-
-    #[test]
-    fn read_root() {
-        let mut store = RandomStore::new();
-        let record = store.read(&path!("")).unwrap().unwrap();
-        let value = record.into_value(&NoCodec).unwrap();
-        match value {
-            Value::Map(map) => {
-                assert!(map.contains_key("u64"));
-                assert!(map.contains_key("uuid"));
-                assert!(map.contains_key("bytes"));
-            }
-            _ => panic!("Expected map"),
-        }
-    }
-
-    #[test]
-    fn read_nonexistent() {
-        let mut store = RandomStore::new();
-        let result = store.read(&path!("nonexistent")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn read_nested_path_returns_none() {
-        let mut store = RandomStore::new();
-        let result = store.read(&path!("uuid/extra")).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn write_bytes() {
-        let mut store = RandomStore::new();
-        // Use a small count - base64 encoding may produce characters not valid in paths
-        let map = btree! { "count".into() => Value::Integer(3) };
-
-        // The write may succeed or fail depending on the random bytes generated
-        // (base64 encoding may include invalid path characters)
-        let result = store.write(&path!("bytes"), Record::parsed(Value::Map(map)));
-        // Either succeeds or fails with path parse error - both are valid behaviors
-        if let Ok(path) = result {
-            assert!(!path.is_empty());
-        }
-        // Err case: Path parsing failed, which is expected for some byte sequences
-    }
-
-    #[test]
-    fn write_bytes_missing_count_error() {
-        let mut store = RandomStore::new();
-        let map = btree! { "invalid".into() => Value::Integer(16) };
-
-        let result = store.write(&path!("bytes"), Record::parsed(Value::Map(map)));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_bytes_invalid_type_error() {
-        let mut store = RandomStore::new();
-        let result = store.write(
-            &path!("bytes"),
-            Record::parsed(Value::String("16".to_string())),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_bytes_too_large_error() {
-        let mut store = RandomStore::new();
-        let map = btree! { "count".into() => Value::Integer(2 * 1024 * 1024) }; // 2MB
-
-        let result = store.write(&path!("bytes"), Record::parsed(Value::Map(map)));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_invalid_path_error() {
-        let mut store = RandomStore::new();
-        let result = store.write(&path!("u64"), Record::parsed(Value::Null));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_invalid_path_length_error() {
-        let mut store = RandomStore::new();
-        let result = store.write(&path!(""), Record::parsed(Value::Null));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn default_impl() {
-        let store: RandomStore = Default::default();
-        assert!(std::ptr::eq(&store as *const _, &store as *const _)); // Just verify it works
     }
 }

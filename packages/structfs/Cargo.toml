@@ -12,31 +12,59 @@ categories = ["data-structures", "rust-patterns"]
 
 [dependencies]
 structfs-core-store = { workspace = true }
-structfs-service = { workspace = true, optional = true }
-structfs-state = { workspace = true, features = ["service"], optional = true }
 structfs-serde-store = { workspace = true, optional = true }
 structfs-json-store = { workspace = true, optional = true }
+# Workspace entry disables `blocking`, so `net` alone stays portable.
 structfs-http = { workspace = true, optional = true }
 structfs-sys = { workspace = true, optional = true }
-
+structfs-handles = { workspace = true, optional = true }
+structfs-service = { workspace = true, optional = true }
+structfs-state = { workspace = true, features = ["service"], optional = true }
 structfs-profiles = { workspace = true, features = ["host"], optional = true }
 
+[dev-dependencies]
+serde = { workspace = true }
+
+# Every feature below names the facade module it adds, except `async`, which
+# adds the async trait families to the root (and to `typed` when enabled).
 [features]
 default = []
-serde = ["dep:structfs-serde-store"]
-json = ["serde", "dep:structfs-json-store"]
-http = ["serde", "dep:structfs-http"]
-http-streaming = ["http", "structfs-http/streaming"]
-sys = ["dep:structfs-sys"]
 async = ["structfs-core-store/async", "structfs-serde-store?/async"]
-service = ["dep:structfs-service", "async"]
-state = ["dep:structfs-state", "service", "serde"]
+typed = ["dep:structfs-serde-store"]
+# Implies `typed`: the file backings take `typed::Limits`.
+persist = ["typed", "dep:structfs-json-store"]
+# Portable HTTP schema: request/response/status types, SSE framing, errors.
+net = ["dep:structfs-http"]
+# Native blocking HTTP stores over reqwest (not for wasm32).
+net-blocking = ["net", "structfs-http/blocking"]
+# Native async streaming executor over reqwest.
+net-streaming = ["net", "async", "structfs-http/streaming"]
+os = ["dep:structfs-sys"]
+handles = ["dep:structfs-handles", "async"]
+# Implies `handles`: `SupervisedProtocol` wraps a `handles::HandleProtocol`.
+service = ["dep:structfs-service", "handles", "async"]
+state = ["dep:structfs-state", "service"]
 profiles = ["dep:structfs-profiles", "service"]
-full = ["serde", "json", "http-streaming", "sys", "async", "service", "state", "profiles"]
+full = [
+    "async",
+    "typed",
+    "persist",
+    "net",
+    "net-blocking",
+    "net-streaming",
+    "os",
+    "handles",
+    "service",
+    "state",
+    "profiles",
+]
 
 [[example]]
 name = "quickstart"
-required-features = ["json"]
+
+[[example]]
+name = "typed_persist"
+required-features = ["persist"]
 
 [package.metadata.docs.rs]
 all-features = true

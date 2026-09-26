@@ -499,3 +499,13 @@ every native path error. See [protocol](06-protocol.md) and
 Error envelopes may include optional `error.codec` detail (`kind`, `operation`,
 `format`, and original codec `message`). Codec resource limits use error type
 `resource_limit`; callers that ignore optional detail retain the diagnostic text.
+
+The error `type` is one of `not_found`, `no_route`, `forbidden`, `conflict`,
+`invalid_argument`, `unavailable`, `timeout`, `resource_limit`, `cancelled`,
+`invalid_path`, or `store_error` (`not_readable` and `not_writable` are
+accepted as `forbidden`). Optional structured fields let a reader rebuild the
+typed error exactly: `path` (the missing path, for `not_found` and
+`no_route`) and `component`/`position` (the offending component, for
+`invalid_path`). An `unavailable` or `cancelled` error carries a fixed
+message, never the provider's own text. Readers treat an unknown `type` as
+`store_error`.

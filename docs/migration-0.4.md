@@ -1,8 +1,10 @@
 # Migrating to 0.4
 
-0.4 is the coordinated StructFS/Featherweight candidate implementing the Isotope
-2026-09-14 specification candidate. See [registry status](release-status.md) for
-verified publication information; publication and validation are separate facts.
+0.4 is the coordinated StructFS/Featherweight release implementing the Isotope
+2026-09-14 specification snapshot; 0.4.0 was published for all workspace crates
+on 2026-09-16. See [registry status](release-status.md) for verified
+publication information, and [migration-0.5](migration-0.5.md) for the next
+(unreleased) line.
 Value JSON v1 and profile encodings remain independently versioned.
 
 ## Recoverable hosting

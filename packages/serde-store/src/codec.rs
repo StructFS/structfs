@@ -4,14 +4,23 @@ use bytes::Bytes;
 use structfs_core_store::{Codec, CodecErrorKind, CodecOperation, Error, Format, Value};
 
 /// Explicitly selected StructFS v1 codec contract.
+///
+/// Named `CodecProfile` rather than `Profile` because `structfs-profiles`
+/// uses the latter for capability contracts, which are an unrelated concept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile {
+#[non_exhaustive]
+pub enum CodecProfile {
+    /// Lossless tagged JSON: the only profile with a canonical spelling.
     ValueJson,
+    /// Plain JSON; bytes and non-finite floats are rejected.
     Json,
+    /// StructFS CBOR v1.
     Cbor,
+    /// StructFS FlexBuffers v1.
     Flexbuffers,
 }
-impl Profile {
+impl CodecProfile {
+    /// The profile's stable identifier, as used in the specification.
     pub fn identifier(self) -> &'static str {
         match self {
             Self::ValueJson => "structfs-value-json/1",
@@ -20,6 +29,7 @@ impl Profile {
             Self::Flexbuffers => "structfs-flexbuffers/1",
         }
     }
+    /// The wire format this profile encodes to and decodes from.
     pub fn format(self) -> Format {
         match self {
             Self::ValueJson => Format::VALUE_JSON,
@@ -28,30 +38,72 @@ impl Profile {
             Self::Flexbuffers => Format::FLEXBUFFERS,
         }
     }
+    /// Whether this profile defines a canonical spelling, i.e. whether
+    /// [`ValueCodec::canonical`] accepts it. Only the tagged JSON profile
+    /// does: the binary profiles have no whitespace to normalize and plain
+    /// JSON has no single spelling to normalize to.
+    pub fn has_canonical_form(self) -> bool {
+        matches!(self, Self::ValueJson)
+    }
 }
+
 /// A codec with caller-configured finite limits. Canonical validation applies only
 /// to tagged JSON and compares the complete supplied document, including whitespace.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValueCodec {
-    pub profile: Profile,
+    /// The selected wire contract.
+    pub profile: CodecProfile,
+    /// Finite bounds applied to every encode and decode.
     pub limits: Limits,
-    pub require_canonical: bool,
+    // Not public: it can only be set through `canonical`, which refuses the
+    // profiles that have no canonical form. A settable flag would let a
+    // caller build a codec whose decode always fails and whose encode
+    // silently ignores the request.
+    require_canonical: bool,
 }
 impl ValueCodec {
-    pub fn new(profile: Profile) -> Self {
+    /// A codec for `profile` with [`Limits::default`].
+    pub fn new(profile: CodecProfile) -> Self {
         Self {
             profile,
             limits: Limits::default(),
             require_canonical: false,
         }
     }
+    /// Replace the bounds applied to every encode and decode.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
     }
-    pub fn canonical(mut self) -> Self {
+    /// Require the canonical spelling on decode: the supplied document must
+    /// be byte-identical to the re-encoding of the value it decodes to,
+    /// whitespace included.
+    ///
+    /// Rejected here, at construction, for any profile without a canonical
+    /// form — [`CodecProfile::has_canonical_form`] says which. Deferring the
+    /// rejection to `decode` would hand the caller a codec that can never
+    /// succeed and an `encode` that quietly ignores the flag.
+    ///
+    /// ```
+    /// use structfs_serde_store::{CodecProfile, ValueCodec};
+    ///
+    /// assert!(ValueCodec::new(CodecProfile::ValueJson).canonical().is_ok());
+    /// assert!(ValueCodec::new(CodecProfile::Cbor).canonical().is_err());
+    /// ```
+    pub fn canonical(mut self) -> Result<Self, Error> {
+        if !self.profile.has_canonical_form() {
+            return Err(Error::invalid_argument(format!(
+                "profile {} has no canonical form",
+                self.profile.identifier()
+            )));
+        }
         self.require_canonical = true;
-        self
+        Ok(self)
+    }
+    /// Whether this codec requires the canonical spelling on decode.
+    pub fn requires_canonical(&self) -> bool {
+        self.require_canonical
     }
 }
 
@@ -70,14 +122,13 @@ impl Codec for ValueCodec {
             return Err(Error::UnsupportedFormat(format.clone()));
         }
         let result = (|| {
-            if self.require_canonical && self.profile != Profile::ValueJson {
-                return Err(Failure::new(CodecErrorKind::UnsupportedProfile));
-            }
+            // `canonical()` already refused every profile without a canonical
+            // form, so no runtime profile check is needed here.
             let v = match self.profile {
-                Profile::ValueJson => crate::json_profile::decode(bytes, &self.limits, true),
-                Profile::Json => crate::json_profile::decode(bytes, &self.limits, false),
-                Profile::Cbor => crate::cbor_profile::decode(bytes, &self.limits),
-                Profile::Flexbuffers => crate::flex_profile::decode(bytes, &self.limits),
+                CodecProfile::ValueJson => crate::json_profile::decode(bytes, &self.limits, true),
+                CodecProfile::Json => crate::json_profile::decode(bytes, &self.limits, false),
+                CodecProfile::Cbor => crate::cbor_profile::decode(bytes, &self.limits),
+                CodecProfile::Flexbuffers => crate::flex_profile::decode(bytes, &self.limits),
             }?;
             if self.require_canonical
                 && crate::json_profile::encode(&v, &self.limits, true)?.as_slice() != bytes.as_ref()
@@ -93,10 +144,10 @@ impl Codec for ValueCodec {
             return Err(Error::UnsupportedFormat(format.clone()));
         }
         let result = match self.profile {
-            Profile::ValueJson => crate::json_profile::encode(value, &self.limits, true),
-            Profile::Json => crate::json_profile::encode(value, &self.limits, false),
-            Profile::Cbor => crate::cbor_profile::encode(value, &self.limits),
-            Profile::Flexbuffers => crate::flex_profile::encode(value, &self.limits),
+            CodecProfile::ValueJson => crate::json_profile::encode(value, &self.limits, true),
+            CodecProfile::Json => crate::json_profile::encode(value, &self.limits, false),
+            CodecProfile::Cbor => crate::cbor_profile::encode(value, &self.limits),
+            CodecProfile::Flexbuffers => crate::flex_profile::encode(value, &self.limits),
         };
         result
             .map(Bytes::from)
@@ -110,13 +161,13 @@ macro_rules! default_codec {
         pub struct $name;
         impl Codec for $name {
             fn supports(&self, f: &Format) -> bool {
-                ValueCodec::new(Profile::$profile).supports(f)
+                ValueCodec::new(CodecProfile::$profile).supports(f)
             }
             fn decode(&self, b: &Bytes, f: &Format) -> Result<Value, Error> {
-                ValueCodec::new(Profile::$profile).decode(b, f)
+                ValueCodec::new(CodecProfile::$profile).decode(b, f)
             }
             fn encode(&self, v: &Value, f: &Format) -> Result<Bytes, Error> {
-                ValueCodec::new(Profile::$profile).encode(v, f)
+                ValueCodec::new(CodecProfile::$profile).encode(v, f)
             }
         }
     };
@@ -145,6 +196,26 @@ pub struct MultiCodec {
     codecs: Vec<Box<dyn Codec>>,
 }
 
+impl std::fmt::Debug for MultiCodec {
+    /// `Codec` is not `Debug`, so the members are reported by the formats
+    /// they claim rather than by type.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let supported: Vec<&Format> = [
+            &Format::JSON,
+            &Format::VALUE_JSON,
+            &Format::CBOR,
+            &Format::FLEXBUFFERS,
+        ]
+        .into_iter()
+        .filter(|format| self.supports(format))
+        .collect();
+        f.debug_struct("MultiCodec")
+            .field("codecs", &self.codecs.len())
+            .field("standard_formats", &supported)
+            .finish()
+    }
+}
+
 impl MultiCodec {
     /// Create an empty multi-codec.
     pub fn new() -> Self {
@@ -154,13 +225,6 @@ impl MultiCodec {
     /// Add a codec.
     pub fn add(&mut self, codec: impl Codec + 'static) {
         self.codecs.push(Box::new(codec));
-    }
-
-    /// Create a multi-codec with the JSON codec included.
-    pub fn with_json() -> Self {
-        let mut mc = Self::new();
-        mc.add(JsonCodec);
-        mc
     }
 
     /// The v1 transports, routed by explicit format. Each has its documented subset.
@@ -232,31 +296,17 @@ mod tests {
         let codec = JsonCodec;
 
         let bytes = Bytes::from_static(b"hello");
-        let result = codec.decode(&bytes, &Format::PROTOBUF);
-
-        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
-    }
-
-    #[test]
-    fn multi_codec_routes_correctly() {
-        let codec = MultiCodec::with_json();
-
+        assert!(matches!(
+            codec.decode(&bytes, &Format::PROTOBUF),
+            Err(Error::UnsupportedFormat(_))
+        ));
+        assert!(matches!(
+            codec.encode(&Value::from("test"), &Format::PROTOBUF),
+            Err(Error::UnsupportedFormat(_))
+        ));
         assert!(codec.supports(&Format::JSON));
         assert!(!codec.supports(&Format::PROTOBUF));
-
-        let value = Value::from("hello");
-        let bytes = codec.encode(&value, &Format::JSON).unwrap();
-        let decoded = codec.decode(&bytes, &Format::JSON).unwrap();
-
-        assert_eq!(value, decoded);
-    }
-
-    #[test]
-    fn json_codec_encode_unsupported_format() {
-        let codec = JsonCodec;
-        let value = Value::from("test");
-        let result = codec.encode(&value, &Format::PROTOBUF);
-        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+        assert!(!codec.supports(&Format::OCTET_STREAM));
     }
 
     #[test]
@@ -274,26 +324,83 @@ mod tests {
     }
 
     #[test]
-    fn multi_codec_decode_unsupported() {
-        let codec = MultiCodec::new(); // Empty, no codecs
-        let bytes = Bytes::from_static(b"hello");
-        let result = codec.decode(&bytes, &Format::JSON);
-        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
+    fn empty_multi_codec_supports_nothing() {
+        let codec = MultiCodec::new();
+        assert!(!codec.supports(&Format::JSON));
+        assert!(!codec.supports(&Format::PROTOBUF));
+        assert!(matches!(
+            codec.decode(&Bytes::from_static(b"hello"), &Format::JSON),
+            Err(Error::UnsupportedFormat(_))
+        ));
+        assert!(matches!(
+            codec.encode(&Value::from("test"), &Format::JSON),
+            Err(Error::UnsupportedFormat(_))
+        ));
     }
 
     #[test]
-    fn multi_codec_encode_unsupported() {
-        let codec = MultiCodec::new(); // Empty, no codecs
-        let value = Value::from("test");
-        let result = codec.encode(&value, &Format::JSON);
-        assert!(matches!(result, Err(Error::UnsupportedFormat(_))));
-    }
-
-    #[test]
-    fn multi_codec_default() {
+    fn multi_codec_default_is_standard() {
         let codec = MultiCodec::default();
-        // Default includes JSON
-        assert!(codec.supports(&Format::JSON));
+        for format in [
+            Format::JSON,
+            Format::VALUE_JSON,
+            Format::CBOR,
+            Format::FLEXBUFFERS,
+        ] {
+            assert!(codec.supports(&format), "default lacks {format}");
+        }
+    }
+
+    #[test]
+    fn multi_codec_debug_reports_routed_formats() {
+        let debug = format!("{:?}", MultiCodec::standard());
+        assert!(debug.contains("MultiCodec"), "{debug}");
+        assert!(debug.contains("codecs: 4"), "{debug}");
+        assert!(format!("{:?}", MultiCodec::new()).contains("codecs: 0"));
+    }
+
+    /// Whatever the tagged encoder accepts, the tagged decoder must read
+    /// back, however high the caller sets `max_depth`: each semantic level
+    /// costs several syntax levels, and the decoder's syntax ceiling is hard.
+    #[test]
+    fn tagged_json_reads_back_everything_it_writes_up_to_the_ceiling() {
+        let codec = ValueCodec::new(CodecProfile::ValueJson)
+            .with_limits(Limits::default().with_max_depth(usize::MAX));
+        for make in [
+            |v: Value| Value::Map([("k".to_string(), v)].into_iter().collect()),
+            |v: Value| Value::Array(vec![v]),
+        ] {
+            let mut value = Value::from(1i64);
+            for _ in 0..crate::json_profile::TAGGED_DEPTH_CEILING {
+                value = make(value);
+            }
+            let bytes = codec.encode(&value, &Format::VALUE_JSON).unwrap();
+            assert_eq!(codec.decode(&bytes, &Format::VALUE_JSON).unwrap(), value);
+
+            let deeper = make(value);
+            assert!(codec.encode(&deeper, &Format::VALUE_JSON).is_err());
+        }
+    }
+
+    #[test]
+    fn canonical_is_rejected_for_profiles_without_one() {
+        assert!(ValueCodec::new(CodecProfile::ValueJson)
+            .canonical()
+            .unwrap()
+            .requires_canonical());
+        for profile in [
+            CodecProfile::Json,
+            CodecProfile::Cbor,
+            CodecProfile::Flexbuffers,
+        ] {
+            assert!(!profile.has_canonical_form());
+            let err = ValueCodec::new(profile).canonical().unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidArgument { .. }),
+                "expected InvalidArgument for {profile:?}, got {err:?}"
+            );
+        }
+        assert!(!ValueCodec::new(CodecProfile::Json).requires_canonical());
     }
 
     #[test]
@@ -332,34 +439,15 @@ mod tests {
     }
 
     #[test]
-    fn json_codec_supports() {
-        let codec = JsonCodec;
-        assert!(codec.supports(&Format::JSON));
-        assert!(!codec.supports(&Format::PROTOBUF));
-        assert!(!codec.supports(&Format::OCTET_STREAM));
-    }
-
-    #[test]
-    fn json_codec_default() {
-        let codec: JsonCodec = Default::default();
-        assert!(codec.supports(&Format::JSON));
-    }
-
-    #[test]
-    fn json_codec_copy() {
-        let codec1 = JsonCodec;
+    fn default_codec_is_copy_default_and_debug() {
+        let codec1: JsonCodec = Default::default();
         let codec2 = codec1; // Copy
-                             // Both should work the same
         let bytes = codec1.encode(&Value::from("test"), &Format::JSON).unwrap();
-        let decoded = codec2.decode(&bytes, &Format::JSON).unwrap();
-        assert_eq!(decoded, Value::from("test"));
-    }
-
-    #[test]
-    fn json_codec_debug() {
-        let codec = JsonCodec;
-        let debug = format!("{:?}", codec);
-        assert!(debug.contains("JsonCodec"));
+        assert_eq!(
+            codec2.decode(&bytes, &Format::JSON).unwrap(),
+            Value::from("test")
+        );
+        assert!(format!("{:?}", codec1).contains("JsonCodec"));
     }
 
     fn sample() -> Value {
@@ -452,13 +540,6 @@ mod tests {
             let bytes = codec.encode(&sample(), &format).unwrap();
             assert_eq!(codec.decode(&bytes, &format).unwrap(), sample());
         }
-        assert!(!codec.supports(&Format::PROTOBUF));
-    }
-
-    #[test]
-    fn multi_codec_supports_empty() {
-        let codec = MultiCodec::new();
-        assert!(!codec.supports(&Format::JSON));
         assert!(!codec.supports(&Format::PROTOBUF));
     }
 }

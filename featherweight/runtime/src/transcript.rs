@@ -54,10 +54,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use structfs_core_store::{path, Error, Path, Reader, Record, Value, Writer};
+use structfs_core_store::{path, CodecDiagnostic, Error, Path, Record, Value};
 use structfs_serde_store::{from_value, to_value};
 
 use crate::namespace::HostStore;
+use crate::protocol::{ErrorKind, ErrorParts};
 
 /// Where a block's transcript lives, by block name. The store must honor the
 /// append-log convention (`write append`, `read entries/from/{n}`).
@@ -65,6 +66,7 @@ pub type TranscriptProvider = dyn Fn(&str) -> std::result::Result<HostStore, Err
 
 /// The runtime's transcript mode (spec 12: a mode, not a mandate).
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub enum TranscriptMode {
     /// No transcripts; every operation runs against the live world.
     #[default]
@@ -102,6 +104,7 @@ pub type SeekPoint = dyn Fn(&str) -> Option<u64> + Send + Sync;
 
 /// One boundary operation and its complete answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TranscriptEntry {
     pub op: String,
     pub path: Path,
@@ -120,18 +123,14 @@ pub struct TranscriptEntry {
 /// against an adversary who owns the transcript anyway.
 pub(crate) fn digest(data: &Record) -> Option<String> {
     let rendered = serde_json::to_string(data).ok()?;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in rendered.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    Some(format!("{hash:016x}"))
+    Some(format!("{:016x}", crate::hash::fnv1a(rendered.as_bytes())))
 }
 
 /// What the world said. `Found`/`Absent` answer reads, `Wrote` answers
 /// writes, and `Failed` answers either — refusals are answers too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TranscriptAnswer {
     Found(Record),
     Absent,
@@ -140,46 +139,54 @@ pub enum TranscriptAnswer {
 }
 
 /// An error as the transcript holds it: the typed kind (so replayed code
-/// branches the same way) plus the rendered message.
+/// branches the same way — see [`ErrorKind::label`]) plus the error's own
+/// message and whatever structured detail typed reconstruction needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TranscriptError {
     pub kind: String,
     pub message: String,
+    /// `not_found` / `no_route`: the path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<Path>,
+    /// `invalid_path`: the offending component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// `invalid_path`: the component's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u64>,
+    /// `codec`: the portable codec diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<CodecDiagnostic>,
 }
 
 fn error_to_transcript(error: &Error) -> TranscriptError {
-    let (kind, message, path) = match error {
-        Error::NotFound { path } => ("not_found", String::new(), Some(path.clone())),
-        Error::NoRoute { path } => ("no_route", String::new(), Some(path.clone())),
-        Error::PermissionDenied { message } => ("permission_denied", message.clone(), None),
-        Error::Conflict { message } => ("conflict", message.clone(), None),
-        Error::Overloaded { message } => ("overloaded", message.clone(), None),
-        Error::DeadlineExceeded { message } => ("deadline_exceeded", message.clone(), None),
-        Error::ResourceLimit { message } => ("resource_limit", message.clone(), None),
-        Error::Cancelled { message } => ("cancelled", message.clone(), None),
-        other => ("other", other.to_string(), None),
+    let parts = ErrorParts::of(error);
+    let (component, position) = match parts.component {
+        Some((component, position)) => (Some(component), Some(position)),
+        None => (None, None),
     };
     TranscriptError {
-        kind: kind.to_string(),
-        message,
-        path,
+        kind: parts.kind.label().to_string(),
+        message: parts.message,
+        path: parts.path,
+        component,
+        position,
+        codec: parts.codec,
     }
 }
 
 fn transcript_to_error(transcript: TranscriptError) -> Error {
-    match (transcript.kind.as_str(), transcript.path) {
-        ("not_found", Some(path)) => Error::not_found(path),
-        ("no_route", Some(path)) => Error::NoRoute { path },
-        ("permission_denied", _) => Error::permission_denied(transcript.message),
-        ("conflict", _) => Error::conflict(transcript.message),
-        ("overloaded", _) => Error::overloaded(transcript.message),
-        ("deadline_exceeded", _) => Error::deadline_exceeded(transcript.message),
-        ("resource_limit", _) => Error::resource_limit(transcript.message),
-        ("cancelled", _) => Error::cancelled(transcript.message),
-        _ => Error::store("transcript", "replayed", transcript.message),
+    ErrorParts {
+        kind: ErrorKind::from_label(&transcript.kind),
+        message: transcript.message,
+        path: transcript.path,
+        component: transcript
+            .component
+            .map(|component| (component, transcript.position.unwrap_or(0))),
+        codec: transcript.codec,
     }
+    .into_error("transcript", "replayed")
 }
 
 /// One block's transcript, held by its [`crate::Namespace`].
@@ -247,8 +254,8 @@ impl BlockTranscript {
 
     /// Load a transcript prefix for seek-then-live: replay `to` entries
     /// (`None` = all of them), then hand off instead of failing.
-    pub(crate) fn seeking(log: HostStore, to: Option<u64>) -> Result<Self, Error> {
-        let mut loaded = Self::replaying(log)?;
+    pub(crate) async fn seeking(log: HostStore, to: Option<u64>) -> Result<Self, Error> {
+        let mut loaded = Self::replaying(log).await?;
         let BlockTranscript::Replaying {
             entries, then_live, ..
         } = &mut loaded
@@ -295,9 +302,8 @@ impl BlockTranscript {
     }
 
     /// Load a transcript for replay through the append-log tail convention.
-    pub(crate) fn replaying(log: HostStore) -> Result<Self, Error> {
-        let mut log = log;
-        let page = log.read(&path!("entries/from/0"))?.ok_or_else(|| {
+    pub(crate) async fn replaying(log: HostStore) -> Result<Self, Error> {
+        let page = log.read(&path!("entries/from/0")).await?.ok_or_else(|| {
             Error::store(
                 "transcript",
                 "replay",
@@ -351,7 +357,7 @@ impl BlockTranscript {
 
     /// Append one answered operation. Failing to record fails the
     /// operation: a transcript with a hole is worse than a failed run.
-    fn record(
+    async fn record(
         &mut self,
         op: &str,
         at: &Path,
@@ -367,12 +373,13 @@ impl BlockTranscript {
             answer,
             wrote,
         };
-        log.write(&path!("append"), Record::parsed(to_value(&entry)?))?;
+        log.write(&path!("append"), Record::parsed(to_value(&entry)?))
+            .await?;
         *appended += 1;
         Ok(())
     }
 
-    pub(crate) fn record_read(
+    pub(crate) async fn record_read(
         &mut self,
         at: &Path,
         result: &Result<Option<Record>, Error>,
@@ -382,10 +389,10 @@ impl BlockTranscript {
             Ok(None) => TranscriptAnswer::Absent,
             Err(error) => TranscriptAnswer::Failed(error_to_transcript(error)),
         };
-        self.record("read", at, answer, None)
+        self.record("read", at, answer, None).await
     }
 
-    pub(crate) fn record_write(
+    pub(crate) async fn record_write(
         &mut self,
         at: &Path,
         wrote: Option<String>,
@@ -395,7 +402,7 @@ impl BlockTranscript {
             Ok(path) => TranscriptAnswer::Wrote(path.clone()),
             Err(error) => TranscriptAnswer::Failed(error_to_transcript(error)),
         };
-        self.record("write", at, answer, wrote)
+        self.record("write", at, answer, wrote).await
     }
 
     /// The next entry, checked against what the block actually asked.
@@ -492,20 +499,18 @@ mod tests {
 
     #[test]
     fn typed_errors_replay_typed() {
-        for error in [
-            Error::not_found(path!("users/nobody")),
-            Error::permission_denied("unwired"),
-            Error::conflict("stale"),
-            Error::overloaded("busy"),
-            Error::deadline_exceeded("30s"),
-            Error::resource_limit("quota"),
-            Error::cancelled("shutdown"),
-        ] {
+        for error in crate::protocol::tests::every_error() {
             let replayed = transcript_to_error(error_to_transcript(&error));
             assert_eq!(
-                std::mem::discriminant(&replayed),
-                std::mem::discriminant(&error),
+                ErrorKind::of(&replayed),
+                ErrorKind::of(&error),
                 "{error} came back as {replayed}"
+            );
+            // The entry survives the store's value form, too.
+            let entry = to_value(&error_to_transcript(&error)).unwrap();
+            assert_eq!(
+                from_value::<TranscriptError>(entry).unwrap(),
+                error_to_transcript(&error)
             );
         }
         // Untyped errors keep their rendered message.
@@ -514,8 +519,8 @@ mod tests {
         assert!(replayed.to_string().contains("http::read: boom"));
     }
 
-    #[test]
-    fn record_then_replay_answers_in_order() {
+    #[tokio::test]
+    async fn record_then_replay_answers_in_order() {
         let log = host_store(LogStore::open(MemoryAppendBacking::new()).unwrap());
         let mut transcript = BlockTranscript::recording(log.clone());
         transcript
@@ -523,6 +528,7 @@ mod tests {
                 &path!("iso/random/uuid"),
                 &Ok(Some(Record::parsed(Value::from("u-1")))),
             )
+            .await
             .unwrap();
         transcript
             .record_write(
@@ -530,15 +536,17 @@ mod tests {
                 digest(&Record::parsed(Value::from("hello"))),
                 &Ok(path!("greeting")),
             )
+            .await
             .unwrap();
         transcript
             .record_read(
                 &path!("services/nothing"),
                 &Err(Error::permission_denied("unwired")),
             )
+            .await
             .unwrap();
 
-        let mut replay = BlockTranscript::replaying(log.clone()).unwrap();
+        let mut replay = BlockTranscript::replaying(log.clone()).await.unwrap();
         let answer = replay.replay_read(&path!("iso/random/uuid")).unwrap();
         assert_eq!(answer.unwrap().as_value(), Some(&Value::from("u-1")));
         assert_eq!(
@@ -558,7 +566,7 @@ mod tests {
 
         // The same path with different data is a diverged run, not an
         // acknowledged write.
-        let mut replay = BlockTranscript::replaying(log).unwrap();
+        let mut replay = BlockTranscript::replaying(log).await.unwrap();
         replay.replay_read(&path!("iso/random/uuid")).unwrap();
         let lied = replay
             .replay_write(
@@ -569,19 +577,20 @@ mod tests {
         assert!(lied.to_string().contains("different data"), "{lied}");
     }
 
-    #[test]
-    fn divergence_and_exhaustion_fail_loudly() {
+    #[tokio::test]
+    async fn divergence_and_exhaustion_fail_loudly() {
         let log = host_store(LogStore::open(MemoryAppendBacking::new()).unwrap());
         let mut transcript = BlockTranscript::recording(log.clone());
         transcript
             .record_read(&path!("iso/time/now"), &Ok(None))
+            .await
             .unwrap();
 
-        let mut replay = BlockTranscript::replaying(log.clone()).unwrap();
+        let mut replay = BlockTranscript::replaying(log.clone()).await.unwrap();
         let diverged = replay.replay_read(&path!("iso/random/uuid")).unwrap_err();
         assert!(diverged.to_string().contains("diverged"), "{diverged}");
 
-        let mut replay = BlockTranscript::replaying(log).unwrap();
+        let mut replay = BlockTranscript::replaying(log).await.unwrap();
         replay.replay_read(&path!("iso/time/now")).unwrap();
         let out = replay.replay_read(&path!("iso/time/now")).unwrap_err();
         assert!(out.to_string().contains("ran out"), "{out}");

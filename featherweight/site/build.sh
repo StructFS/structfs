@@ -3,15 +3,23 @@ set -euo pipefail
 
 SITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SITE_DIR/../.." && pwd)"
+HOST_DIR="$REPO_ROOT/featherweight/host/browser"
 
 echo "==> Building the demo block (kv.wasm)..."
 cargo build --target wasm32-unknown-unknown --release \
-  -p featherweight-guest \
+  -p featherweight-guest --features reference-guest \
   --manifest-path "$REPO_ROOT/Cargo.toml"
 
+# The browser host is TypeScript; its own `build` script (tsc) emits ES
+# modules to dist/ with relative imports rewritten to `.js`.
+echo "==> Compiling the browser host..."
+npm ci --prefix "$HOST_DIR" --no-audit --no-fund
+npm run --prefix "$HOST_DIR" build
+
 echo "==> Copying the browser host + demo block..."
+rm -rf "$SITE_DIR/src/demo"
 mkdir -p "$SITE_DIR/src/demo"
-cp "$REPO_ROOT/featherweight/host/browser/"*.mjs "$SITE_DIR/src/demo/"
+cp "$HOST_DIR/dist/"*.js "$SITE_DIR/src/demo/"
 cp "$REPO_ROOT/target/wasm32-unknown-unknown/release/featherweight_guest.wasm" \
   "$SITE_DIR/src/demo/kv.wasm"
 

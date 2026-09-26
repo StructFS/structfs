@@ -15,6 +15,7 @@ use crate::error::{Result, RuntimeError};
 
 /// One block reference within an assembly.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct BlockDef {
     /// Artifact reference: `builtin:{name}`, a `.wasm` path, or a nested
     /// assembly definition file (`.json`/`.yaml`/`.yml`).
@@ -49,6 +50,7 @@ impl BlockDef {
 
 /// A wiring target.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum WireTarget {
     /// Another block in this assembly, by local name.
     Block(String),
@@ -58,6 +60,7 @@ pub enum WireTarget {
 
 /// One wiring entry: `block:/prefix -> target`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct WireDef {
     /// The block whose namespace gains the mount.
     pub block: String,
@@ -67,8 +70,10 @@ pub struct WireDef {
     pub target: WireTarget,
 }
 
-/// A parsed assembly definition.
+/// A parsed assembly definition. Construct one by parsing
+/// ([`AssemblyDef::from_str`], [`AssemblyDef::from_value`]).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct AssemblyDef {
     pub name: String,
     pub version: Option<String>,
@@ -391,7 +396,7 @@ impl AssemblyDef {
             serde_json::from_str(source)
                 .map_err(|e| RuntimeError::assembly(format!("bad JSON definition: {e}")))?
         } else {
-            serde_yaml::from_str(source)
+            serde_norway::from_str(source)
                 .map_err(|e| RuntimeError::assembly(format!("bad YAML definition: {e}")))?
         };
         Self::from_value(&structfs_serde_store::json_to_value(json))
@@ -529,7 +534,7 @@ mod validation_regressions {
             definition[field] = value;
             for source in [
                 definition.to_string(),
-                serde_yaml::to_string(&definition).unwrap(),
+                serde_norway::to_string(&definition).unwrap(),
             ] {
                 let error = AssemblyDef::from_str(&source).unwrap_err().to_string();
                 assert!(error.contains(diagnostic), "{error}");
@@ -553,6 +558,50 @@ mod validation_regressions {
                 .to_string();
             assert!(error.contains(&format!("blocks.a.{field}")), "{error}");
         }
+    }
+
+    /// YAML is a surface syntax only: anchors, flow collections, quoted
+    /// scalars, and block literals parse to the same definition as JSON.
+    #[test]
+    fn yaml_and_json_sources_parse_identically() {
+        let yaml = r#"
+assembly: same
+version: "1.0"
+blocks:
+  a: &echo builtin:echo
+  b: *echo
+  c:
+    artifact: builtin:kv
+    args: [one, "2", 'three']
+    env: {HOME: /blocks}
+    spawn: true
+public: a
+wiring:
+  - "a:/services/b -> b"
+config:
+  a:
+    count: 3
+    ratio: 0.5
+    enabled: true
+    nothing: null
+    text: |
+      two
+      lines
+"#;
+        let json = json!({
+            "assembly": "same", "version": "1.0",
+            "blocks": {"a": "builtin:echo", "b": "builtin:echo",
+                "c": {"artifact": "builtin:kv", "args": ["one", "2", "three"],
+                      "env": {"HOME": "/blocks"}, "spawn": true}},
+            "public": "a",
+            "wiring": ["a:/services/b -> b"],
+            "config": {"a": {"count": 3, "ratio": 0.5, "enabled": true,
+                             "nothing": null, "text": "two\nlines\n"}}
+        });
+        assert_eq!(
+            AssemblyDef::from_str(yaml).unwrap(),
+            AssemblyDef::from_str(&json.to_string()).unwrap()
+        );
     }
 
     #[test]

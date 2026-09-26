@@ -8,8 +8,18 @@ templateClass: doc-page
 
 # Namecode Specification
 
-**Version:** 0.1
+**Version:** 0.2
 **Status:** Draft
+
+> **Change from 0.1.** `encode` is now injective. `decode` rejects
+> non-canonical spellings (uppercase digits, redundant delimiters), the empty
+> string encodes to the bare prefix `_N_`, and `encode` no longer passes a
+> string that already looks like an encoding through unchanged. The
+> consequence is that `encode` is no longer idempotent; in exchange every
+> string round-trips: `decode(encode(s)) == s` whenever `encode(s) != s`, and
+> a passthrough stands for itself. In 0.1 a literal that looked encoded
+> (`_N_helloworld__fa0b`) was passed through and then decoded to something
+> else.
 
 ## Abstract
 
@@ -30,15 +40,17 @@ Namecode solves this by providing a reversible, deterministic encoding that:
 
 | Property | Definition |
 |----------|------------|
-| **Roundtrip** | If `encode(s)` starts with `_N_`, then `decode(encode(s)) == s` |
-| **Passthrough** | If `encode(s)` does not start with `_N_`, then `encode(s) == s` |
-| **Identity** | `encode(decode(s)) == s` for all valid encodings `s` |
-| **Idempotency** | `encode(encode(s)) == encode(s)` |
-| **Valid Output** | `encode(s)` is a valid UAX 31 identifier (for non-empty `s`) |
+| **Roundtrip** | `decode(encode(s)) == s` for every `s` whose encoding starts with `_N_`, which is every `s` that is not a passthrough |
+| **Passthrough** | `encode(s) == s` exactly when `s` is a valid XID identifier that does not start with `_N_` |
+| **Canonicality** | `decode(encode_forced(s)) == s` for every `s`, and `encode_forced(decode(t)) == t` for every `t` that `decode` accepts: each value has exactly one encoding. (`encode(decode(t))` may differ from `t`: `decode("_N_foo")` is `foo`, which `encode` passes through.) |
+| **Injectivity** | `encode(a) == encode(b)` implies `a == b` |
+| **Valid Output** | `encode(s)` is a valid UAX 31 identifier for *every* `s`, the empty string included |
 | **Deterministic** | Same input always produces same output |
 | **O(n) Complexity** | Both encode and decode run in linear time |
 
-Note: Strings that are already valid XID identifiers (and don't conflict with the encoding format) pass through unchanged. The `decode` function only accepts strings with the `_N_` prefix.
+Namecode is **not idempotent**: `encode(encode(s))` encodes twice. Idempotency and injectivity cannot both hold, because an idempotent encoder must pass some encoding `t` through unchanged, and then `t` is the encoding of both `t` and of whatever `t` decodes to. Injectivity is the property callers actually depend on — it is what makes a round trip through an identifier lossless — so it wins. Use `is_encoded(s)` to test whether a string is already an encoding.
+
+Note: `decode` only accepts strings with the `_N_` prefix, and only the canonical spelling of each value.
 
 ### Non-Goals
 
@@ -65,6 +77,7 @@ namecode    = passthrough | encoded
 passthrough = xid_identifier   ; if no collisions
 encoded     = "_N_" basic "__" insertions
             | "_N_" basic                      ; no non-basic chars
+            | "_N_"                            ; the empty string
 
 basic       = { xid_continue } ; no "__", no trailing "_" if insertions exist
 insertions  = { position_delta codepoint }
@@ -72,16 +85,9 @@ insertions  = { position_delta codepoint }
 
 ### Decision Tree
 
-<pre class="decision-tree"><span class="dt-question">Is input empty?</span>
-  └─ <span class="dt-yes">Yes</span> → return <span class="dt-string">""</span>
-  └─ <span class="dt-no">No</span>  ↓
-
-<span class="dt-question">Is input a valid XID identifier AND doesn't start with "_N_"?</span>
+<pre class="decision-tree"><span class="dt-question">Is input a valid XID identifier AND doesn't start with "_N_"?</span>
+  <span class="dt-note">(the empty string is not a valid identifier, so it takes the No branch)</span>
   └─ <span class="dt-yes">Yes</span> → return input unchanged <span class="dt-note">(passthrough)</span>
-  └─ <span class="dt-no">No</span>  ↓
-
-<span class="dt-question">Is input already a valid Namecode encoding?</span>
-  └─ <span class="dt-yes">Yes</span> → return input unchanged <span class="dt-note">(idempotency)</span>
   └─ <span class="dt-no">No</span>  ↓
 
 <span class="dt-question">Encode the input:</span>
@@ -104,7 +110,8 @@ insertions  = { position_delta codepoint }
 | `123foo` | `_N_123foo` | Digit can't start identifier (all chars XID_Continue) |
 | `_N_test` | `_N__N_test` | Prefix collision (all chars XID_Continue) |
 | `_` | `_` | Single underscore is valid XID |
-| `` (empty) | `` (empty) | Empty passthrough |
+| `` (empty) | `_N_` | Empty string is not an identifier; bare prefix is its encoding |
+| `_N_helloworld__fa0b` | `_N__N_helloworld_fa0b__oa3l` | A literal that looks encoded is still encoded |
 
 ## Bootstring Encoding
 
@@ -206,7 +213,14 @@ encode("_N_test") → "_N__N_test" (not "_N_test")
 decode("_N__N_test") → "_N_test"
 ```
 
-Note: If a string starting with `_N_` happens to be a valid Namecode encoding of some other string, the idempotency check will return it unchanged. This is intentional for the encode-encode idempotency property.
+This holds even when the input *is* a valid Namecode encoding of some other string. `_N_helloworld__fa0b` encodes `hello world`, but as an input to `encode` it is just a string, and it is encoded like any other:
+
+```
+encode("_N_helloworld__fa0b") → "_N__N_helloworld_fa0b__oa3l"
+decode("_N__N_helloworld_fa0b__oa3l") → "_N_helloworld__fa0b"
+```
+
+Passing it through instead would make `decode` lossy for anyone who stored that literal, which is exactly the ambiguity the prefix rule exists to prevent.
 
 ### Double Underscore Passthrough
 
@@ -238,11 +252,14 @@ Decoding can fail with these errors:
 
 | Error | Cause |
 |-------|-------|
-| `NotEncoded` | Input doesn't start with `_N_` |
-| `InvalidDigit(char)` | Character in encoded portion not in alphabet |
+| `NotEncoded` | Input doesn't start with `_N_`, or its basic portion holds characters the encoder never emits |
+| `InvalidDigit(char)` | Character in encoded portion not in alphabet. The alphabet is lowercase-only: `A`-`Z` are invalid digits |
 | `UnexpectedEnd` | Encoded data truncated mid-varint |
 | `InvalidCodepoint(u32)` | Decoded codepoint not valid Unicode |
 | `Overflow` | Arithmetic overflow during decoding |
+| `NonCanonical` | Input parses, but re-encoding the result does not reproduce it (e.g. `_N___`, a redundant spelling of `_N_`) |
+
+The `NonCanonical` check is what keeps the encoding one-to-one: without it, `_N_` and `_N___` would both decode to the empty string and `encode` would not be invertible.
 
 ## API
 
@@ -252,8 +269,16 @@ Decoding can fail with these errors:
 /// Encode a Unicode string into a valid UAX 31 identifier.
 pub fn encode(input: &str) -> String;
 
+/// Encode unconditionally, even where `encode` would pass through.
+/// Always returns a `_N_`-prefixed form. For callers whose identifier
+/// grammar is narrower than UAX 31.
+pub fn encode_forced(input: &str) -> String;
+
 /// Decode a Namecode string back to Unicode.
 pub fn decode(input: &str) -> Result<String, DecodeError>;
+
+/// Report whether a string is a canonical Namecode encoding.
+pub fn is_encoded(input: &str) -> bool;
 
 /// Check if a string is a valid XID identifier (UAX 31).
 pub fn is_xid_identifier(input: &str) -> bool;
@@ -324,7 +349,7 @@ Future versions may add:
 
 | Input | Output | Notes |
 |-------|--------|-------|
-| `` | `` | Empty string |
+| `` | `_N_` | Empty string: bare prefix |
 | ` ` | `_N___a0b` | Single space (non-basic) |
 | `a` | `a` | Single letter |
 | `_` | `_` | Single underscore (valid XID) |

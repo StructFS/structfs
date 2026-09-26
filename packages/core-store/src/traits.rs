@@ -56,12 +56,22 @@ pub trait Reader: Send + Sync {
     /// Returns `Ok(Some(record))` if data exists at the path,
     /// `Ok(None)` if the path doesn't exist,
     /// or `Err` if an error occurred.
+    ///
+    /// # Routing stores
+    ///
+    /// A store that routes by prefix (`OverlayStore`, `MountStore`) returns
+    /// `Err(Error::NoRoute)` for a path no mounted store covers, and
+    /// `Ok(None)` only when the routed store itself reports the path absent.
+    /// Layering combinators treat every error as terminal: `Cascade` does
+    /// not consult its fallback on `NoRoute`, so mount a catch-all store at
+    /// the root when fall-through is wanted.
     fn read(&mut self, from: &Path) -> Result<Option<Record>, Error>;
 
     /// Enumerate one names-only page. Override for bounded large-directory
     /// discovery; the default materializes `read_children` before slicing.
-    /// A zero limit or an offset past the end is invalid. Preserve missing
-    /// versus present-but-empty. `next` must advance when more names remain.
+    /// A zero limit or an offset past the end is an `InvalidArgument`
+    /// error. Preserve missing versus present-but-empty. `next` must
+    /// advance when more names remain.
     fn read_children_page(
         &mut self,
         from: &Path,
@@ -69,20 +79,12 @@ pub trait Reader: Send + Sync {
         limit: usize,
     ) -> Result<Option<crate::ChildPage>, Error> {
         if limit == 0 {
-            return Err(Error::conflict("child page limit must be positive"));
+            return Err(Error::invalid_argument("child page limit must be positive"));
         }
         let Some(names) = self.read_children(from)? else {
             return Ok(None);
         };
-        if offset > names.len() {
-            return Err(Error::conflict("child cursor past end"));
-        }
-        let end = offset.saturating_add(limit).min(names.len());
-        let next = (end < names.len()).then_some(end);
-        Ok(Some(crate::ChildPage {
-            names: names.into_iter().skip(offset).take(limit).collect(),
-            next,
-        }))
+        crate::children::page_names(names, offset, limit).map(Some)
     }
 
     /// Enumerate the child names directly under a path.
@@ -92,21 +94,20 @@ pub trait Reader: Send + Sync {
     ///
     /// The default implementation reads the path and projects children from
     /// the parsed value: map keys, or indices for arrays. Stores that can
-    /// enumerate more cheaply (or that serve `Record::Raw`) should override
-    /// this.
+    /// enumerate more cheaply should override this; stores that serve
+    /// `Record::Raw` *must*, since the default cannot inspect raw bytes and
+    /// returns `Error::UnsupportedFormat` with the record's format.
+    ///
+    /// Listing-style stores (such as `MountStore`'s `ctx/mounts`) may return
+    /// multi-segment names like `ctx/sys`, which are readable only when
+    /// joined onto `from` as a whole path, not as a single component.
     fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
         let Some(record) = self.read(from)? else {
             return Ok(None);
         };
         match record.as_value() {
-            Some(Value::Map(map)) => Ok(Some(map.keys().cloned().collect())),
-            Some(Value::Array(arr)) => Ok(Some((0..arr.len()).map(|i| i.to_string()).collect())),
-            Some(_) => Ok(Some(Vec::new())),
-            None => Err(Error::store(
-                "reader",
-                "read_children",
-                "cannot enumerate children of a raw record; the store must override read_children",
-            )),
+            Some(value) => Ok(Some(crate::children::names_of_value(value))),
+            None => Err(Error::UnsupportedFormat(record.format())),
         }
     }
 }
@@ -268,39 +269,12 @@ impl<T: Codec + ?Sized> Codec for Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// Simple in-memory store for testing.
-    struct TestStore {
-        data: HashMap<Path, Record>,
-    }
-
-    impl TestStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
-        }
-    }
-
-    impl Reader for TestStore {
-        fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            Ok(self.data.get(from).cloned())
-        }
-    }
-
-    impl Writer for TestStore {
-        fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            self.data.insert(to.clone(), data);
-            Ok(to.clone())
-        }
-    }
+    use crate::test_support::RawMapStore;
+    use crate::{path, MemoryStore};
 
     #[test]
     fn basic_store_works() {
-        use crate::path;
-
-        let mut store = TestStore::new();
+        let mut store = MemoryStore::new();
 
         let path = path!("users/123");
         let record = Record::parsed(Value::from("Alice"));
@@ -313,9 +287,7 @@ mod tests {
 
     #[test]
     fn object_safety_works() {
-        use crate::path;
-
-        let mut store = TestStore::new();
+        let mut store = MemoryStore::new();
         let boxed: &mut dyn Store = &mut store;
 
         let path = path!("test");
@@ -352,68 +324,28 @@ mod tests {
     }
 
     #[test]
-    fn ref_mut_reader_works() {
-        use crate::path;
-
-        let mut store = TestStore::new();
+    fn ref_mut_reader_and_writer_work() {
+        let mut store = MemoryStore::new();
         let path = path!("test");
-        store
+
+        // Use &mut reference as Writer, then as Reader
+        let store_ref: &mut MemoryStore = &mut store;
+        store_ref
             .write(&path, Record::parsed(Value::from("value")))
             .unwrap();
-
-        // Use &mut reference as Reader
-        let store_ref: &mut TestStore = &mut store;
         let result = store_ref.read(&path).unwrap();
         assert!(result.is_some());
     }
 
     #[test]
-    fn ref_mut_writer_works() {
-        use crate::path;
-
-        let mut store = TestStore::new();
-
-        // Use &mut reference as Writer
-        let store_ref: &mut TestStore = &mut store;
-        let path = path!("test");
-        let result = store_ref.write(&path, Record::parsed(Value::from("data")));
-        assert!(result.is_ok());
-
-        // Verify it was written
-        let read_result = store.read(&path).unwrap();
-        assert!(read_result.is_some());
-    }
-
-    #[test]
-    fn boxed_reader_works() {
-        use crate::path;
-
-        let mut store = TestStore::new();
+    fn boxed_reader_and_writer_work() {
+        let mut boxed: Box<MemoryStore> = Box::new(MemoryStore::new());
         let path = path!("boxed_test");
-        store
+        boxed
             .write(&path, Record::parsed(Value::from("boxed_value")))
             .unwrap();
-
-        // Use Box as Reader
-        let mut boxed: Box<TestStore> = Box::new(store);
         let result = boxed.read(&path).unwrap();
         assert!(result.is_some());
-    }
-
-    #[test]
-    fn boxed_writer_works() {
-        use crate::path;
-
-        let store = TestStore::new();
-        let mut boxed: Box<TestStore> = Box::new(store);
-
-        let path = path!("boxed_write");
-        let result = boxed.write(&path, Record::parsed(Value::from("data")));
-        assert!(result.is_ok());
-
-        // Verify it was written
-        let read_result = boxed.read(&path).unwrap();
-        assert!(read_result.is_some());
     }
 
     #[test]
@@ -464,25 +396,24 @@ mod tests {
         // Verify that anything implementing Reader + Writer auto-implements Store
         fn requires_store<S: Store>(_s: &mut S) {}
 
-        let mut store = TestStore::new();
-        requires_store(&mut store); // This compiles because TestStore: Reader + Writer
+        let mut store = MemoryStore::new();
+        requires_store(&mut store);
     }
 
     #[test]
     fn read_missing_returns_none() {
-        use crate::path;
-
-        let mut store = TestStore::new();
+        let mut store = MemoryStore::new();
         let result = store.read(&path!("nonexistent")).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn read_children_default_impl() {
-        use crate::path;
         use std::collections::BTreeMap;
 
-        let mut store = TestStore::new();
+        // RawMapStore does not override read_children, so this exercises the
+        // trait default's value projection.
+        let mut store = RawMapStore::new();
 
         // Map value: children are the keys
         let mut map = BTreeMap::new();
@@ -519,23 +450,55 @@ mod tests {
     }
 
     #[test]
-    fn read_children_raw_record_errors() {
-        use crate::path;
+    fn read_children_page_default_impl() {
+        let mut store = RawMapStore::new();
+        store
+            .write(
+                &path!("items"),
+                Record::parsed(Value::Array(vec![
+                    Value::from("a"),
+                    Value::from("b"),
+                    Value::from("c"),
+                ])),
+            )
+            .unwrap();
+        let page = store
+            .read_children_page(&path!("items"), 1, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.names, vec!["1".to_string()]);
+        assert_eq!(page.next, Some(2));
+        assert!(store
+            .read_children_page(&path!("missing"), 0, 1)
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            store.read_children_page(&path!("items"), 0, 0),
+            Err(Error::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            store.read_children_page(&path!("items"), 4, 1),
+            Err(Error::InvalidArgument { .. })
+        ));
+    }
 
-        let mut store = TestStore::new();
+    #[test]
+    fn read_children_raw_record_is_unsupported_format() {
+        let mut store = RawMapStore::new();
         store
             .write(
                 &path!("raw"),
                 Record::raw(Bytes::from_static(b"{}"), Format::JSON),
             )
             .unwrap();
-        assert!(store.read_children(&path!("raw")).is_err());
+        assert!(matches!(
+            store.read_children(&path!("raw")),
+            Err(Error::UnsupportedFormat(f)) if f == Format::JSON
+        ));
     }
 
     #[test]
     fn read_children_delegates_through_wrappers() {
-        use crate::path;
-
         /// Store that overrides read_children without storing map values.
         struct ListingStore;
 
@@ -561,5 +524,11 @@ mod tests {
             boxed.read_children(&path!("x")).unwrap(),
             Some(vec!["custom".to_string()])
         );
+        // Paging through the wrapper reaches the override too.
+        let page = boxed
+            .read_children_page(&path!("x"), 0, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.names, vec!["custom".to_string()]);
     }
 }

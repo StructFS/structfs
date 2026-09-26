@@ -22,7 +22,7 @@ if [[ $# -ge 1 ]]; then
     WASM_OUTPUT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 else
     echo "Building guest crate for wasm (core binding)..."
-    cargo build -p featherweight-guest --target "$TARGET" --release --quiet
+    cargo build -p featherweight-guest --features reference-guest --target "$TARGET" --release --quiet
 fi
 
 # An assembly with the shell in front of the wasm kv block.

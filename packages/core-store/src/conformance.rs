@@ -17,7 +17,7 @@
 //! The checks write under top-level components prefixed `conformance_`;
 //! run them against a fresh store instance.
 
-use crate::{path, Path, Reader, Record, Store, Value};
+use crate::{path, Error, Format, Path, Reader, Record, Store, Value};
 
 /// Run every convention check against a fresh store.
 pub fn check_conventions<S: Store>(store: &mut S) {
@@ -26,6 +26,8 @@ pub fn check_conventions<S: Store>(store: &mut S) {
     check_deep_write_creates_intermediates(store);
     check_prefix_read_returns_children(store);
     check_read_children(store);
+    check_read_children_page(store);
+    check_raw_record_write(store);
     check_null_write_deletes_subtree(store);
     check_map_write_replaces_subtree(store);
 }
@@ -151,6 +153,120 @@ pub fn check_read_children<S: Store>(store: &mut S) {
     );
 }
 
+/// `read_children_page` pages the same names `read_children` enumerates,
+/// advances its cursor, reports `None` for missing paths, and rejects a zero
+/// limit or an offset past the end with `Error::InvalidArgument`.
+pub fn check_read_children_page<S: Store>(store: &mut S) {
+    let parent = path!("conformance_page");
+    for name in ["a", "b", "c"] {
+        store
+            .write(
+                &parent.join(&Path::parse(name).unwrap()),
+                Record::parsed(Value::from(1i64)),
+            )
+            .expect("write failed");
+    }
+
+    let mut expected = store
+        .read_children(&parent)
+        .expect("read_children failed")
+        .expect("read_children must return Some at an existing prefix");
+    expected.sort();
+
+    let mut collected = Vec::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = store
+            .read_children_page(&parent, offset, 2)
+            .expect("read_children_page failed")
+            .expect("read_children_page must return Some at an existing prefix");
+        assert!(
+            page.names.len() <= 2,
+            "a page must not exceed the requested limit"
+        );
+        collected.extend(page.names);
+        pages += 1;
+        match page.next {
+            Some(next) => {
+                assert!(next > offset, "next cursor must advance");
+                offset = next;
+            }
+            None => break,
+        }
+        assert!(pages < 100, "paging must terminate");
+    }
+    collected.sort();
+    assert_eq!(
+        collected, expected,
+        "paging must enumerate exactly the names read_children returns"
+    );
+    assert!(
+        pages >= 2,
+        "three names at limit 2 must take more than one page"
+    );
+
+    assert_eq!(
+        store
+            .read_children_page(&path!("conformance_page_missing"), 0, 2)
+            .expect("read_children_page failed"),
+        None,
+        "read_children_page at a missing path must return None"
+    );
+    assert!(
+        matches!(
+            store.read_children_page(&parent, 0, 0),
+            Err(Error::InvalidArgument { .. })
+        ),
+        "a zero page limit must be an InvalidArgument error"
+    );
+    assert!(
+        matches!(
+            store.read_children_page(&parent, expected.len() + 1, 1),
+            Err(Error::InvalidArgument { .. })
+        ),
+        "a cursor past the end must be an InvalidArgument error"
+    );
+}
+
+/// A `Record::Raw` write is either accepted or rejected with a codec-family
+/// error (`UnsupportedFormat` or `Codec`) — never another error class, never
+/// a panic. A store that accepts raw bytes must still be able to enumerate
+/// children at that path (the `read_children` default cannot inspect raw
+/// bytes, so such a store must override it).
+pub fn check_raw_record_write<S: Store>(store: &mut S) {
+    let p = path!("conformance_raw/value");
+    match store.write(
+        &p,
+        Record::raw(bytes::Bytes::from_static(b"{}"), Format::JSON),
+    ) {
+        Ok(_) => {
+            assert!(
+                store
+                    .read(&p)
+                    .unwrap_or_else(|e| panic!("read {} failed: {}", p, e))
+                    .is_some(),
+                "an accepted raw write must read back as present"
+            );
+            assert!(
+                store.read_children(&p).is_ok(),
+                "a store that serves raw records must enumerate their children"
+            );
+        }
+        Err(Error::UnsupportedFormat(_)) | Err(Error::Codec { .. }) => {
+            assert_eq!(
+                read_value(store, &p),
+                None,
+                "a rejected raw write must leave nothing behind"
+            );
+        }
+        Err(other) => panic!(
+            "raw write must succeed or fail with a codec-family error, got: {}",
+            other
+        ),
+    }
+}
+
 /// Writing `Value::Null` deletes the node and its entire subtree, without
 /// touching siblings whose names merely share a string prefix.
 pub fn check_null_write_deletes_subtree<S: Store>(store: &mut S) {
@@ -230,5 +346,36 @@ mod tests {
     #[test]
     fn memory_store_is_conformant() {
         check_conventions(&mut MemoryStore::new());
+    }
+
+    #[test]
+    fn raw_serving_store_passes_raw_check() {
+        use crate::test_support::RawMapStore;
+        use crate::{Path, Reader};
+
+        /// A raw-holding store that honours the children contract by
+        /// overriding `read_children`.
+        struct RawListing(RawMapStore);
+        impl Reader for RawListing {
+            fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
+                self.0.read(from)
+            }
+            fn read_children(&mut self, from: &Path) -> Result<Option<Vec<String>>, Error> {
+                Ok(self.0.read(from)?.map(|_| Vec::new()))
+            }
+        }
+        impl crate::Writer for RawListing {
+            fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
+                self.0.write(to, data)
+            }
+        }
+        check_raw_record_write(&mut RawListing(RawMapStore::new()));
+    }
+
+    #[test]
+    #[should_panic(expected = "must enumerate their children")]
+    fn raw_store_without_children_override_fails_raw_check() {
+        use crate::test_support::RawMapStore;
+        check_raw_record_write(&mut RawMapStore::new());
     }
 }

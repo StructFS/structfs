@@ -1,114 +1,38 @@
-//! Bridges between LL and Core layers.
+//! Bridge from the Core layer down to the LL layer.
 //!
-//! These adapters allow using LL stores from the Core layer and vice versa.
-//!
-//! # LL → Core Bridge
-//!
-//! Wrap an `LLStore` to get a Core `Store`:
-//!
-//! ```rust,ignore
-//! let ll_store = SomeLLStore::new();
-//! let core_store = LLToCore::new(ll_store, Format::JSON);
-//! // Now use core_store as a Reader/Writer
-//! ```
-//!
-//! # Core → LL Bridge
-//!
-//! Wrap a Core `Store` to get an `LLStore`:
+//! [`CoreToLL`] wraps a Core `Store` so it can be driven through the
+//! byte-only `LLReader`/`LLWriter` interface — the shape a wasm or wire
+//! boundary speaks:
 //!
 //! ```rust,ignore
 //! let core_store = SomeCoreStore::new();
 //! let ll_store = CoreToLL::new(core_store, JsonCodec, Format::JSON);
 //! // Now use ll_store as an LLReader/LLWriter
 //! ```
+//!
+//! Core errors crossing the bridge become `LLError::Protocol` with one of
+//! the [`protocol`] codes.
 
 use bytes::Bytes;
 use structfs_ll_store::{LLError, LLPath, LLReader, LLWriter};
 
-use crate::{Codec, Error, Format, Path, PathError, Reader, Record, Writer};
+use crate::{Codec, Error, Format, Path, Reader, Record, Writer};
 
-/// Adapts an LL store to the Core Store interface.
-///
-/// This bridge:
-/// - Converts `&[&[u8]]` paths to validated `Path`
-/// - Wraps returned bytes as `Record::Raw` with a format hint
-/// - Serializes `Record` to bytes for writes
-pub struct LLToCore<T, C> {
-    inner: T,
-    codec: C,
-    /// Format hint for data read from LL layer.
-    read_format: Format,
-    /// Format to use when serializing for LL writes.
-    write_format: Format,
+/// `LLError::Protocol` codes emitted by [`CoreToLL`].
+pub mod protocol {
+    /// The byte path is not a valid `Path` (non-UTF-8 or bad component).
+    pub const INVALID_PATH: u32 = 1;
+    /// The wrapped Core store returned an error.
+    pub const STORE_ERROR: u32 = 2;
+    /// The record could not be encoded into the bridge's format.
+    pub const ENCODE_ERROR: u32 = 3;
 }
 
-impl<T, C> LLToCore<T, C> {
-    /// Create a new bridge with the same format for reads and writes.
-    pub fn new(inner: T, codec: C, format: Format) -> Self {
-        Self {
-            inner,
-            codec,
-            read_format: format.clone(),
-            write_format: format,
-        }
-    }
-
-    /// Create a new bridge with different formats for reads and writes.
-    pub fn with_formats(inner: T, codec: C, read_format: Format, write_format: Format) -> Self {
-        Self {
-            inner,
-            codec,
-            read_format,
-            write_format,
-        }
-    }
-
-    /// Get a reference to the inner LL store.
-    pub fn inner(&self) -> &T {
-        &self.inner
-    }
-
-    /// Get a mutable reference to the inner LL store.
-    pub fn inner_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-
-    /// Unwrap, returning the inner LL store.
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-}
-
-impl<T: LLReader, C: Send + Sync> Reader for LLToCore<T, C> {
-    fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-        // Borrow the validated byte components (free widening, no copy).
-        let components: Vec<&[u8]> = from.as_ll().as_byte_refs();
-
-        // Read via LL
-        let bytes = match self.inner.ll_read(&components) {
-            Ok(Some(b)) => b,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(Error::Ll(e)),
-        };
-
-        // Wrap as Raw record with our format hint
-        Ok(Some(Record::raw(bytes, self.read_format.clone())))
-    }
-}
-
-impl<T: LLWriter, C: Codec + Send + Sync> Writer for LLToCore<T, C> {
-    fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-        // Get bytes from Record (serialize if Parsed)
-        let bytes = data.into_bytes(&self.codec, &self.write_format)?;
-
-        // Borrow the validated byte components (free widening, no copy).
-        let components: Vec<&[u8]> = to.as_ll().as_byte_refs();
-
-        // Write via LL
-        let result_path = self.inner.ll_write(&components, bytes).map_err(Error::Ll)?;
-
-        // Convert result back to Path
-        path_from_ll(&result_path)
+/// Wrap any displayable error as an `LLError::Protocol` with `code`.
+fn protocol_error(code: u32, error: impl std::fmt::Display) -> LLError {
+    LLError::Protocol {
+        code,
+        detail: Bytes::from(error.to_string()),
     }
 }
 
@@ -152,177 +76,59 @@ impl<T, C> CoreToLL<T, C> {
 
 impl<T: Reader, C: Codec + Send + Sync> LLReader for CoreToLL<T, C> {
     fn ll_read(&mut self, path: &[&[u8]]) -> Result<Option<Bytes>, LLError> {
-        // Convert &[&[u8]] to Path
-        let path = path_from_bytes(path).map_err(|e| LLError::Protocol {
-            code: 1,
-            detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
-        })?;
+        let path = path_from_bytes(path).map_err(|e| protocol_error(protocol::INVALID_PATH, e))?;
 
-        // Read via Core
         let record = match self.inner.read(&path) {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(None),
-            Err(e) => {
-                return Err(LLError::Protocol {
-                    code: 2,
-                    detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
-                })
-            }
+            Err(e) => return Err(protocol_error(protocol::STORE_ERROR, e)),
         };
 
-        // Convert to bytes
-        let bytes =
-            record
-                .into_bytes(&self.codec, &self.format)
-                .map_err(|e| LLError::Protocol {
-                    code: 3,
-                    detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
-                })?;
-
-        Ok(Some(bytes))
+        record
+            .into_bytes(&self.codec, &self.format)
+            .map(Some)
+            .map_err(|e| protocol_error(protocol::ENCODE_ERROR, e))
     }
 }
 
 impl<T: Writer, C: Send + Sync> LLWriter for CoreToLL<T, C> {
     fn ll_write(&mut self, path: &[&[u8]], data: Bytes) -> Result<LLPath, LLError> {
-        // Convert path
-        let path = path_from_bytes(path).map_err(|e| LLError::Protocol {
-            code: 1,
-            detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
-        })?;
+        let path = path_from_bytes(path).map_err(|e| protocol_error(protocol::INVALID_PATH, e))?;
 
-        // Wrap data as Raw record
         let record = Record::raw(data, self.format.clone());
 
-        // Write via Core
         let result_path = self
             .inner
             .write(&path, record)
-            .map_err(|e| LLError::Protocol {
-                code: 2,
-                detail: Bytes::copy_from_slice(e.to_string().as_bytes()),
-            })?;
+            .map_err(|e| protocol_error(protocol::STORE_ERROR, e))?;
 
         // Widen the validated result path to LL (free — no component copy).
         Ok(result_path.into_ll())
     }
 }
 
-/// Convert LL path components to Core Path.
-pub(crate) fn path_from_bytes(components: &[&[u8]]) -> Result<Path, PathError> {
-    let mut strings = Vec::with_capacity(components.len());
-    for (i, bytes) in components.iter().enumerate() {
-        let s = std::str::from_utf8(bytes).map_err(|_| PathError::InvalidComponent {
-            component: format!("{:?}", bytes),
-            position: i,
-            message: "not valid UTF-8".to_string(),
-        })?;
-        strings.push(s.to_string());
-    }
-    Path::try_from_components(strings)
-}
-
-/// Convert LL path (owned) to Core Path.
-pub(crate) fn path_from_ll(components: &[Bytes]) -> Result<Path, Error> {
-    let refs: Vec<&[u8]> = components.iter().map(|b| b.as_ref()).collect();
-    path_from_bytes(&refs).map_err(Error::Path)
+/// Convert borrowed LL path components to a validated Core `Path`.
+///
+/// One copy (borrowed slices into owned `Bytes`), then the single
+/// narrowing point `Path::validate` — no intermediate `String`s.
+pub(crate) fn path_from_bytes(components: &[&[u8]]) -> Result<Path, Error> {
+    let ll: LLPath = components
+        .iter()
+        .map(|b| Bytes::copy_from_slice(b))
+        .collect();
+    Path::validate(ll).map_err(Error::Path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::RawMapStore;
     use crate::{path, NoCodec};
-    use std::collections::HashMap;
-
-    /// Simple in-memory LL store for testing.
-    struct TestLLStore {
-        data: HashMap<Vec<Vec<u8>>, Bytes>,
-    }
-
-    impl TestLLStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
-        }
-    }
-
-    impl LLReader for TestLLStore {
-        fn ll_read(&mut self, path: &[&[u8]]) -> Result<Option<Bytes>, LLError> {
-            let key: Vec<Vec<u8>> = path.iter().map(|c| c.to_vec()).collect();
-            Ok(self.data.get(&key).cloned())
-        }
-    }
-
-    impl LLWriter for TestLLStore {
-        fn ll_write(&mut self, path: &[&[u8]], data: Bytes) -> Result<LLPath, LLError> {
-            let key: Vec<Vec<u8>> = path.iter().map(|c| c.to_vec()).collect();
-            self.data.insert(key, data);
-            Ok(path.iter().map(|c| Bytes::copy_from_slice(c)).collect())
-        }
-    }
-
-    /// Simple in-memory Core store for testing.
-    struct TestCoreStore {
-        data: HashMap<Path, Record>,
-    }
-
-    impl TestCoreStore {
-        fn new() -> Self {
-            Self {
-                data: HashMap::new(),
-            }
-        }
-    }
-
-    impl Reader for TestCoreStore {
-        fn read(&mut self, from: &Path) -> Result<Option<Record>, Error> {
-            Ok(self.data.get(from).cloned())
-        }
-    }
-
-    impl Writer for TestCoreStore {
-        fn write(&mut self, to: &Path, data: Record) -> Result<Path, Error> {
-            self.data.insert(to.clone(), data);
-            Ok(to.clone())
-        }
-    }
-
-    #[test]
-    fn ll_to_core_read() {
-        let mut ll = TestLLStore::new();
-        ll.data.insert(
-            vec![b"users".to_vec(), b"123".to_vec()],
-            Bytes::from_static(b"hello"),
-        );
-
-        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
-
-        let result = bridge.read(&path!("users/123")).unwrap();
-        assert!(result.is_some());
-        assert_eq!(
-            result.unwrap().as_bytes(),
-            Some(&Bytes::from_static(b"hello"))
-        );
-    }
-
-    #[test]
-    fn ll_to_core_write() {
-        let ll = TestLLStore::new();
-        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
-
-        let record = Record::raw(Bytes::from_static(b"data"), Format::OCTET_STREAM);
-        bridge.write(&path!("test/path"), record).unwrap();
-
-        // Verify it was written
-        let key = vec![b"test".to_vec(), b"path".to_vec()];
-        assert!(bridge.inner().data.contains_key(&key));
-    }
 
     #[test]
     fn core_to_ll_read() {
-        let mut core = TestCoreStore::new();
-        core.data.insert(
+        let mut core = RawMapStore::new();
+        core.insert(
             path!("users/123"),
             Record::raw(Bytes::from_static(b"hello"), Format::OCTET_STREAM),
         );
@@ -335,87 +141,57 @@ mod tests {
 
     #[test]
     fn core_to_ll_write() {
-        let core = TestCoreStore::new();
+        let core = RawMapStore::new();
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
-        bridge
+        let result = bridge
             .ll_write(&[b"test", b"path"], Bytes::from_static(b"data"))
             .unwrap();
+        assert_eq!(result.len(), 2);
 
         // Verify it was written
-        assert!(bridge.inner().data.contains_key(&path!("test/path")));
+        assert!(bridge.inner().contains(&path!("test/path")));
     }
 
     #[test]
     fn invalid_utf8_path_rejected() {
-        let core = TestCoreStore::new();
+        let core = RawMapStore::new();
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
         // Invalid UTF-8 sequence
         let result = bridge.ll_read(&[&[0xFF, 0xFE]]);
-        assert!(matches!(result, Err(LLError::Protocol { .. })));
-    }
-
-    #[test]
-    fn ll_to_core_with_formats() {
-        let ll = TestLLStore::new();
-        let bridge = LLToCore::with_formats(ll, NoCodec, Format::JSON, Format::OCTET_STREAM);
-        assert_eq!(bridge.read_format, Format::JSON);
-        assert_eq!(bridge.write_format, Format::OCTET_STREAM);
-    }
-
-    #[test]
-    fn ll_to_core_inner_methods() {
-        let ll = TestLLStore::new();
-        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
-
-        // Test inner()
-        assert!(bridge.inner().data.is_empty());
-
-        // Test inner_mut()
-        bridge
-            .inner_mut()
-            .data
-            .insert(vec![b"key".to_vec()], Bytes::from_static(b"value"));
-        assert!(!bridge.inner().data.is_empty());
-
-        // Test into_inner()
-        let ll = bridge.into_inner();
-        assert!(!ll.data.is_empty());
+        assert!(matches!(
+            result,
+            Err(LLError::Protocol {
+                code: protocol::INVALID_PATH,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn core_to_ll_inner_methods() {
-        let core = TestCoreStore::new();
+        let core = RawMapStore::new();
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
         // Test inner()
-        assert!(bridge.inner().data.is_empty());
+        assert!(!bridge.inner().contains(&path!("key")));
 
         // Test inner_mut()
-        bridge.inner_mut().data.insert(
+        bridge.inner_mut().insert(
             path!("key"),
             Record::raw(Bytes::from_static(b"value"), Format::OCTET_STREAM),
         );
-        assert!(!bridge.inner().data.is_empty());
+        assert!(bridge.inner().contains(&path!("key")));
 
         // Test into_inner()
         let core = bridge.into_inner();
-        assert!(!core.data.is_empty());
-    }
-
-    #[test]
-    fn ll_to_core_read_none() {
-        let ll = TestLLStore::new();
-        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
-
-        let result = bridge.read(&path!("nonexistent")).unwrap();
-        assert!(result.is_none());
+        assert!(core.contains(&path!("key")));
     }
 
     #[test]
     fn core_to_ll_read_none() {
-        let core = TestCoreStore::new();
+        let core = RawMapStore::new();
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
         let result = bridge.ll_read(&[b"nonexistent"]).unwrap();
@@ -424,12 +200,33 @@ mod tests {
 
     #[test]
     fn core_to_ll_write_invalid_utf8() {
-        let core = TestCoreStore::new();
+        let core = RawMapStore::new();
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
         // Invalid UTF-8 sequence
         let result = bridge.ll_write(&[&[0xFF, 0xFE]], Bytes::from_static(b"data"));
-        assert!(matches!(result, Err(LLError::Protocol { code: 1, .. })));
+        assert!(matches!(
+            result,
+            Err(LLError::Protocol {
+                code: protocol::INVALID_PATH,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn core_to_ll_encode_error() {
+        // A parsed record with NoCodec cannot be encoded for the wire.
+        let mut core = RawMapStore::new();
+        core.insert(path!("parsed"), Record::parsed(crate::Value::from(1i64)));
+        let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
+        assert!(matches!(
+            bridge.ll_read(&[b"parsed"]),
+            Err(LLError::Protocol {
+                code: protocol::ENCODE_ERROR,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -451,17 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn path_from_ll_works() {
-        let ll_path = vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")];
-        let result = path_from_ll(&ll_path).unwrap();
-        assert_eq!(result.to_string(), "a/b");
-    }
-
-    #[test]
-    fn path_from_ll_invalid_utf8() {
-        let ll_path = vec![Bytes::from_static(&[0xFF, 0xFE])];
-        let result = path_from_ll(&ll_path);
-        assert!(result.is_err());
+    fn path_from_bytes_invalid_utf8() {
+        let result = path_from_bytes(&[&[0xFF, 0xFE]]);
+        assert!(matches!(result, Err(Error::Path(_))));
     }
 
     /// Store that always returns an error on read.
@@ -485,7 +274,13 @@ mod tests {
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
         let result = bridge.ll_read(&[b"any"]);
-        assert!(matches!(result, Err(LLError::Protocol { code: 2, .. })));
+        assert!(matches!(
+            result,
+            Err(LLError::Protocol {
+                code: protocol::STORE_ERROR,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -494,49 +289,14 @@ mod tests {
         let mut bridge = CoreToLL::new(core, NoCodec, Format::OCTET_STREAM);
 
         let result = bridge.ll_write(&[b"any"], Bytes::from_static(b"data"));
-        assert!(matches!(result, Err(LLError::Protocol { code: 2, .. })));
-    }
-
-    /// LL store that always returns an error.
-    struct ErrorLLStore;
-
-    impl LLReader for ErrorLLStore {
-        fn ll_read(&mut self, _path: &[&[u8]]) -> Result<Option<Bytes>, LLError> {
-            Err(LLError::Protocol {
-                code: 99,
-                detail: Bytes::from_static(b"ll error"),
-            })
+        match result {
+            Err(LLError::Protocol { code, detail }) => {
+                assert_eq!(code, protocol::STORE_ERROR);
+                assert!(std::str::from_utf8(&detail)
+                    .unwrap()
+                    .contains("write error"));
+            }
+            other => panic!("expected protocol error, got {:?}", other),
         }
-    }
-
-    impl LLWriter for ErrorLLStore {
-        fn ll_write(&mut self, _path: &[&[u8]], _data: Bytes) -> Result<LLPath, LLError> {
-            Err(LLError::Protocol {
-                code: 99,
-                detail: Bytes::from_static(b"ll write error"),
-            })
-        }
-    }
-
-    #[test]
-    fn ll_to_core_read_error() {
-        let ll = ErrorLLStore;
-        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
-
-        let result = bridge.read(&path!("any"));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ll error"));
-    }
-
-    #[test]
-    fn ll_to_core_write_error() {
-        let ll = ErrorLLStore;
-        let mut bridge = LLToCore::new(ll, NoCodec, Format::OCTET_STREAM);
-
-        let result = bridge.write(
-            &path!("any"),
-            Record::raw(Bytes::from_static(b"data"), Format::OCTET_STREAM),
-        );
-        assert!(result.is_err());
     }
 }

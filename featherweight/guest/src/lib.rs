@@ -1,11 +1,14 @@
 //! Featherweight Guest Library — the core-wasm binding
 //! ([spec 11](https://github.com/StructFS/structfs/blob/main/isotope/spec/11-core-wasm-binding.md)).
 //!
-//! This crate is both the Rust guest SDK for the core binding (the
-//! `sdk` module — two imports from the `structfs` module, a
-//! `block_alloc` export, and safe wrappers) and the reference guest: a
-//! kv store served over the Isotope server protocol
-//! ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)).
+//! This crate is the Rust guest SDK for the core binding (the `sdk`
+//! module — two imports from the `structfs` module, a `block_alloc`
+//! export, and safe wrappers). With the `reference-guest` feature it is
+//! also the reference guest: a kv store served over the Isotope server
+//! protocol
+//! ([spec 07](https://github.com/StructFS/structfs/blob/main/isotope/spec/07-server-protocol.md)),
+//! exporting `manifest` and `run`. The feature is off by default so your
+//! own block can export those entry points.
 //!
 //! Build with plain `cargo build --target wasm32-unknown-unknown` — no
 //! componentization, no bindgen. The whole ABI surface is the `sdk`
@@ -13,9 +16,38 @@
 
 /// The core-binding SDK: the entire ABI surface for a Rust guest.
 pub mod sdk {
+    /// Spec 11 status codes, as `HostError::status` reports them.
+    pub mod status {
+        /// Success.
+        pub const OK: i32 = 0;
+        /// Absent (reads only).
+        pub const ABSENT: i32 = 1;
+        /// An operation required a path that does not exist.
+        pub const NOT_FOUND: i32 = -1;
+        /// Permission denied, including unwired paths.
+        pub const PERMISSION_DENIED: i32 = -2;
+        /// The request clashes with existing or concurrent state.
+        pub const CONFLICT: i32 = -3;
+        /// Temporarily unavailable.
+        pub const OVERLOADED: i32 = -4;
+        /// The deadline passed.
+        pub const DEADLINE_EXCEEDED: i32 = -5;
+        /// Cancelled (an interrupted parked read).
+        pub const CANCELLED: i32 = -6;
+        /// The path failed validation.
+        pub const INVALID_PATH: i32 = -7;
+        /// A size, depth, count, or quota limit (including codec limits).
+        pub const RESOURCE_LIMIT: i32 = -8;
+        /// Any other store or codec error.
+        pub const OTHER: i32 = -9;
+        /// The request is malformed independent of store state.
+        pub const INVALID_ARGUMENT: i32 = -10;
+    }
+
     /// Local value errors retain their category; the v1 ABI carries host diagnostics.
     #[cfg(feature = "value-codecs")]
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum ValueError {
         Host(HostError),
         Protocol(String),
@@ -28,7 +60,7 @@ pub mod sdk {
         root: &structfs_serde_store::Path,
         codec: &structfs_serde_store::ValueCodec,
     ) -> Result<Vec<structfs_profiles::Declaration>, ValueError> {
-        let path = root.join(&structfs_serde_store::Path::parse("meta/profiles").unwrap());
+        let path = root.join(&structfs_serde_store::path!("meta/profiles"));
         let value = read_value(&path.to_string(), codec)?
             .ok_or_else(|| ValueError::Protocol("profile discovery unavailable".into()))?;
         structfs_serde_store::from_value(value).map_err(ValueError::Codec)
@@ -67,13 +99,16 @@ pub mod sdk {
 
     /// Optional versioned codec detail. Unknown kind strings remain available.
     #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+    #[non_exhaustive]
     pub struct CodecDiagnostic {
         pub kind: String,
         pub operation: Option<String>,
         pub format: String,
     }
     /// ABI status category and diagnostic, preserved without string matching.
+    /// Built by the SDK from a host reply ([`HostError::from_diagnostic`]).
     #[derive(Clone, Debug, PartialEq, Eq)]
+    #[non_exhaustive]
     pub struct HostError {
         pub status: i32,
         pub message: String,
@@ -111,6 +146,10 @@ pub mod sdk {
     impl std::error::Error for HostError {}
 
     /// The ret record (spec 11): `{ptr, len}`, little-endian u32s.
+    ///
+    /// Deliberately exhaustive: this is a fixed `#[repr(C)]` wire layout that
+    /// guest exports fill field by field, so a new field would be an ABI
+    /// version change, not an additive one.
     #[repr(C)]
     pub struct Ret {
         pub ptr: u32,
@@ -160,8 +199,8 @@ pub mod sdk {
         let mut ret = Ret { ptr: 0, len: 0 };
         let status = unsafe { read(path.as_ptr(), path.len() as i32, &mut ret) };
         match status {
-            0 => Ok(Some(take(ret))),
-            1 => Ok(None),
+            status::OK => Ok(Some(take(ret))),
+            status::ABSENT => Ok(None),
             _ => Err(HostError::from_diagnostic(status, message(ret))),
         }
     }
@@ -179,7 +218,7 @@ pub mod sdk {
             )
         };
         match status {
-            0 => Ok(message(ret)),
+            status::OK => Ok(message(ret)),
             _ => Err(HostError::from_diagnostic(status, message(ret))),
         }
     }
@@ -325,5 +364,26 @@ mod codec_diagnostic_tests {
         let error = HostError::from_diagnostic(-9, "old diagnostic".into());
         assert_eq!(error.message, "old diagnostic");
         assert!(error.codec.is_none());
+    }
+
+    #[test]
+    fn status_codes_match_spec_11() {
+        use super::sdk::status::*;
+        assert_eq!(
+            [
+                NOT_FOUND,
+                PERMISSION_DENIED,
+                CONFLICT,
+                OVERLOADED,
+                DEADLINE_EXCEEDED,
+                CANCELLED,
+                INVALID_PATH,
+                RESOURCE_LIMIT,
+                OTHER,
+                INVALID_ARGUMENT
+            ],
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10]
+        );
+        assert_eq!((OK, ABSENT), (0, 1));
     }
 }

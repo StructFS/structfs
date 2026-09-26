@@ -1,6 +1,6 @@
 # Coherent contracts: implementation decisions
 
-The 0.4 revision follows the [holistic plan](../../plans/02-coherent-contracts.md).
+The 0.4 revision follows the [holistic plan](../history/plans/02-coherent-contracts.md).
 Compatibility is not a constraint. Isotope's exposed store convention does not
 constrain its implementation data structures.
 
