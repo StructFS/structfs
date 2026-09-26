@@ -1,5 +1,5 @@
 {
-  "verified_at_utc": "2026-09-15T01:38:34Z",
+  "verified_at_utc": "2026-09-16T12:28:38Z",
   "source": "https://index.crates.io",
   "packages": {
     "namecode": {
@@ -8,79 +8,79 @@
     },
     "structfs-ll-store": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-path-validation": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-path-macro": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-core-store": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-handles": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-serde-store": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-service": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "featherweight-wasi": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-json-store": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-state": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "featherweight-runtime": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "featherweight-component": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "featherweight": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-profiles": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "featherweight-guest": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-http": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-sys": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     },
     "structfs-repl": {
       "version": "0.4.0",
-      "status": "unpublished"
+      "status": "published"
     }
   }
 }
